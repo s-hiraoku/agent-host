@@ -35,6 +35,10 @@ export class AgentRegistry {
     return this.list();
   }
 
+  async close() {
+    await Promise.allSettled([...this.#adapters.values()].map((adapter) => adapter.close?.()));
+  }
+
   async action(id, action, payload) {
     const agent = this.#agents.get(id);
     if (!agent) return { ok: false, agentId: id, action, message: "agent not found" };
@@ -50,8 +54,8 @@ export class AgentRegistry {
     switch (action) {
       case "prompt": result = await adapter.prompt(agent, String(payload?.text ?? "")); break;
       case "send-keys": result = await adapter.sendKeys(agent, payload?.keys ?? []); break;
-      case "approve": result = await adapter.approve(agent); break;
-      case "reject": result = await adapter.reject(agent); break;
+      case "approve": result = await adapter.approve(agent, payload); break;
+      case "reject": result = await adapter.reject(agent, payload); break;
       case "interrupt": result = await adapter.interrupt(agent); break;
       case "focus": result = await adapter.focus(agent); break;
       case "read": result = await adapter.read(agent); break;
