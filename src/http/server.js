@@ -54,6 +54,7 @@ export function createAgentServer(registry, options) {
     async stop() {
       if (timer) clearInterval(timer);
       await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+      await registry.close?.();
     },
   };
 }
