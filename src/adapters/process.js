@@ -41,7 +41,7 @@ export class ProcessAdapter {
       const tty = match[3] === "?" || match[3] === "??" ? undefined : match[3];
       const command = match[4];
       const known = KNOWN.find(([pattern]) => pattern.test(command));
-      if (!known || pid === process.pid || command.includes("agent-host")) continue;
+      if (!known || pid === process.pid || command.includes("agent-host") || command.includes("codex app-server --listen stdio://")) continue;
       const provider = known[1];
       const cwd = await cwdFor(pid);
       agents.push({
