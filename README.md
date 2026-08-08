@@ -83,7 +83,7 @@ Requires Node.js 22+.
 
 ```bash
 npm install
-npm run dev
+npm start
 ```
 
 Then:
@@ -96,9 +96,14 @@ curl -N http://127.0.0.1:4777/v1/events
 CLI:
 
 ```bash
-npm run dev -- list
-# after build
-node dist/cli.js list
+npm run list
+node src/cli.js action '<agent-id>' prompt '{"text":"Fix the test"}'
+```
+
+Checks:
+
+```bash
+npm run check
 ```
 
 ## Adapter tiers
