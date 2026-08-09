@@ -310,7 +310,9 @@ test("ignores a late timed-out result and retries after its flight settles", asy
   await registry.refresh();
   assert.equal(registry.adapterHealth()[0].status, "timeout");
   const eventCountAfterTimeout = events.length;
+  const repeatedRefresh = registry.refresh();
   firstGate.resolve([{ id: "late:stale", provider: "test", source: "late", name: "stale", status: "idle", capabilities: {} }]);
+  await repeatedRefresh;
   await nextTurn();
   assert.deepEqual(registry.list(), []);
   assert.equal(registry.adapterHealth()[0].status, "timeout");
