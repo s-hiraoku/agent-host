@@ -5,17 +5,17 @@ const execFileAsync = promisify(execFile);
 const STATES = new Set(["idle", "working", "blocked", "done"]);
 const mapStatus = (value) => STATES.has(value) ? value : "unknown";
 
-async function run(args) {
-  const { stdout } = await execFileAsync("herdr", args, { maxBuffer: 10 * 1024 * 1024 });
+async function run(args, options = {}) {
+  const { stdout } = await execFileAsync("herdr", args, { maxBuffer: 10 * 1024 * 1024, signal: options.signal });
   return JSON.parse(stdout);
 }
 
 export class HerdrAdapter {
   id = "herdr";
 
-  async discover() {
+  async discover(options = {}) {
     try {
-      const payload = await run(["api", "snapshot"]);
+      const payload = await run(["api", "snapshot"], options);
       const result = payload.result ?? payload;
       const rawAgents = result.agents ?? result.snapshot?.agents ?? [];
       const now = new Date().toISOString();

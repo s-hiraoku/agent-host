@@ -49,10 +49,12 @@ export class CodexAdapter {
     this.#client.onNotification?.((message) => this.#onNotification(message));
   }
 
-  async discover() {
+  async discover(options = {}) {
     try {
+      options.signal?.throwIfAborted();
       await this.#ensureStarted();
-      const threads = await this.#listThreads();
+      options.signal?.throwIfAborted();
+      const threads = await this.#listThreads(options.signal);
       const now = new Date().toISOString();
       return threads.map((thread) => {
         const approvals = this.#approvalsForThread(thread.id);
@@ -176,7 +178,7 @@ export class CodexAdapter {
     this.#started = true;
   }
 
-  async #listThreads() {
+  async #listThreads(signal) {
     const all = [];
     let cursor = null;
     let pages = 0;
@@ -186,7 +188,7 @@ export class CodexAdapter {
         limit: 100,
         sortKey: "recency_at",
         sortDirection: "desc",
-      });
+      }, { signal });
       all.push(...(result?.data ?? []));
       cursor = result?.nextCursor ?? null;
       pages += 1;

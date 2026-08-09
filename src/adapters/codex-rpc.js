@@ -99,24 +99,36 @@ export class CodexRpcClient {
 
   async request(method, params, options = {}) {
     if (!this.#started && method !== "initialize") await this.start();
+    options.signal?.throwIfAborted();
     const id = `ah-${this.#nextId++}`;
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const message = { id, method };
     if (params !== undefined) message.params = params;
 
     return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+      };
+      const onAbort = () => {
+        this.#pending.delete(id);
+        cleanup();
+        reject(options.signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+      };
       const timer = setTimeout(() => {
         this.#pending.delete(id);
+        cleanup();
         reject(new Error(`${method} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       timer.unref?.();
       this.#pending.set(id, {
-        resolve: (value) => { clearTimeout(timer); resolve(value); },
-        reject: (error) => { clearTimeout(timer); reject(error); },
+        resolve: (value) => { cleanup(); resolve(value); },
+        reject: (error) => { cleanup(); reject(error); },
       });
+      options.signal?.addEventListener("abort", onAbort, { once: true });
       try { this.#write(message); }
       catch (error) {
-        clearTimeout(timer);
+        cleanup();
         this.#pending.delete(id);
         reject(error);
       }

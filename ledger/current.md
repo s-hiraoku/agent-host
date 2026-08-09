@@ -25,12 +25,14 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 
 ## Current step
 
-- Branch: `codex/issue-2-api-contract`
-- Issue: https://github.com/s-hiraoku/agent-host/issues/2
-- Next: commit the verified implementation, open a ready-for-review PR, and monitor CI/review feedback.
+- Branch: `codex/issue-3-refresh-health`
+- Issue: https://github.com/s-hiraoku/agent-host/issues/3
+- Base PR: https://github.com/s-hiraoku/agent-host/pull/12
+- Next: commit the verified implementation and open a ready-for-review stacked PR against the Issue #2 branch.
 
 ## Progress notes
 
 - 2026-08-09: Synchronized local `main` to merge commit `8baf8a1`, created the Issue #2 branch, and confirmed the baseline `npm run check` passes with 11 tests.
 - 2026-08-09: Implemented the Issue #2 v1 summary/detail/action/error/event contracts, semantic revisions, bounded pagination and filters, documentation, and a 1,000-agent response-size fixture. Adviser completion review identified event coverage, deterministic ordering, an SSE subscription race, maximum-page verification, and compatibility documentation gaps; all were addressed. `npm run check` passes with 16 tests.
 - 2026-08-09: Addressed all initial PR #12 feedback: SSE events now use controlled agent views, transient adapter failures retain last-known agents, malformed IDs and oversized bodies return stable 4xx errors, cwd cursor filters are normalized, and scale assertions are recorded. `npm run check` passes with 17 tests.
+- 2026-08-09: Opened ready PR #12 for Issue #2. Implemented Issue #3 with single-flight concurrent refreshes, incremental healthy-adapter updates, bounded timeout/cancellation, retained last-good agents, adapter health/readiness APIs and events, prompt HTTP startup, and safe shutdown. Adviser review identified aggregate-apply latency and late-completion proof gaps; incremental apply plus timeout/shutdown/retry/listener-cleanup tests addressed them. After rebasing the PR #12 feedback fixes, `npm run check` passes with 26 tests.

@@ -114,6 +114,7 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
   const registry = new AgentRegistry([adapter]);
   const server = createAgentServer(registry, { host: "127.0.0.1", port: 0, refreshMs: 60_000 });
   const address = await server.start();
+  await registry.refresh();
   const base = `http://127.0.0.1:${address.port}`;
 
   try {
@@ -233,6 +234,7 @@ test("keeps the default list response bounded with 1,000 agents", async () => {
   const registry = new AgentRegistry([adapter]);
   const server = createAgentServer(registry, { host: "127.0.0.1", port: 0, refreshMs: 60_000 });
   const address = await server.start();
+  await registry.refresh();
 
   try {
     const response = await fetch(`http://127.0.0.1:${address.port}/v1/agents`);
@@ -252,6 +254,56 @@ test("keeps the default list response bounded with 1,000 agents", async () => {
     assert.ok(maximumPage.page.nextCursor);
     assert.ok(Buffer.byteLength(maximumBody) < 400_000, `response was ${Buffer.byteLength(maximumBody)} bytes`);
     assert.equal(maximumBody.includes(largeMetadata), false);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("serves liveness during initial discovery and exposes degraded readiness", { timeout: 2_000 }, async () => {
+  let calls = 0;
+  let active = 0;
+  let maxActive = 0;
+  const hanging = {
+    id: "hanging",
+    discover({ signal }) {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      return new Promise((resolve) => signal.addEventListener("abort", () => {
+        active -= 1;
+        resolve([]);
+      }, { once: true }));
+    },
+  };
+  const registry = new AgentRegistry([hanging], { adapterTimeoutMs: 500 });
+  const server = createAgentServer(registry, { host: "127.0.0.1", port: 0, refreshMs: 5 });
+  const address = await server.start();
+  const base = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const liveness = await fetch(`${base}/health`);
+    assert.equal(liveness.status, 200);
+    assert.equal((await liveness.json()).live, true);
+
+    const loading = await fetch(`${base}/ready`);
+    assert.equal(loading.status, 503);
+    assert.equal((await loading.json()).initialLoading, true);
+
+    await registry.refresh();
+    const readiness = await fetch(`${base}/ready`);
+    const readyBody = await readiness.json();
+    assert.equal(readiness.status, 200);
+    assert.equal(readyBody.ready, true);
+    assert.equal(readyBody.degraded, true);
+
+    const adapters = await (await fetch(`${base}/v1/adapters`)).json();
+    assert.equal(adapters.adapters[0].id, "hanging");
+    assert.equal(adapters.adapters[0].status, "timeout");
+    assert.equal(adapters.adapters[0].error.code, "discovery_timeout");
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.ok(calls >= 1);
+    assert.equal(maxActive, 1);
   } finally {
     await server.stop();
   }
