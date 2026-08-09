@@ -84,3 +84,37 @@ test("Codex RPC isolates notification handler failures", async () => {
   assert.equal(received, 1);
   await client.close();
 });
+
+test("Codex RPC cleans up AbortSignal listeners on success, error, and cancellation", async () => {
+  const client = new CodexRpcClient({
+    spawn() {
+      return fakeProcess((child, message) => {
+        if (message.method === "initialize") {
+          child.stdout.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+        } else if (message.method === "thread/list") {
+          child.stdout.write(`${JSON.stringify({ id: message.id, result: { data: [] } })}\n`);
+        } else if (message.method === "fail") {
+          child.stdout.write(`${JSON.stringify({ id: message.id, error: { message: "failed" } })}\n`);
+        }
+      });
+    },
+  });
+  await client.start();
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const originalAdd = signal.addEventListener.bind(signal);
+  const originalRemove = signal.removeEventListener.bind(signal);
+  let additions = 0;
+  let removals = 0;
+  signal.addEventListener = (...args) => { additions += 1; return originalAdd(...args); };
+  signal.removeEventListener = (...args) => { removals += 1; return originalRemove(...args); };
+
+  await client.request("thread/list", {}, { signal, timeoutMs: 10_000 });
+  await assert.rejects(client.request("fail", {}, { signal, timeoutMs: 10_000 }), /failed/);
+  const request = client.request("hang", {}, { signal: controller.signal, timeoutMs: 10_000 });
+  controller.abort();
+  await assert.rejects(request, { name: "AbortError" });
+  assert.equal(additions, 3);
+  assert.equal(removals, 3);
+  await client.close();
+});
