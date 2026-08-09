@@ -58,6 +58,12 @@ POST /v1/agents/:id/focus
 POST /v1/agents/:id/read
 ```
 
+Only `/health` and the aggregate `/ready` probe are unauthenticated. Every `/v1/*`
+request requires `Authorization: Bearer <token>`. Action requests also require
+`Content-Type: application/json` and an 8-128 character `Idempotency-Key`; retries
+with the same key and payload return the original result, while conflicting reuse
+returns `409 idempotency_conflict`. Mutations for one agent execute serially.
+
 `GET /v1/agents` accepts repeatable or comma-separated `provider` and `status`
 filters, plus `cwd`, free-text `q`, `limit`, and an opaque `cursor`. Responses include
 the current snapshot `revision`; a cursor returns `409 stale_cursor` if that snapshot
@@ -155,8 +161,15 @@ normal refresh interval remains configurable with `AGENT_HOST_REFRESH_MS`.
 Then:
 
 ```bash
-curl 'http://127.0.0.1:4777/v1/agents?status=working,blocked&limit=25'
-curl -N http://127.0.0.1:4777/v1/events
+AGENT_HOST_TOKEN="$(tr -d '\n' < "$HOME/.agent-host/token")"
+curl -H "Authorization: Bearer $AGENT_HOST_TOKEN" \
+  'http://127.0.0.1:4777/v1/agents?status=working,blocked&limit=25'
+curl -N -H "Authorization: Bearer $AGENT_HOST_TOKEN" \
+  http://127.0.0.1:4777/v1/events
+curl -X POST -H "Authorization: Bearer $AGENT_HOST_TOKEN" \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: prompt-example-0001' \
+  -d '{"text":"Fix the test"}' \
+  http://127.0.0.1:4777/v1/agents/codex%3Athr_123/prompt
 ```
 
 CLI:
@@ -272,14 +285,30 @@ Use native/local protocols where available. Accessibility automation should be a
 
 ## Security
 
-- Binds to `127.0.0.1` by default.
+- Binds to loopback only. `AGENT_HOST_BIND` accepts `127.0.0.1`, `localhost`, or
+  `::1`; remote/LAN binding is rejected.
+- Set `AGENT_HOST_API_TOKEN` to supply a token. Otherwise a new 256-bit token is
+  generated before listening and atomically written to `~/.agent-host/token` with
+  owner-only permissions. Override that path with `AGENT_HOST_TOKEN_FILE`. The token
+  itself is never written to service logs.
+- All `/v1/*` routes require the bearer token. Do not commit it, put it in dashboard
+  source, or include it in URLs. A browser dashboard should receive it at runtime
+  through a user prompt or a local backend/session and keep it out of persistent web
+  assets.
+- Browser requests must have an allowed Host and Origin. Cross-origin access is
+  denied by default. Set `AGENT_HOST_ALLOWED_ORIGINS` to a comma-separated list of
+  exact dashboard origins such as `http://127.0.0.1:3000`; only those origins receive
+  CORS preflight permission for Authorization, Content-Type, and Idempotency-Key.
 - Never exposes an action unless the adapter declares it.
 - Codex semantic approvals require a real pending server request ID/context.
-- Remote access and authentication are intentionally out of scope for the first MVP.
+- Attempted and completed authenticated actions emit `audit.action` events containing
+  identifiers and outcome codes, never request bodies, headers, or tokens.
 
 ## References
 
 - Codex app-server: https://github.com/openai/codex/tree/main/codex-rs/app-server
+- Bearer token usage: https://www.rfc-editor.org/rfc/rfc6750
+- Browser CORS: https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS
 - Herdr socket/CLI API: https://herdr.dev/docs/socket-api/
 - Herdr agent automation: https://herdr.dev/docs/agent-automation/
 

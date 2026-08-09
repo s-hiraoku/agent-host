@@ -12,3 +12,7 @@
 - Define readiness as "the bounded initial refresh cycle completed"; adapter failures make readiness degraded but do not make the usable local API permanently unready.
 - Apply each adapter's successful discovery as soon as it completes instead of waiting for the slowest adapter's timeout.
 - Abort cooperative discovery on timeout. Keep a non-cooperative timed-out flight tracked until it settles so refresh timers cannot duplicate it, and ignore its late result.
+- Keep `/health` and aggregate `/ready` public, but require a bearer token for every `/v1/*` route so agent paths and adapter diagnostics are not exposed to other local processes.
+- Reject non-loopback service binding and cross-origin browser requests by default. Allow dashboard origins only through an exact runtime allowlist.
+- Persist an auto-generated token atomically in an owner-only file instead of printing it to service logs.
+- Require an idempotency key on every action, cache in-flight/completed results for a bounded TTL, and serialize actions per agent so dashboard retries and double-clicks cannot duplicate or race mutations.
