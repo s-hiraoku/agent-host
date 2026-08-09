@@ -25,3 +25,14 @@
 - Lifecycle fixtures: cooperative abort, non-cooperative late timeout and shutdown completion suppression, retry after settled timeout, and Codex RPC AbortSignal listener cleanup on success/error/abort.
 - HTTP fixtures: listener-first liveness, initial `503` readiness, degraded `200` readiness, and controlled adapter-health response.
 - Independent review: Adviser (`gpt-5.6-sol`, medium caller to high reviewer) identified aggregate-apply latency, late-result mutation, retry, and cleanup evidence gaps. The implementation was changed to per-adapter incremental apply and all completion checks were added before the final 26-test rerun.
+
+## Issue #4 implementation — 2026-08-09
+
+- Command: `git diff --check && npm run check`
+- Result: pass
+- Tests: 29 passed, 0 failed
+- Authentication fixtures: missing/invalid bearer credentials, protected list/detail/adapter/action routes, and aggregate-only public readiness.
+- Browser-boundary fixtures: exact same-origin and allowlisted-origin success, default-deny and explicitly denied origins, invalid Host, bracketed IPv6 loopback, valid preflight, and disallowed preflight headers.
+- Mutation fixtures: required idempotency keys, identical replay suppression, conflicting payload rejection, per-agent serialization, and stable media/body errors.
+- Audit fixtures: exactly paired authenticated action attempts/completions, no events from rejected unauthenticated or cross-origin requests, and no token or request-body content in events.
+- Independent review: six security specialists reviewed injection, authentication/authorization, secrets, business logic/races, infrastructure/network boundaries, and supply chain. Findings covering public reconnaissance, audit flooding, token logging, IPv6 Host handling, replay/race behavior, and deployment documentation were addressed; injection and supply-chain passes had no findings.

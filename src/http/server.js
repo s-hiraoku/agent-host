@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createHash, randomUUID } from "node:crypto";
 import {
   API_VERSION,
   ContractError,
@@ -8,8 +9,11 @@ import {
   pageAgents,
   parseAgentListQuery,
 } from "../core/contracts.js";
+import { createApiSecurity } from "./security.js";
 
 const MAX_BODY_BYTES = 1_000_000;
+const IDEMPOTENCY_TTL_MS = 5 * 60_000;
+const MAX_IDEMPOTENCY_ENTRIES = 1_000;
 
 async function jsonBody(req) {
   const chunks = [];
@@ -51,16 +55,94 @@ function actionErrorStatus(code) {
   }
 }
 
+function createActionExecutor(registry) {
+  const cache = new Map();
+  const queues = new Map();
+  return async (agentId, action, payload, key) => {
+    if (!/^[A-Za-z0-9._:-]{8,128}$/.test(key ?? "")) {
+      throw new ContractError("invalid_idempotency_key", "Idempotency-Key must be 8-128 safe ASCII characters");
+    }
+    const now = Date.now();
+    for (const [cachedKey, entry] of cache) {
+      if (entry.settled && entry.expiresAt <= now) cache.delete(cachedKey);
+    }
+    const signature = createHash("sha256").update(JSON.stringify({ agentId, action, payload })).digest("base64url");
+    const existing = cache.get(key);
+    if (existing) {
+      if (existing.signature !== signature) {
+        throw new ContractError("idempotency_conflict", "Idempotency-Key was already used for a different request", 409);
+      }
+      return { result: await existing.promise, replayed: true };
+    }
+    if (cache.size >= MAX_IDEMPOTENCY_ENTRIES) {
+      throw new ContractError("idempotency_cache_full", "too many idempotent actions are in progress", 503);
+    }
+
+    const previous = queues.get(agentId) ?? Promise.resolve();
+    const entry = { signature, settled: false, expiresAt: now + IDEMPOTENCY_TTL_MS };
+    entry.promise = previous.catch(() => {}).then(() => registry.action(agentId, action, payload));
+    const tail = entry.promise.catch(() => {}).finally(() => {
+      entry.settled = true;
+      if (queues.get(agentId) === tail) queues.delete(agentId);
+    });
+    queues.set(agentId, tail);
+    cache.set(key, entry);
+    return { result: await entry.promise, replayed: false };
+  };
+}
+
 export function createAgentServer(registry, options) {
   const eventResponses = new Set();
+  const security = createApiSecurity(options);
+  const executeAction = createActionExecutor(registry);
   const server = createServer(async (req, res) => {
+    let audit;
+    let auditCompleted = false;
+    const completeAudit = (ok, code, replayed = false) => {
+      if (!audit || auditCompleted) return;
+      auditCompleted = true;
+      registry.events.emit({
+        type: "audit.action",
+        phase: "completed",
+        requestId: audit.requestId,
+        agentId: audit.agentId,
+        action: audit.action,
+        ok,
+        code,
+        replayed,
+        snapshotRevision: registry.revision,
+        at: new Date().toISOString(),
+      });
+    };
     try {
-      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const actionMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(prompt|send-keys|approve|reject|interrupt|focus|read)$/);
+      const requestOrigin = security.validateHost(req, server.address());
+      const origin = security.validateOrigin(req, requestOrigin);
+      security.applyCors(res, origin);
+      if (req.method === "OPTIONS") return security.preflight(req, res, origin);
+      if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) security.authenticate(req, res);
+
+      if (req.method === "POST" && actionMatch) {
+        audit = {
+          requestId: randomUUID(),
+          agentId: decodeSegment(actionMatch[1]),
+          action: actionMatch[2],
+        };
+        registry.events.emit({
+          type: "audit.action",
+          phase: "attempted",
+          ...audit,
+          snapshotRevision: registry.revision,
+          at: new Date().toISOString(),
+        });
+      }
+
       if (req.method === "GET" && url.pathname === "/health") {
         return send(res, 200, { ok: true, live: true, apiVersion: API_VERSION, revision: registry.revision });
       }
       if (req.method === "GET" && url.pathname === "/ready") {
-        const readiness = registry.readiness();
+        const { adapters: _adapters, ...readiness } = registry.readiness();
         return send(res, readiness.ready ? 200 : 503, {
           apiVersion: API_VERSION,
           revision: registry.revision,
@@ -117,14 +199,21 @@ export function createAgentServer(registry, options) {
           ? send(res, 200, { apiVersion: API_VERSION, revision: registry.revision, agent: agentDetail(agent) })
           : sendError(res, 404, "agent_not_found", "agent not found");
       }
-      const actionMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(prompt|send-keys|approve|reject|interrupt|focus|read)$/);
       if (req.method === "POST" && actionMatch) {
-        const agentId = decodeSegment(actionMatch[1]);
-        const result = await registry.action(agentId, actionMatch[2], await jsonBody(req));
+        security.requireJson(req);
+        const agentId = audit.agentId;
+        const payload = await jsonBody(req);
+        const { result, replayed } = await executeAction(
+          agentId,
+          actionMatch[2],
+          payload,
+          req.headers["idempotency-key"],
+        );
+        completeAudit(result.ok, result.code, replayed);
         return result.ok
           ? send(res, 200, {
               apiVersion: API_VERSION,
-              result: actionResult(result, agentId, actionMatch[2]),
+              result: { ...actionResult(result, agentId, actionMatch[2]), replayed },
             })
           : sendError(res, actionErrorStatus(result.code), result.code, result.message, {
               agentId: result.agentId,
@@ -133,6 +222,7 @@ export function createAgentServer(registry, options) {
       }
       sendError(res, 404, "not_found", "route not found");
     } catch (error) {
+      completeAudit(false, error instanceof ContractError ? error.code : "internal_error");
       if (res.headersSent) return res.end();
       sendError(
         res,
@@ -145,6 +235,8 @@ export function createAgentServer(registry, options) {
 
   let timer;
   return {
+    get apiToken() { return security.apiToken; },
+    get generatedToken() { return security.generatedToken; },
     async start() {
       await new Promise((resolve, reject) => {
         server.once("error", reject);
