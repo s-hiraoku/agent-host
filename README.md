@@ -43,7 +43,7 @@ Clients only consume a stable agent model and invoke capabilities exposed by the
 
 ```text
 GET  /health
-GET  /v1/agents
+GET  /v1/agents                        # bounded summaries; default limit 50, maximum 200
 GET  /v1/agents/:id
 POST /v1/refresh
 GET  /v1/events                         # Server-Sent Events
@@ -56,7 +56,47 @@ POST /v1/agents/:id/focus
 POST /v1/agents/:id/read
 ```
 
-An action returns `409` when that agent does not advertise the requested capability.
+`GET /v1/agents` accepts repeatable or comma-separated `provider` and `status`
+filters, plus `cwd`, free-text `q`, `limit`, and an opaque `cursor`. Responses include
+the current snapshot `revision`; a cursor returns `409 stale_cursor` if that snapshot
+changes during pagination. List entries are bounded summaries and never include raw
+provider metadata. Use the detail endpoint for controlled fields such as pending
+approvals.
+
+Provider metadata is intentionally non-semantic and excluded from public responses
+and change detection. Adapter authors must lift every client-visible mutable value
+into the canonical agent fields; otherwise that value will not advance the snapshot
+revision or emit an update event.
+
+All JSON responses include `apiVersion`. Errors use one stable envelope:
+
+```json
+{
+  "apiVersion": "1",
+  "error": {
+    "code": "capability_not_available",
+    "message": "capability approve is not available",
+    "details": { "agentId": "codex:thr_123", "action": "approve" }
+  }
+}
+```
+
+Action request bodies are limited to 1 MB and oversized payloads return
+`413 payload_too_large`.
+
+An action returns `409 capability_not_available` when the agent does not advertise
+the requested capability. SSE events contain `apiVersion`, a monotonically increasing
+`sequence`, and the agent snapshot revision associated with the change.
+Successful actions have stable `ok`, `agentId`, and `action` fields. Their optional
+`data` value is adapter-specific and should only be interpreted by clients that know
+that adapter; provider-neutral clients should treat it as opaque.
+
+The `v1` compatibility boundary covers field names, status values, capability names,
+action result fields, event types, and error codes. New optional fields and new event
+types may be added without changing the version; clients should ignore fields and
+events they do not understand. Removing or renaming a field, changing its meaning or
+type, or removing an existing status, capability, action, event, or error code requires
+a new API version.
 
 Example Codex agent waiting for approval:
 
@@ -76,16 +116,14 @@ Example Codex agent waiting for approval:
     "focus": false,
     "read": true
   },
-  "metadata": {
-    "pendingApprovals": [
-      {
-        "approvalId": "61",
-        "method": "item/commandExecution/requestApproval",
-        "command": "npm test",
-        "reason": "Run tests"
-      }
-    ]
-  }
+  "pendingApprovals": [
+    {
+      "approvalId": "61",
+      "method": "item/commandExecution/requestApproval",
+      "command": "npm test",
+      "reason": "Run tests"
+    }
+  ]
 }
 ```
 
@@ -103,7 +141,7 @@ npm start
 Then:
 
 ```bash
-curl http://127.0.0.1:4777/v1/agents
+curl 'http://127.0.0.1:4777/v1/agents?status=working,blocked&limit=25'
 curl -N http://127.0.0.1:4777/v1/events
 ```
 
@@ -172,6 +210,7 @@ A future transport adapter should attach to an explicitly reachable existing App
 src/
   core/
     types.js       unified model + capabilities
+    contracts.js   versioned HTTP views, filters, pagination, errors
     registry.js    merge discovery + route actions
     event-bus.js   normalized events
   adapters/
