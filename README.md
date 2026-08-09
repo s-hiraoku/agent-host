@@ -81,6 +81,9 @@ All JSON responses include `apiVersion`. Errors use one stable envelope:
 }
 ```
 
+Action request bodies are limited to 1 MB and oversized payloads return
+`413 payload_too_large`.
+
 An action returns `409 capability_not_available` when the agent does not advertise
 the requested capability. SSE events contain `apiVersion`, a monotonically increasing
 `sequence`, and the agent snapshot revision associated with the change.

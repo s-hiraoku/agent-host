@@ -41,10 +41,12 @@ export class AgentRegistry {
 
   async refresh() {
     const next = new Map();
+    const failedAdapters = new Set();
     for (const adapter of this.#adapters.values()) {
       try {
         for (const agent of await adapter.discover()) next.set(agent.id, agent);
       } catch (error) {
+        failedAdapters.add(adapter.id);
         console.error(`[agent-host] adapter ${adapter.id} discovery failed:`, error);
       }
     }
@@ -67,7 +69,10 @@ export class AgentRegistry {
       }
     }
     for (const id of this.#agents.keys()) {
-      if (!next.has(id)) changes.push({ type: "agent.removed", agentId: id, at });
+      if (next.has(id)) continue;
+      const previous = this.#agents.get(id);
+      if (failedAdapters.has(previous.source)) normalized.set(id, previous);
+      else changes.push({ type: "agent.removed", agentId: id, at });
     }
     if (changes.length) this.#revision += 1;
     this.#agents = normalized;

@@ -120,6 +120,32 @@ test("uses agent id as the deterministic list order tie-breaker", async () => {
   assert.deepEqual(registry.list().map((agent) => agent.id), ["same:a", "same:z"]);
 });
 
+test("preserves last-known agents when adapter discovery fails", async () => {
+  let failing = false;
+  const adapter = {
+    id: "sometimes",
+    async discover() {
+      if (failing) throw new Error("temporarily unavailable");
+      return [{ id: "sometimes:1", provider: "test", source: "sometimes", name: "agent", status: "idle", capabilities: {} }];
+    },
+  };
+  const registry = new AgentRegistry([adapter]);
+  const events = [];
+  registry.events.subscribe((event) => events.push(event));
+  await registry.refresh();
+  const first = registry.get("sometimes:1");
+  const eventCount = events.length;
+  const originalError = console.error;
+
+  failing = true;
+  console.error = () => {};
+  try { await registry.refresh(); }
+  finally { console.error = originalError; }
+  assert.equal(registry.get("sometimes:1"), first);
+  assert.equal(registry.revision, 1);
+  assert.equal(events.length, eventCount);
+});
+
 test("returns stable action error codes", async () => {
   const throwing = {
     id: "throwing",

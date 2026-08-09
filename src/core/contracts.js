@@ -61,6 +61,10 @@ export function actionResult(result, agentId, action) {
   });
 }
 
+export function eventView(event) {
+  return event.agent ? { ...event, agent: agentDetail(event.agent) } : { ...event };
+}
+
 export function parseAgentListQuery(searchParams, revision) {
   const rawLimit = searchParams.get("limit");
   const limit = rawLimit === null ? DEFAULT_PAGE_LIMIT : Number(rawLimit);
@@ -76,7 +80,7 @@ export function parseAgentListQuery(searchParams, revision) {
   const filter = {
     providers,
     statuses,
-    cwd: searchParams.get("cwd")?.trim() ?? "",
+    cwd: searchParams.get("cwd")?.trim().toLocaleLowerCase() ?? "",
     query: searchParams.get("q")?.trim().toLocaleLowerCase() ?? "",
   };
   const filterKey = JSON.stringify(filter);
@@ -123,7 +127,7 @@ function values(searchParams, key) {
 function matches(agent, filter) {
   if (filter.providers.length && !filter.providers.includes(agent.provider)) return false;
   if (filter.statuses.length && !filter.statuses.includes(agent.status)) return false;
-  if (filter.cwd && !agent.cwd?.toLocaleLowerCase().includes(filter.cwd.toLocaleLowerCase())) return false;
+  if (filter.cwd && !agent.cwd?.toLocaleLowerCase().includes(filter.cwd)) return false;
   if (filter.query) {
     const haystack = [agent.name, agent.provider, agent.source, agent.cwd]
       .filter(Boolean)

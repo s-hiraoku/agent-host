@@ -36,12 +36,17 @@ test("server shutdown closes active SSE clients before registry cleanup", { time
   assert.match(ready, /"sequence":0/);
 
   const eventData = new Promise((resolve) => response.once("data", resolve));
-  registry.events.emit({ type: "agent.updated", snapshotRevision: 1, agent: { id: "fixture:1" } });
+  registry.events.emit({
+    type: "agent.updated",
+    snapshotRevision: 1,
+    agent: { id: "fixture:1", capabilities: {}, metadata: { secret: "must not leave the host" } },
+  });
   const event = await eventData;
   assert.match(event, /event: agent.updated/);
   assert.match(event, /"apiVersion":"1"/);
   assert.match(event, /"snapshotRevision":1/);
   assert.match(event, /"sequence":1/);
+  assert.doesNotMatch(event, /must not leave the host/);
 
   const ended = response.complete
     ? Promise.resolve()
@@ -136,6 +141,13 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
     const filtered = await (await fetch(`${base}/v1/agents?status=idle&cwd=WORK&q=beta`)).json();
     assert.deepEqual(filtered.agents.map((agent) => agent.id), ["fixture:beta"]);
 
+    const cwdPage = await (await fetch(`${base}/v1/agents?cwd=%2FWORK&limit=1`)).json();
+    const cwdNext = await fetch(
+      `${base}/v1/agents?cwd=%2Fwork&limit=1&cursor=${encodeURIComponent(cwdPage.page.nextCursor)}`,
+    );
+    assert.equal(cwdNext.status, 200);
+    assert.equal((await cwdNext.json()).agents.length, 1);
+
     const detail = await (await fetch(`${base}/v1/agents/${encodeURIComponent("fixture:alpha")}`)).json();
     assert.equal(detail.agent.sessionId, "session-alpha");
     assert.equal(detail.agent.pendingApprovals[0].approvalId, "approval-1");
@@ -185,6 +197,18 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
     });
     assert.equal(invalidJsonResponse.status, 400);
     assert.equal((await invalidJsonResponse.json()).error.code, "invalid_json");
+
+    const malformedIdResponse = await fetch(`${base}/v1/agents/%ZZ`);
+    assert.equal(malformedIdResponse.status, 400);
+    assert.equal((await malformedIdResponse.json()).error.code, "invalid_agent_id");
+
+    const oversizedResponse = await fetch(`${base}/v1/agents/fixture%3Aalpha/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "x".repeat(1_000_000) }),
+    });
+    assert.equal(oversizedResponse.status, 413);
+    assert.equal((await oversizedResponse.json()).error.code, "payload_too_large");
   } finally {
     await server.stop();
   }

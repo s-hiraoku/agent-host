@@ -4,16 +4,31 @@ import {
   ContractError,
   actionResult,
   agentDetail,
+  eventView,
   pageAgents,
   parseAgentListQuery,
 } from "../core/contracts.js";
 
+const MAX_BODY_BYTES = 1_000_000;
+
 async function jsonBody(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(Buffer.from(chunk));
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      throw new ContractError("payload_too_large", "request body is too large", 413);
+    }
+    chunks.push(Buffer.from(chunk));
+  }
   if (!chunks.length) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
   catch { throw new ContractError("invalid_json", "request body must be valid JSON"); }
+}
+
+function decodeSegment(value) {
+  try { return decodeURIComponent(value); }
+  catch { throw new ContractError("invalid_agent_id", "agent id is not valid percent-encoded text"); }
 }
 
 function send(res, status, body) {
@@ -62,10 +77,10 @@ export function createAgentServer(registry, options) {
       }
       if (req.method === "GET" && url.pathname === "/v1/events") {
         eventResponses.add(res);
-        const unsubscribe = registry.events.subscribe((event) => res.write(
-          `event: ${event.type}\ndata: ${JSON.stringify({ apiVersion: API_VERSION, ...event })}\n\n`,
-        ));
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+        const unsubscribe = registry.events.subscribe((event) => res.write(
+          `event: ${event.type}\ndata: ${JSON.stringify({ apiVersion: API_VERSION, ...eventView(event) })}\n\n`,
+        ));
         res.write(`event: ready\ndata: ${JSON.stringify({
           ok: true,
           apiVersion: API_VERSION,
@@ -80,18 +95,19 @@ export function createAgentServer(registry, options) {
       }
       const agentMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)$/);
       if (req.method === "GET" && agentMatch) {
-        const agent = registry.get(decodeURIComponent(agentMatch[1]));
+        const agent = registry.get(decodeSegment(agentMatch[1]));
         return agent
           ? send(res, 200, { apiVersion: API_VERSION, revision: registry.revision, agent: agentDetail(agent) })
           : sendError(res, 404, "agent_not_found", "agent not found");
       }
       const actionMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(prompt|send-keys|approve|reject|interrupt|focus|read)$/);
       if (req.method === "POST" && actionMatch) {
-        const result = await registry.action(decodeURIComponent(actionMatch[1]), actionMatch[2], await jsonBody(req));
+        const agentId = decodeSegment(actionMatch[1]);
+        const result = await registry.action(agentId, actionMatch[2], await jsonBody(req));
         return result.ok
           ? send(res, 200, {
               apiVersion: API_VERSION,
-              result: actionResult(result, decodeURIComponent(actionMatch[1]), actionMatch[2]),
+              result: actionResult(result, agentId, actionMatch[2]),
             })
           : sendError(res, actionErrorStatus(result.code), result.code, result.message, {
               agentId: result.agentId,
