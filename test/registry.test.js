@@ -10,6 +10,15 @@ function deferred() {
 
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 
+test("rejects invalid adapter timeouts", () => {
+  for (const adapterTimeoutMs of [0, -1, NaN, 1.5]) {
+    assert.throws(
+      () => new AgentRegistry([], { adapterTimeoutMs }),
+      /adapterTimeoutMs must be a positive integer/,
+    );
+  }
+});
+
 const fake = {
   id: "fake",
   async discover() {
