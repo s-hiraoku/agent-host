@@ -1,6 +1,6 @@
 {
   "name": "agent-host",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local control plane for discovering, observing, and controlling AI coding agents through one interface.",
   "type": "module",
   "bin": { "agent-host": "./src/cli.js" },
@@ -8,7 +8,7 @@
     "start": "node src/cli.js serve",
     "list": "node src/cli.js list",
     "test": "node --test test/**/*.test.js",
-    "check": "node --check src/cli.js && node --check src/core/registry.js && node --check src/adapters/process.js && node --check src/adapters/herdr.js && node --check src/http/server.js && npm test"
+    "check": "find src -name '*.js' -exec node --check {} \\; && npm test"
   },
   "engines": { "node": ">=22" },
   "license": "MIT"

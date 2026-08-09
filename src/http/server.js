@@ -13,6 +13,7 @@ function send(res, status, body) {
 }
 
 export function createAgentServer(registry, options) {
+  const eventResponses = new Set();
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -20,10 +21,14 @@ export function createAgentServer(registry, options) {
       if (req.method === "GET" && url.pathname === "/v1/agents") return send(res, 200, { agents: registry.list() });
       if (req.method === "POST" && url.pathname === "/v1/refresh") return send(res, 200, { agents: await registry.refresh() });
       if (req.method === "GET" && url.pathname === "/v1/events") {
+        eventResponses.add(res);
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
         res.write(`event: ready\ndata: ${JSON.stringify({ ok: true })}\n\n`);
         const unsubscribe = registry.events.subscribe((event) => res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
-        req.on("close", unsubscribe);
+        req.on("close", () => {
+          eventResponses.delete(res);
+          unsubscribe();
+        });
         return;
       }
       const agentMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)$/);
@@ -50,10 +55,17 @@ export function createAgentServer(registry, options) {
         server.once("error", reject);
         server.listen(options.port, options.host, resolve);
       });
+      return server.address();
     },
     async stop() {
       if (timer) clearInterval(timer);
-      await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+      for (const res of eventResponses) res.end();
+      try {
+        await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+      } finally {
+        eventResponses.clear();
+        await registry.close?.();
+      }
     },
   };
 }

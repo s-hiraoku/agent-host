@@ -4,7 +4,7 @@ A local control plane for AI coding agents.
 
 `agent-host` discovers agents running on your machine, normalizes their state/capabilities, and exposes one local API that thin clients can use. A watch, Stream Deck, menu bar app, web UI, phone app, or another agent should not need to know whether the target is Codex, Claude Code, Herdr, or something else.
 
-> Status: early MVP. The architecture and Herdr control path are usable; direct semantic control of arbitrary external desktop/CLI agents is intentionally capability-gated until a reliable adapter exists.
+> Status: early MVP. Herdr control and a host-owned Codex App Server integration are implemented. Direct control of arbitrary external desktop/CLI agent processes remains capability-gated until a reliable adapter exists.
 
 ## Why
 
@@ -29,6 +29,10 @@ Clients only consume a stable agent model and invoke capabilities exposed by the
 
 - Detect common local coding-agent processes (`claude`, `codex`, `gemini`, `opencode`, `hermes`, `cursor-agent`).
 - Read Herdr's live agent registry through `herdr api snapshot` when Herdr is running.
+- Start a local `codex app-server` over stdio and expose Codex threads through the same agent model.
+- Send prompts to Codex threads with `thread/resume` + `turn/start`, or `turn/steer` for a turn owned by this host.
+- Track Codex thread status notifications and interrupt turns owned by this host.
+- Surface real Codex command/file approval requests and answer them semantically with `accept` / `decline`.
 - Normalize status to `unknown | idle | working | blocked | done | error`.
 - Advertise per-agent capabilities instead of pretending every backend supports every action.
 - Control Herdr agents with prompt, key input, interrupt, focus, and read operations.
@@ -45,8 +49,8 @@ POST /v1/refresh
 GET  /v1/events                         # Server-Sent Events
 POST /v1/agents/:id/prompt              { "text": "Fix the test" }
 POST /v1/agents/:id/send-keys           { "keys": ["esc"] }
-POST /v1/agents/:id/approve
-POST /v1/agents/:id/reject
+POST /v1/agents/:id/approve             { "approvalId": "61" } # optional when exactly one is pending
+POST /v1/agents/:id/reject              { "approvalId": "61" }
 POST /v1/agents/:id/interrupt
 POST /v1/agents/:id/focus
 POST /v1/agents/:id/read
@@ -54,32 +58,42 @@ POST /v1/agents/:id/read
 
 An action returns `409` when that agent does not advertise the requested capability.
 
-Example agent:
+Example Codex agent waiting for approval:
 
 ```json
 {
-  "id": "herdr:w1:p2",
+  "id": "codex:thr_123",
   "provider": "codex",
-  "source": "herdr",
-  "name": "reviewer",
+  "source": "codex",
+  "name": "Fix tests",
   "status": "blocked",
   "capabilities": {
     "prompt": true,
-    "sendKeys": true,
-    "approve": false,
-    "reject": false,
+    "sendKeys": false,
+    "approve": true,
+    "reject": true,
     "interrupt": true,
-    "focus": true,
+    "focus": false,
     "read": true
+  },
+  "metadata": {
+    "pendingApprovals": [
+      {
+        "approvalId": "61",
+        "method": "item/commandExecution/requestApproval",
+        "command": "npm test",
+        "reason": "Run tests"
+      }
+    ]
   }
 }
 ```
 
-`approve` and `reject` are deliberately **not** mapped to blind Enter/Escape presses. An adapter should only expose semantic approval when it can identify and answer a real approval request reliably.
+`approve` and `reject` are deliberately **not** mapped to blind Enter/Escape presses. The Codex adapter only exposes these capabilities after App Server sends a real approval request and resolves that exact server request ID.
 
 ## Run
 
-Requires Node.js 22+.
+Requires Node.js 22+ and optionally the CLIs for the adapters you want to use. The Codex semantic adapter requires `codex` to be available on `PATH`.
 
 ```bash
 npm install
@@ -97,7 +111,8 @@ CLI:
 
 ```bash
 npm run list
-node src/cli.js action '<agent-id>' prompt '{"text":"Fix the test"}'
+node src/cli.js action 'codex:thr_123' prompt '{"text":"Fix the test"}'
+node src/cli.js action 'codex:thr_123' approve '{"approvalId":"61"}'
 ```
 
 Checks:
@@ -114,11 +129,42 @@ The host separates **detection** from **control**.
 | --- | --- | --- | --- | --- | --- |
 | OS process | yes | unknown | no | no | no |
 | Herdr | yes | rich | yes | yes | not yet |
-| Codex app-server | planned | rich | planned | n/a | planned |
+| Codex app-server (host-owned) | yes | rich for host-owned activity | yes | n/a | yes |
 | Claude Code hooks | planned | rich | planned* | planned* | planned |
 | Desktop app adapters | planned | app-specific | app-specific | app-specific | app-specific |
 
 `*` Hooks are good for identity/state; actual input/control still needs a supported control path (for example Herdr, a native protocol, or an app-specific bridge).
+
+## Codex adapter
+
+`agent-host` launches its own `codex app-server --listen stdio://` process and performs the required `initialize` / `initialized` handshake. It uses the official App Server protocol rather than terminal keystroke automation.
+
+Implemented protocol paths:
+
+```text
+thread/list
+thread/resume
+thread/read
+turn/start
+turn/steer
+turn/interrupt
+thread/status/changed
+turn/started
+turn/completed
+item/commandExecution/requestApproval
+item/fileChange/requestApproval
+serverRequest/resolved
+```
+
+Command and file-change approvals expire after five minutes by default and are cancelled so unattended requests do not leave a thread blocked indefinitely. Other server-initiated request types receive an explicit unsupported-method response instead of stalling the App Server connection.
+
+### Important limitation
+
+The current adapter owns its App Server connection. It can list persisted Codex threads that are visible from the same Codex home and it can resume/control work through the host-owned App Server.
+
+It does **not** yet claim to attach to an arbitrary already-running Codex Desktop App Server process. Therefore, a turn that is actively running inside a separate Codex Desktop process may not appear as `working` in this host-owned server, and its in-flight approval request cannot be answered by this connection unless that request originated from the host-owned App Server.
+
+A future transport adapter should attach to an explicitly reachable existing App Server endpoint/control socket. That is the path to true cross-client live control of Codex Desktop.
 
 ## Architecture
 
@@ -131,6 +177,8 @@ src/
   adapters/
     process.js     OS process discovery
     herdr.js       Herdr adapter
+    codex-rpc.js   Codex App Server JSON-RPC transport
+    codex.js       Codex thread/status/action adapter
   http/
     server.js      HTTP + SSE interface
   cli.js           daemon / local CLI
@@ -144,11 +192,12 @@ interface AgentAdapter {
   discover(): Promise<AgentRecord[]>
   prompt?(agent, text): Promise<AgentActionResult>
   sendKeys?(agent, keys): Promise<AgentActionResult>
-  approve?(agent): Promise<AgentActionResult>
-  reject?(agent): Promise<AgentActionResult>
+  approve?(agent, payload?): Promise<AgentActionResult>
+  reject?(agent, payload?): Promise<AgentActionResult>
   interrupt?(agent): Promise<AgentActionResult>
   focus?(agent): Promise<AgentActionResult>
   read?(agent): Promise<AgentActionResult>
+  close?(): Promise<void>
 }
 ```
 
@@ -156,9 +205,9 @@ This keeps client integrations provider-agnostic.
 
 ## Next adapters
 
-### Codex
+### Codex existing-process transport
 
-Codex `app-server` is the preferred semantic integration because it exposes thread lifecycle/status, turn events, prompts, interrupts, and explicit approval requests over its protocol. The adapter should support both a host-owned app-server and connection to an explicitly configured existing endpoint. We should not claim an arbitrary Codex Desktop process is controllable unless its live app-server endpoint is actually reachable.
+Attach to an explicitly exposed App Server endpoint/control socket so `agent-host` can observe and control the same live threads as another Codex client instead of owning a separate App Server process.
 
 ### Claude Code
 
@@ -172,7 +221,7 @@ Use native/local protocols where available. Accessibility automation should be a
 
 - Binds to `127.0.0.1` by default.
 - Never exposes an action unless the adapter declares it.
-- Semantic approvals should require a real approval request ID/context; do not implement them as generic keystrokes.
+- Codex semantic approvals require a real pending server request ID/context.
 - Remote access and authentication are intentionally out of scope for the first MVP.
 
 ## References
