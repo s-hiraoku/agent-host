@@ -21,3 +21,19 @@
 - Treat Codex `notLoaded` as unknown state, not completion, and classify recency separately from runtime status using provider timestamps.
 - Never advertise process interrupt by default. Keep loose command matches raw-only and suppress process/rich duplicates only on exact same-provider PID correlation.
 - Track raw snapshot revisions separately so raw-only process changes invalidate raw cursors without emitting normal lifecycle events. Overlay current records on cached history and invalidate historical cursors only when a history-linked live record changes.
+
+# Issue #6 decisions
+
+- Demo mode is an isolated runtime composition, not an extra adapter alongside live
+  discovery. This keeps demonstrations deterministic and prevents private sessions
+  from appearing in dashboard screenshots or fixture capture.
+- Demo state changes remain subject to the same registry refresh boundary as real
+  adapters: actions emit `agent.action`, and the following refresh emits the semantic
+  `agent.updated`. The conformance runner proves this public contract instead of adding
+  demo-only behavior to the registry.
+- SSE remains non-replayable in v1. The reconnect fixture requires clients to compare
+  the new `ready` revision/sequence and replace their snapshot after a disconnect or
+  gap, avoiding a false replay guarantee that the event bus cannot provide.
+- Client fixtures use fictional `demo:*` identifiers, fixed timestamps, and no cwd,
+  session payload, metadata, credentials, or personal data. The large fixture is
+  generated deterministically and checked in so non-Node clients can consume it.

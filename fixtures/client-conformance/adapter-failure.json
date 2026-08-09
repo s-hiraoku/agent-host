@@ -1,0 +1,21 @@
+{
+  "fixtureVersion": 1,
+  "scenario": "adapter-failure",
+  "response": {
+    "apiVersion": "1",
+    "revision": 4,
+    "ready": true,
+    "initialLoading": false,
+    "refreshing": false,
+    "degraded": true,
+    "adapters": [{
+      "id": "demo-failure",
+      "status": "error",
+      "lastAttemptAt": "2026-01-01T00:00:10.000Z",
+      "lastSuccessAt": null,
+      "durationMs": 12,
+      "agentCount": 0,
+      "error": { "code": "demo_unavailable", "message": "deterministic adapter failure" }
+    }]
+  }
+}

@@ -6,6 +6,9 @@
   "bin": { "agent-host": "./src/cli.js" },
   "scripts": {
     "start": "node src/cli.js serve",
+    "demo": "node src/cli.js demo",
+    "fixtures:generate": "node scripts/generate-large-fixture.js",
+    "conformance": "node --test test/client-conformance.test.js",
     "list": "node src/cli.js list",
     "test": "node --test test/**/*.test.js",
     "check": "find src -name '*.js' -exec node --check {} \\; && npm test"
