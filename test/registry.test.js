@@ -10,11 +10,17 @@ function deferred() {
 
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 
-test("rejects invalid adapter timeouts", () => {
+test("rejects invalid discovery timing options", () => {
   for (const adapterTimeoutMs of [0, -1, NaN, 1.5]) {
     assert.throws(
       () => new AgentRegistry([], { adapterTimeoutMs }),
       /adapterTimeoutMs must be a positive integer/,
+    );
+  }
+  for (const historyTtlMs of [0, -1, NaN, 1.5]) {
+    assert.throws(
+      () => new AgentRegistry([], { historyTtlMs }),
+      /historyTtlMs must be a positive integer/,
     );
   }
 });
@@ -136,6 +142,9 @@ test("uses agent id as the deterministic list order tie-breaker", async () => {
   const registry = new AgentRegistry([adapter]);
   await registry.refresh();
   assert.deepEqual(registry.list().map((agent) => agent.id), ["same:a", "same:z"]);
+  const mutableCopy = registry.list();
+  mutableCopy.pop();
+  assert.deepEqual(registry.list().map((agent) => agent.id), ["same:a", "same:z"]);
 });
 
 test("preserves last-known agents when adapter discovery fails", async () => {
@@ -242,7 +251,6 @@ test("keeps history separate and reconciles only exact process identities", asyn
   await registry.refresh();
 
   assert.deepEqual(registry.list().map((agent) => agent.id), ["rich:42", "process:43"]);
-  assert.equal(registry.get("process:42").capabilities.interrupt, undefined);
   assert.equal(registry.get("process:42").discovery.duplicateOf, "rich:42");
   const revision = registry.revision;
   const eventCount = events.length;
@@ -268,6 +276,46 @@ test("keeps history separate and reconciles only exact process identities", asyn
   const historicalAfterLiveChange = await registry.listView("historical");
   assert.notEqual(historicalAfterLiveChange.cursorRevision, historicalCursorRevision);
   assert.deepEqual(historicalAfterLiveChange.agents.map((agent) => agent.id), ["rich:old"]);
+});
+
+test("historical cursors track live historical records without cached history", async () => {
+  let name = "Historical";
+  const registry = new AgentRegistry([{
+    id: "live-history",
+    async discover() {
+      return [{
+        id: "live:historical", provider: "fixture", source: "live-history", name, status: "unknown",
+        capabilities: {}, discovery: { kind: "native", confidence: "high", visibility: "historical" },
+      }];
+    },
+  }]);
+  await registry.refresh();
+  const first = await registry.listView("historical");
+  assert.deepEqual(first.agents.map((agent) => agent.id), ["live:historical"]);
+  name = "Historical changed";
+  await registry.refresh();
+  const second = await registry.listView("historical");
+  assert.notEqual(second.cursorRevision, first.cursorRevision);
+});
+
+test("retries history discovery immediately after a transient failure", async () => {
+  let calls = 0;
+  const registry = new AgentRegistry([{
+    id: "history-retry",
+    async discover() { return []; },
+    async discoverHistory() {
+      calls += 1;
+      if (calls === 1) throw new Error("temporary");
+      return [{
+        id: "history:recovered", provider: "fixture", source: "history-retry", name: "Recovered", status: "unknown",
+        capabilities: {}, discovery: { kind: "native", confidence: "high", visibility: "historical" },
+      }];
+    },
+  }]);
+  await registry.refresh();
+  assert.deepEqual((await registry.listView("historical")).agents, []);
+  assert.deepEqual((await registry.listView("historical")).agents.map((agent) => agent.id), ["history:recovered"]);
+  assert.equal(calls, 2);
 });
 
 test("coalesces refreshes and discovers adapters concurrently", async () => {

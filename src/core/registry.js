@@ -57,6 +57,9 @@ export class AgentRegistry {
   #historyExpiresAt = 0;
   #historyPromise;
   #historyControllers = new Set();
+  #listCacheSource;
+  #canonicalCache;
+  #rawCache;
   #closeController = new AbortController();
   #closedOutcome;
   #refreshPromise;
@@ -71,7 +74,11 @@ export class AgentRegistry {
       throw new RangeError("adapterTimeoutMs must be a positive integer");
     }
     this.#adapterTimeoutMs = adapterTimeoutMs;
-    this.#historyTtlMs = options.historyTtlMs ?? DEFAULT_HISTORY_TTL_MS;
+    const historyTtlMs = options.historyTtlMs ?? DEFAULT_HISTORY_TTL_MS;
+    if (!Number.isInteger(historyTtlMs) || historyTtlMs <= 0) {
+      throw new RangeError("historyTtlMs must be a positive integer");
+    }
+    this.#historyTtlMs = historyTtlMs;
     this.#closedOutcome = new Promise((resolve) => this.#closeController.signal.addEventListener(
       "abort",
       () => resolve({ status: "closed" }),
@@ -92,9 +99,23 @@ export class AgentRegistry {
   }
 
   list() {
-    return reconcileAgents([...this.#agents.values()]).sort(compareAgents);
+    return [...this.#reconciled(false)];
   }
-  listRaw() { return reconcileAgents([...this.#agents.values()], true).sort(compareAgents); }
+  listRaw() { return [...this.#reconciled(true)]; }
+  #reconciled(includeDuplicates) {
+    if (this.#listCacheSource !== this.#agents) {
+      this.#listCacheSource = this.#agents;
+      this.#canonicalCache = undefined;
+      this.#rawCache = undefined;
+    }
+    let cached = includeDuplicates ? this.#rawCache : this.#canonicalCache;
+    if (!cached) {
+      cached = reconcileAgents([...this.#agents.values()], includeDuplicates).sort(compareAgents);
+      if (includeDuplicates) this.#rawCache = cached;
+      else this.#canonicalCache = cached;
+    }
+    return cached;
+  }
   async listView(view = "recent") {
     if (view !== "historical" && view !== "raw") {
       return { agents: this.list().filter((agent) => matchesView(agent, view)), cursorRevision: this.#revision };
@@ -115,7 +136,7 @@ export class AgentRegistry {
       cursorRevision: `raw:${this.#rawRevision}:${this.#historyRevision}`,
     };
   }
-  get(id) { return this.listRaw().find((agent) => agent.id === id) ?? this.#historyAgents.get(id); }
+  get(id) { return this.#reconciled(true).find((agent) => agent.id === id) ?? this.#historyAgents.get(id); }
   get revision() { return this.#revision; }
   get initialLoading() { return this.#initialLoading; }
   get refreshing() { return Boolean(this.#refreshPromise); }
@@ -249,8 +270,10 @@ export class AgentRegistry {
       }
     })).then((results) => {
       const next = new Map(this.#historyAgents);
+      let loaded = false;
       for (const result of results) {
         if (!result.agents) continue;
+        loaded = true;
         for (const [id, agent] of next) {
           if (agent.source === result.adapterId) next.delete(id);
         }
@@ -260,7 +283,7 @@ export class AgentRegistry {
       const after = [...next.values()].map(semanticAgent).sort((a, b) => a.id.localeCompare(b.id));
       if (!isDeepStrictEqual(before, after)) this.#historyRevision += 1;
       this.#historyAgents = next;
-      this.#historyExpiresAt = Date.now() + this.#historyTtlMs;
+      if (loaded || adapters.length === 0) this.#historyExpiresAt = Date.now() + this.#historyTtlMs;
     }).finally(() => { this.#historyPromise = undefined; });
     return this.#historyPromise;
   }
@@ -397,5 +420,5 @@ export class AgentRegistry {
 }
 
 function historyOverlay(agents, historyAgents) {
-  return agents.filter((agent) => historyAgents.has(agent.id));
+  return agents.filter((agent) => historyAgents.has(agent.id) || matchesView(agent, "historical"));
 }

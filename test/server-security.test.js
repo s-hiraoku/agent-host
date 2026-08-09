@@ -14,6 +14,10 @@ test("accepts a bracketed IPv6 loopback Host", () => {
     security.validateHost({ headers: { host: "[::1]:4777" } }, { port: 4777 }),
     "http://[::1]:4777",
   );
+  assert.throws(
+    () => createApiSecurity({ apiToken: TOKEN, allowedOrigins: ["http://dashboard.test/"] }),
+    /invalid allowed origin: http:\/\/dashboard\.test\//,
+  );
 });
 
 function fixtureRegistry(onPrompt = () => {}) {
@@ -99,6 +103,9 @@ test("enforces browser security and emits secret-free action audit events", asyn
   try {
     assert.equal((await fetch(`${base}/v1/agents`)).status, 401);
     assert.equal((await fetch(`${base}/v1/agents`, { headers: authorization })).status, 200);
+    assert.equal((await fetch(`${base}/v1/agents`, {
+      headers: { authorization: `bearer ${TOKEN}` },
+    })).status, 200);
     assert.equal((await fetch(`${base}/v1/unknown`)).status, 401);
     assert.equal((await fetch(`${base}/v1/unknown`, { headers: authorization })).status, 404);
 
@@ -238,9 +245,10 @@ test("enforces browser security and emits secret-free action audit events", asyn
 
 test("starts the idempotency TTL after a slow action settles", async () => {
   let promptCalls = 0;
+  let clock = 0;
   const registry = fixtureRegistry(async () => {
     promptCalls += 1;
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    clock = 150;
   });
   const server = createAgentServer(registry, {
     host: "127.0.0.1",
@@ -248,6 +256,7 @@ test("starts the idempotency TTL after a slow action settles", async () => {
     refreshMs: 60_000,
     apiToken: TOKEN,
     idempotencyTtlMs: 100,
+    idempotencyNow: () => clock,
   });
   const address = await server.start();
   await registry.refresh();

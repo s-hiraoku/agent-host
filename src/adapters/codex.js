@@ -220,7 +220,7 @@ export class CodexAdapter {
       cursor = result?.nextCursor ?? null;
       pages += 1;
     } while (cursor && all.length < maxThreads && pages < Math.ceil(maxThreads / 100));
-    return all;
+    return all.slice(0, maxThreads);
   }
 
   async #findActiveTurn(threadId) {

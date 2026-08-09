@@ -35,6 +35,8 @@ export function compareAgents(a, b) {
   if (aVisibility !== bVisibility) return aVisibility - bVisibility;
   const status = (STATUS_RANK.get(a.status) ?? 6) - (STATUS_RANK.get(b.status) ?? 6);
   if (status) return status;
-  const activity = String(b.lastActivityAt ?? "").localeCompare(String(a.lastActivityAt ?? ""));
-  return activity || a.id.localeCompare(b.id);
+  const aActivity = String(a.lastActivityAt ?? "");
+  const bActivity = String(b.lastActivityAt ?? "");
+  if (aActivity !== bActivity) return aActivity < bActivity ? 1 : -1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }

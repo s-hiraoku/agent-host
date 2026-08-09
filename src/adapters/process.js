@@ -28,6 +28,7 @@ export function classifyProcessCommand(command) {
   const tokens = command.trim().split(/\s+/);
   while (tokens[0]?.includes("=") && !tokens[0].includes("/")) tokens.shift();
   if (basename(tokens[0] ?? "") === "env") tokens.shift();
+  while (tokens[0]?.includes("=") && !tokens[0].includes("/")) tokens.shift();
   const executable = basename(tokens[0] ?? "").toLowerCase();
   const script = SCRIPT_RUNNERS.has(executable) ? basename(tokens[1] ?? "").toLowerCase() : undefined;
   const provider = PROVIDERS.get(executable) ?? PROVIDERS.get(script);

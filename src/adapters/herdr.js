@@ -24,19 +24,24 @@ export class HerdrAdapter {
         const provider = String(item.agent ?? "herdr-agent");
         const paneId = item.pane_id ? String(item.pane_id) : undefined;
         const pid = Number(item.foreground_pid ?? item.pid) || undefined;
+        const status = mapStatus(item.agent_status ?? item.status);
         return {
           id: `herdr:${paneId ?? target}`,
           provider,
           source: this.id,
           name: String(item.name ?? `${provider} · ${paneId ?? target}`),
-          status: mapStatus(item.agent_status ?? item.status),
+          status,
           capabilities: { prompt: true, sendKeys: true, approve: false, reject: false, interrupt: true, focus: true, read: true },
           cwd: item.foreground_cwd ?? item.cwd,
           sessionId: item.agent_session?.value,
           target,
           pid,
           lastActivityAt: item.last_activity_at ?? item.updated_at,
-          discovery: { kind: "native", confidence: "high", visibility: "active" },
+          discovery: {
+            kind: "native",
+            confidence: "high",
+            visibility: status === "working" || status === "blocked" ? "active" : "recent",
+          },
           metadata: { paneId, herdr: item },
           discoveredAt: now,
           updatedAt: now,

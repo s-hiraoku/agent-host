@@ -59,13 +59,14 @@ function createActionExecutor(registry, options = {}) {
   const cache = new Map();
   const queues = new Map();
   const ttlMs = options.idempotencyTtlMs ?? IDEMPOTENCY_TTL_MS;
+  const now = options.idempotencyNow ?? Date.now;
   return async (agentId, action, payload, key) => {
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(key ?? "")) {
       throw new ContractError("invalid_idempotency_key", "Idempotency-Key must be 8-128 safe ASCII characters");
     }
-    const now = Date.now();
+    const requestedAt = now();
     for (const [cachedKey, entry] of cache) {
-      if (entry.settled && entry.expiresAt <= now) cache.delete(cachedKey);
+      if (entry.settled && entry.expiresAt <= requestedAt) cache.delete(cachedKey);
     }
     const signature = createHash("sha256").update(JSON.stringify({ agentId, action, payload })).digest("base64url");
     const existing = cache.get(key);
@@ -84,7 +85,7 @@ function createActionExecutor(registry, options = {}) {
     entry.promise = previous.catch(() => {}).then(() => registry.action(agentId, action, payload));
     const tail = entry.promise.catch(() => {}).finally(() => {
       entry.settled = true;
-      entry.expiresAt = Date.now() + ttlMs;
+      entry.expiresAt = now() + ttlMs;
       if (queues.get(agentId) === tail) queues.delete(agentId);
     });
     queues.set(agentId, tail);

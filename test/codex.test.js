@@ -158,6 +158,11 @@ test("Codex adapter bounds pagination and rejects unsupported server requests", 
   assert.equal(client.requests.filter((entry) => entry.method === "thread/list").length, 1);
   assert.deepEqual(await adapter.discoverHistory(), []);
   assert.equal(client.requests.filter((entry) => entry.method === "thread/list").length, 11);
+  client.threadListResult = {
+    data: Array.from({ length: 101 }, (_, index) => ({ id: `excess-${index}`, status: { type: "notLoaded" } })),
+    nextCursor: null,
+  };
+  assert.equal((await adapter.discover()).length, 100);
 
   client.emitServerRequest({ id: 81, method: "mcpServer/elicitation/request", params: { threadId: "thr_1" } });
   assert.deepEqual(client.responseErrors, [{

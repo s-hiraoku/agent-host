@@ -322,6 +322,7 @@ Use native/local protocols where available. Accessibility automation should be a
   denied by default. Set `AGENT_HOST_ALLOWED_ORIGINS` to a comma-separated list of
   exact dashboard origins such as `http://127.0.0.1:3000`; only those origins receive
   CORS preflight permission for Authorization, Content-Type, and Idempotency-Key.
+  Origins must be canonical (no path or trailing slash); invalid configuration stops startup.
 - Never exposes an action unless the adapter declares it.
 - Codex semantic approvals require a real pending server request ID/context.
 - Attempted and completed authenticated actions emit `audit.action` events containing

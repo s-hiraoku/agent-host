@@ -7,7 +7,7 @@ const ALLOWED_CORS_METHODS = new Set(["GET", "POST"]);
 export function createApiSecurity(options = {}) {
   const configuredToken = options.apiToken?.trim();
   const apiToken = configuredToken || randomBytes(32).toString("base64url");
-  const allowedOrigins = new Set((options.allowedOrigins ?? []).map(normalizeOrigin));
+  const allowedOrigins = new Set((options.allowedOrigins ?? []).map(normalizeConfiguredOrigin));
   const allowedHosts = new Set(options.allowedHosts ?? ["127.0.0.1", "localhost", "[::1]"]);
 
   return {
@@ -71,7 +71,7 @@ export function createApiSecurity(options = {}) {
         res.setHeader("www-authenticate", "Bearer");
         throw new ContractError("authentication_required", "Bearer token is required", 401);
       }
-      const match = authorization.match(/^Bearer ([^\s]+)$/);
+      const match = authorization.match(/^Bearer ([^\s]+)$/i);
       if (!match || !safeEqual(match[1], apiToken)) {
         res.setHeader("www-authenticate", 'Bearer error="invalid_token"');
         throw new ContractError("invalid_token", "Bearer token is invalid", 401);
@@ -85,6 +85,11 @@ export function createApiSecurity(options = {}) {
       }
     },
   };
+}
+
+function normalizeConfiguredOrigin(value) {
+  try { return normalizeOrigin(value); }
+  catch (error) { throw new TypeError(`invalid allowed origin: ${value}`, { cause: error }); }
 }
 
 function normalizeOrigin(value) {

@@ -48,8 +48,13 @@ if (command === "serve") {
     allowedOrigins: String(process.env.AGENT_HOST_ALLOWED_ORIGINS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
   });
   const tokenPath = process.env.AGENT_HOST_TOKEN_FILE ?? join(homedir(), ".agent-host", "token");
-  if (server.generatedToken) await writeGeneratedToken(tokenPath, server.apiToken);
   await server.start();
+  try {
+    if (server.generatedToken) await writeGeneratedToken(tokenPath, server.apiToken);
+  } catch (error) {
+    await server.stop();
+    throw error;
+  }
   const displayHost = host.includes(":") ? `[${host}]` : host;
   console.log(`[agent-host] listening on http://${displayHost}:${port}`);
   if (server.generatedToken) console.log(`[agent-host] generated API token written to ${tokenPath}`);
