@@ -12,9 +12,9 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 
 ## Plan
 
-- [ ] #2 Stable v1 API and semantic event contract
-- [ ] #3 Single-flight refresh and adapter health
-- [ ] #4 Secure browser-facing local action API
+- [x] #2 Stable v1 API and semantic event contract
+- [x] #3 Single-flight refresh and adapter health
+- [x] #4 Secure browser-facing local action API
 - [ ] #5 Useful discovery defaults and deduplication
 - [ ] #6 Demo adapter and conformance fixtures
 - [ ] #7 Supported live-session integration
@@ -25,10 +25,10 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 
 ## Current step
 
-- Branch: `codex/issue-3-refresh-health`
-- Issue: https://github.com/s-hiraoku/agent-host/issues/3
-- Base PR: https://github.com/s-hiraoku/agent-host/pull/12
-- Next: commit the verified implementation and open a ready-for-review stacked PR against the Issue #2 branch.
+- Branch: `codex/issue-4-local-api-security`
+- Issue: https://github.com/s-hiraoku/agent-host/issues/4
+- Base PR: https://github.com/s-hiraoku/agent-host/pull/13
+- Next: commit the verified implementation and open a ready-for-review stacked PR against the Issue #3 branch.
 
 ## Progress notes
 
@@ -36,3 +36,4 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 - 2026-08-09: Implemented the Issue #2 v1 summary/detail/action/error/event contracts, semantic revisions, bounded pagination and filters, documentation, and a 1,000-agent response-size fixture. Adviser completion review identified event coverage, deterministic ordering, an SSE subscription race, maximum-page verification, and compatibility documentation gaps; all were addressed. `npm run check` passes with 16 tests.
 - 2026-08-09: Addressed all initial PR #12 feedback: SSE events now use controlled agent views, transient adapter failures retain last-known agents, malformed IDs and oversized bodies return stable 4xx errors, cwd cursor filters are normalized, and scale assertions are recorded. `npm run check` passes with 17 tests.
 - 2026-08-09: Opened ready PR #12 for Issue #2. Implemented Issue #3 with single-flight concurrent refreshes, incremental healthy-adapter updates, bounded timeout/cancellation, retained last-good agents, adapter health/readiness APIs and events, prompt HTTP startup, and safe shutdown. Adviser review identified aggregate-apply latency and late-completion proof gaps; incremental apply plus timeout/shutdown/retry/listener-cleanup tests addressed them. After rebasing the PR #12 feedback fixes, `npm run check` passes with 26 tests.
+- 2026-08-09: Opened ready PR #13 for Issue #3 and addressed its late timed-out-flight review finding. Implemented Issue #4 with loopback-only binding, bearer authentication for every `/v1/*` route, aggregate-only public readiness, exact Host/Origin checks, explicit CORS preflight, safe generated-token storage, bounded secret-free action audit events, mandatory idempotency keys, replay suppression, and per-agent action serialization. Six-pass security review findings and the PR review's slow-action TTL finding were incorporated; `npm run check` passes with 30 tests.
