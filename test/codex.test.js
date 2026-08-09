@@ -70,7 +70,7 @@ test("Codex adapter exposes and resolves semantic approvals", async () => {
   const [blocked] = await adapter.discover();
   assert.equal(blocked.status, "blocked");
   assert.equal(blocked.capabilities.approve, true);
-  assert.equal(blocked.metadata.pendingApprovals[0].approvalId, "61");
+  assert.equal(blocked.pendingApprovals[0].approvalId, "61");
 
   const result = await adapter.approve(blocked, { approvalId: "61" });
   assert.equal(result.ok, true);
@@ -141,8 +141,8 @@ test("Codex adapter clears terminal state and restarts after close", async () =>
 
   const [agent] = await adapter.discover();
   assert.equal(agent.status, "error");
-  assert.equal(agent.metadata.activeTurnId, undefined);
-  assert.deepEqual(agent.metadata.pendingApprovals, []);
+  assert.equal(agent.activeTurnId, undefined);
+  assert.deepEqual(agent.pendingApprovals, []);
 
   await adapter.close();
   await adapter.discover();

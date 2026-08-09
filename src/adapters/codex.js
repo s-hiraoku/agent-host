@@ -76,10 +76,10 @@ export class CodexAdapter {
           cwd: thread.cwd,
           sessionId: thread.id,
           target: thread.id,
+          activeTurnId: this.#activeTurns.get(thread.id),
+          pendingApprovals: approvals.map(pendingApprovalView),
           metadata: {
             codex: thread,
-            pendingApprovals: approvals.map(pendingApprovalView),
-            activeTurnId: this.#activeTurns.get(thread.id),
           },
           discoveredAt: now,
           updatedAt: now,
