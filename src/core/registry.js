@@ -10,6 +10,26 @@ const ACTION_CAPABILITIES = new Map([
   ["focus", "focus"],
   ["read", "read"],
 ]);
+const DEFAULT_ADAPTER_TIMEOUT_MS = 20_000;
+
+function sanitizeError(error) {
+  const message = String(error?.message ?? error ?? "adapter discovery failed")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300);
+  return {
+    code: typeof error?.code === "string" ? error.code : "discovery_failed",
+    message: message || "adapter discovery failed",
+  };
+}
+
+function semanticHealth(health) {
+  return {
+    status: health.status,
+    agentCount: health.agentCount,
+    error: health.error,
+  };
+}
 
 function semanticAgent(agent) {
   const {
@@ -24,11 +44,36 @@ function semanticAgent(agent) {
 export class AgentRegistry {
   #agents = new Map();
   #adapters = new Map();
+  #adapterHealth = new Map();
+  #adapterFlights = new Map();
+  #adapterTimeoutMs;
+  #closeController = new AbortController();
+  #closedOutcome;
+  #refreshPromise;
+  #initialLoading = true;
+  #closed = false;
   #revision = 0;
   events = new AgentEventBus();
 
-  constructor(adapters) {
-    for (const adapter of adapters) this.#adapters.set(adapter.id, adapter);
+  constructor(adapters, options = {}) {
+    this.#adapterTimeoutMs = options.adapterTimeoutMs ?? DEFAULT_ADAPTER_TIMEOUT_MS;
+    this.#closedOutcome = new Promise((resolve) => this.#closeController.signal.addEventListener(
+      "abort",
+      () => resolve({ status: "closed" }),
+      { once: true },
+    ));
+    for (const adapter of adapters) {
+      this.#adapters.set(adapter.id, adapter);
+      this.#adapterHealth.set(adapter.id, {
+        id: adapter.id,
+        status: "loading",
+        lastAttemptAt: null,
+        lastSuccessAt: null,
+        durationMs: null,
+        agentCount: 0,
+        error: null,
+      });
+    }
   }
 
   list() {
@@ -38,17 +83,58 @@ export class AgentRegistry {
   }
   get(id) { return this.#agents.get(id); }
   get revision() { return this.#revision; }
+  get initialLoading() { return this.#initialLoading; }
+  get refreshing() { return Boolean(this.#refreshPromise); }
+  get closed() { return this.#closed; }
+  adapterHealth() {
+    return [...this.#adapterHealth.values()].map((health) => ({
+      ...health,
+      error: health.error ? { ...health.error } : null,
+    }));
+  }
+  readiness() {
+    const adapters = this.adapterHealth();
+    return {
+      ready: !this.#initialLoading && !this.#closed,
+      initialLoading: this.#initialLoading,
+      refreshing: this.refreshing,
+      degraded: adapters.some((adapter) => adapter.status === "error" || adapter.status === "timeout"),
+      adapters,
+    };
+  }
 
-  async refresh() {
-    const next = new Map();
-    const failedAdapters = new Set();
-    for (const adapter of this.#adapters.values()) {
-      try {
-        for (const agent of await adapter.discover()) next.set(agent.id, agent);
-      } catch (error) {
-        failedAdapters.add(adapter.id);
-        console.error(`[agent-host] adapter ${adapter.id} discovery failed:`, error);
+  refresh() {
+    if (this.#closed) return Promise.resolve(this.list());
+    if (this.#refreshPromise) return this.#refreshPromise;
+    this.#refreshPromise = this.#runRefresh().finally(() => {
+      this.#initialLoading = false;
+      this.#refreshPromise = undefined;
+    });
+    return this.#refreshPromise;
+  }
+
+  async #runRefresh() {
+    await Promise.all(
+      [...this.#adapters.values()].map(async (adapter) => {
+        const outcome = await this.#discoverAdapter(adapter);
+        if (!this.#closed) this.#applyOutcome(outcome);
+      }),
+    );
+    return this.list();
+  }
+
+  #applyOutcome(outcome) {
+    const next = new Map(this.#agents);
+    const previousHealth = this.#adapterHealth.get(outcome.adapterId);
+    const health = this.#healthForOutcome(previousHealth, outcome);
+    this.#adapterHealth.set(outcome.adapterId, health);
+    const healthChanged = !isDeepStrictEqual(semanticHealth(previousHealth), semanticHealth(health));
+
+    if (outcome.status === "success") {
+      for (const [id, agent] of next) {
+        if (agent.source === outcome.adapterId) next.delete(id);
       }
+      for (const agent of outcome.agents) next.set(agent.id, agent);
     }
 
     const at = new Date().toISOString();
@@ -69,19 +155,96 @@ export class AgentRegistry {
       }
     }
     for (const id of this.#agents.keys()) {
-      if (next.has(id)) continue;
-      const previous = this.#agents.get(id);
-      if (failedAdapters.has(previous.source)) normalized.set(id, previous);
-      else changes.push({ type: "agent.removed", agentId: id, at });
+      if (!next.has(id)) changes.push({ type: "agent.removed", agentId: id, at });
     }
     if (changes.length) this.#revision += 1;
     this.#agents = normalized;
     for (const change of changes) this.events.emit({ ...change, snapshotRevision: this.#revision });
-    return this.list();
+    if (healthChanged) {
+      this.events.emit({
+        type: "adapter.health",
+        adapter: { ...health },
+        at: new Date().toISOString(),
+        snapshotRevision: this.#revision,
+      });
+    }
+  }
+
+  async #discoverAdapter(adapter) {
+    let flight = this.#adapterFlights.get(adapter.id);
+    if (!flight) {
+      const controller = new AbortController();
+      flight = {
+        controller,
+        startedAt: Date.now(),
+        startedAtIso: new Date().toISOString(),
+      };
+      flight.promise = Promise.resolve()
+        .then(() => adapter.discover({ signal: controller.signal }))
+        .then(
+          (agents) => Array.isArray(agents)
+            ? { status: "success", agents }
+            : { status: "error", error: new TypeError("adapter discover() must return an array") },
+          (error) => ({ status: "error", error }),
+        );
+      this.#adapterFlights.set(adapter.id, flight);
+    }
+
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ status: "timeout" }), this.#adapterTimeoutMs);
+    });
+    const outcome = await Promise.race([flight.promise, this.#closedOutcome, timeout]);
+    clearTimeout(timer);
+    if (outcome.status === "timeout" && !flight.timedOut) {
+      flight.timedOut = true;
+      flight.controller.abort(new DOMException("Adapter discovery timed out", "TimeoutError"));
+      void flight.promise.then(() => {
+        if (this.#adapterFlights.get(adapter.id) === flight) this.#adapterFlights.delete(adapter.id);
+      });
+    } else if (outcome.status !== "timeout") {
+      this.#adapterFlights.delete(adapter.id);
+    }
+    return {
+      adapterId: adapter.id,
+      attemptedAt: flight.startedAtIso,
+      durationMs: Date.now() - flight.startedAt,
+      ...outcome,
+    };
+  }
+
+  #healthForOutcome(previous, outcome) {
+    if (outcome.status === "success") {
+      return {
+        id: outcome.adapterId,
+        status: "healthy",
+        lastAttemptAt: outcome.attemptedAt,
+        lastSuccessAt: new Date().toISOString(),
+        durationMs: outcome.durationMs,
+        agentCount: outcome.agents.length,
+        error: null,
+      };
+    }
+    const error = outcome.status === "timeout"
+      ? { code: "discovery_timeout", message: `discovery exceeded ${this.#adapterTimeoutMs}ms` }
+      : sanitizeError(outcome.error);
+    return {
+      ...previous,
+      status: outcome.status,
+      lastAttemptAt: outcome.attemptedAt,
+      durationMs: outcome.durationMs,
+      error,
+    };
   }
 
   async close() {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#closeController.abort();
+    for (const flight of this.#adapterFlights.values()) flight.controller.abort();
     await Promise.allSettled([...this.#adapters.values()].map((adapter) => adapter.close?.()));
+    await this.#refreshPromise;
+    this.#adapterFlights.clear();
   }
 
   async action(id, action, payload) {

@@ -13,23 +13,33 @@ const KNOWN = [
   [/(^|\s|\/)(cursor-agent)(\s|$)/i, "cursor"],
 ];
 
-async function cwdFor(pid) {
+async function cwdFor(pid, signal) {
   if (process.platform === "linux") {
-    try { return await readlink(`/proc/${pid}/cwd`); } catch { return undefined; }
+    try { return await readlink(`/proc/${pid}/cwd`); }
+    catch (error) {
+      signal?.throwIfAborted();
+      return undefined;
+    }
   }
   if (process.platform === "darwin") {
     try {
-      const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
+      const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { signal });
       return stdout.split("\n").find((line) => line.startsWith("n"))?.slice(1);
-    } catch { return undefined; }
+    } catch (error) {
+      signal?.throwIfAborted();
+      return undefined;
+    }
   }
 }
 
 export class ProcessAdapter {
   id = "process";
 
-  async discover() {
-    const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,tty=,command="], { maxBuffer: 10 * 1024 * 1024 });
+  async discover(options = {}) {
+    const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,tty=,command="], {
+      maxBuffer: 10 * 1024 * 1024,
+      signal: options.signal,
+    });
     const rows = stdout.split("\n").map((line) => line.trim()).filter(Boolean);
     const agents = [];
     const now = new Date().toISOString();
@@ -43,7 +53,9 @@ export class ProcessAdapter {
       const known = KNOWN.find(([pattern]) => pattern.test(command));
       if (!known || pid === process.pid || command.includes("agent-host") || command.includes("codex app-server --listen stdio://")) continue;
       const provider = known[1];
-      const cwd = await cwdFor(pid);
+      options.signal?.throwIfAborted();
+      const cwd = await cwdFor(pid, options.signal);
+      options.signal?.throwIfAborted();
       agents.push({
         id: `process:${provider}:${pid}`,
         provider,

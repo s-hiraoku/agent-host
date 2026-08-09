@@ -9,3 +9,6 @@
 - Treat provider-native metadata as non-semantic and non-public. Adapter authors must lift client-visible mutable state into canonical fields.
 - Use a snapshot `revision` for pagination consistency and a separate event `sequence` for ordered SSE delivery.
 - Keep successful action result core fields provider-neutral while treating optional `data` as an opaque adapter extension.
+- Define readiness as "the bounded initial refresh cycle completed"; adapter failures make readiness degraded but do not make the usable local API permanently unready.
+- Apply each adapter's successful discovery as soon as it completes instead of waiting for the slowest adapter's timeout.
+- Abort cooperative discovery on timeout. Keep a non-cooperative timed-out flight tracked until it settles so refresh timers cannot duplicate it, and ignore its late result.

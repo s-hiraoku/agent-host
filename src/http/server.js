@@ -57,7 +57,22 @@ export function createAgentServer(registry, options) {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       if (req.method === "GET" && url.pathname === "/health") {
-        return send(res, 200, { ok: true, apiVersion: API_VERSION, revision: registry.revision });
+        return send(res, 200, { ok: true, live: true, apiVersion: API_VERSION, revision: registry.revision });
+      }
+      if (req.method === "GET" && url.pathname === "/ready") {
+        const readiness = registry.readiness();
+        return send(res, readiness.ready ? 200 : 503, {
+          apiVersion: API_VERSION,
+          revision: registry.revision,
+          ...readiness,
+        });
+      }
+      if (req.method === "GET" && url.pathname === "/v1/adapters") {
+        return send(res, 200, {
+          apiVersion: API_VERSION,
+          revision: registry.revision,
+          ...registry.readiness(),
+        });
       }
       if (req.method === "GET" && url.pathname === "/v1/agents") {
         const query = parseAgentListQuery(url.searchParams, registry.revision);
@@ -73,6 +88,7 @@ export function createAgentServer(registry, options) {
           apiVersion: API_VERSION,
           revision: registry.revision,
           agentCount: agents.length,
+          ...registry.readiness(),
         });
       }
       if (req.method === "GET" && url.pathname === "/v1/events") {
@@ -86,6 +102,7 @@ export function createAgentServer(registry, options) {
           apiVersion: API_VERSION,
           revision: registry.revision,
           sequence: registry.events.sequence,
+          initialLoading: registry.initialLoading,
         })}\n\n`);
         req.on("close", () => {
           eventResponses.delete(res);
@@ -129,13 +146,13 @@ export function createAgentServer(registry, options) {
   let timer;
   return {
     async start() {
-      await registry.refresh();
-      timer = setInterval(() => void registry.refresh(), options.refreshMs);
-      timer.unref();
       await new Promise((resolve, reject) => {
         server.once("error", reject);
         server.listen(options.port, options.host, resolve);
       });
+      void registry.refresh();
+      timer = setInterval(() => void registry.refresh(), options.refreshMs);
+      timer.unref();
       return server.address();
     },
     async stop() {

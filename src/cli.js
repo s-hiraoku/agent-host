@@ -5,7 +5,10 @@ import { HerdrAdapter } from "./adapters/herdr.js";
 import { CodexAdapter } from "./adapters/codex.js";
 import { createAgentServer } from "./http/server.js";
 
-const makeRegistry = () => new AgentRegistry([new CodexAdapter(), new HerdrAdapter(), new ProcessAdapter()]);
+const makeRegistry = () => new AgentRegistry(
+  [new CodexAdapter(), new HerdrAdapter(), new ProcessAdapter()],
+  { adapterTimeoutMs: Number(process.env.AGENT_HOST_ADAPTER_TIMEOUT_MS ?? "20000") },
+);
 const [command = "serve", ...args] = process.argv.slice(2);
 const host = process.env.AGENT_HOST_BIND ?? "127.0.0.1";
 const port = Number(process.env.AGENT_HOST_PORT ?? "4777");

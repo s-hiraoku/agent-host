@@ -43,6 +43,8 @@ Clients only consume a stable agent model and invoke capabilities exposed by the
 
 ```text
 GET  /health
+GET  /ready
+GET  /v1/adapters
 GET  /v1/agents                        # bounded summaries; default limit 50, maximum 200
 GET  /v1/agents/:id
 POST /v1/refresh
@@ -98,6 +100,14 @@ events they do not understand. Removing or renaming a field, changing its meanin
 type, or removing an existing status, capability, action, event, or error code requires
 a new API version.
 
+`/health` is a liveness probe and responds as soon as the HTTP listener is running.
+`/ready` returns `503` only while the bounded initial discovery is still loading, then
+returns `200` even when one adapter is degraded. `GET /v1/adapters` exposes each
+adapter's `status` (`loading`, `healthy`, `error`, or `timeout`), last attempt and
+success timestamps, duration, agent count, and sanitized error. Slow and failed
+adapters retain their last successful agents while healthy adapters continue updating.
+SSE emits `adapter.health` only when status, agent count, or sanitized error changes.
+
 Example Codex agent waiting for approval:
 
 ```json
@@ -137,6 +147,10 @@ Requires Node.js 22+ and optionally the CLIs for the adapters you want to use. T
 npm install
 npm start
 ```
+
+Discovery runs concurrently, is coalesced when refreshes overlap, and defaults to a
+20-second timeout per adapter. Override it with `AGENT_HOST_ADAPTER_TIMEOUT_MS`; the
+normal refresh interval remains configurable with `AGENT_HOST_REFRESH_MS`.
 
 Then:
 
@@ -228,7 +242,7 @@ src/
 ```ts
 interface AgentAdapter {
   id: string
-  discover(): Promise<AgentRecord[]>
+  discover(options?: { signal?: AbortSignal }): Promise<AgentRecord[]>
   prompt?(agent, text): Promise<AgentActionResult>
   sendKeys?(agent, keys): Promise<AgentActionResult>
   approve?(agent, payload?): Promise<AgentActionResult>
