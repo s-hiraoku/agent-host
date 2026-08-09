@@ -172,6 +172,14 @@ export class AgentRegistry {
 
   async #discoverAdapter(adapter) {
     let flight = this.#adapterFlights.get(adapter.id);
+    if (flight?.timedOut) {
+      return {
+        adapterId: adapter.id,
+        attemptedAt: flight.startedAtIso,
+        durationMs: Date.now() - flight.startedAt,
+        status: "timeout",
+      };
+    }
     if (!flight) {
       const controller = new AbortController();
       flight = {
