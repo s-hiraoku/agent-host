@@ -235,3 +235,37 @@ test("enforces browser security and emits secret-free action audit events", asyn
     await server.stop();
   }
 });
+
+test("starts the idempotency TTL after a slow action settles", async () => {
+  let promptCalls = 0;
+  const registry = fixtureRegistry(async () => {
+    promptCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  });
+  const server = createAgentServer(registry, {
+    host: "127.0.0.1",
+    port: 0,
+    refreshMs: 60_000,
+    apiToken: TOKEN,
+    idempotencyTtlMs: 100,
+  });
+  const address = await server.start();
+  await registry.refresh();
+  const url = `http://127.0.0.1:${address.port}/v1/agents/secure%3A1/prompt`;
+  const requestOptions = {
+    method: "POST",
+    headers: { ...authorization, "content-type": "application/json", "idempotency-key": "slow-prompt-0001" },
+    body: JSON.stringify({ text: "slow" }),
+  };
+
+  try {
+    const first = await fetch(url, requestOptions);
+    assert.equal(first.status, 200);
+    const replay = await fetch(url, requestOptions);
+    assert.equal(replay.status, 200);
+    assert.equal((await replay.json()).result.replayed, true);
+    assert.equal(promptCalls, 1);
+  } finally {
+    await server.stop();
+  }
+});

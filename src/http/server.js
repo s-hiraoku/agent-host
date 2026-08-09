@@ -55,9 +55,10 @@ function actionErrorStatus(code) {
   }
 }
 
-function createActionExecutor(registry) {
+function createActionExecutor(registry, options = {}) {
   const cache = new Map();
   const queues = new Map();
+  const ttlMs = options.idempotencyTtlMs ?? IDEMPOTENCY_TTL_MS;
   return async (agentId, action, payload, key) => {
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(key ?? "")) {
       throw new ContractError("invalid_idempotency_key", "Idempotency-Key must be 8-128 safe ASCII characters");
@@ -79,10 +80,11 @@ function createActionExecutor(registry) {
     }
 
     const previous = queues.get(agentId) ?? Promise.resolve();
-    const entry = { signature, settled: false, expiresAt: now + IDEMPOTENCY_TTL_MS };
+    const entry = { signature, settled: false, expiresAt: Infinity };
     entry.promise = previous.catch(() => {}).then(() => registry.action(agentId, action, payload));
     const tail = entry.promise.catch(() => {}).finally(() => {
       entry.settled = true;
+      entry.expiresAt = Date.now() + ttlMs;
       if (queues.get(agentId) === tail) queues.delete(agentId);
     });
     queues.set(agentId, tail);
@@ -94,7 +96,7 @@ function createActionExecutor(registry) {
 export function createAgentServer(registry, options) {
   const eventResponses = new Set();
   const security = createApiSecurity(options);
-  const executeAction = createActionExecutor(registry);
+  const executeAction = createActionExecutor(registry, options);
   const server = createServer(async (req, res) => {
     let audit;
     let auditCompleted = false;

@@ -30,9 +30,9 @@
 
 - Command: `git diff --check && npm run check`
 - Result: pass
-- Tests: 29 passed, 0 failed
+- Tests: 30 passed, 0 failed
 - Authentication fixtures: missing/invalid bearer credentials, protected list/detail/adapter/action routes, and aggregate-only public readiness.
 - Browser-boundary fixtures: exact same-origin and allowlisted-origin success, default-deny and explicitly denied origins, invalid Host, bracketed IPv6 loopback, valid preflight, and disallowed preflight headers.
-- Mutation fixtures: required idempotency keys, identical replay suppression, conflicting payload rejection, per-agent serialization, and stable media/body errors.
+- Mutation fixtures: required idempotency keys, identical replay suppression, conflicting payload rejection, per-agent serialization, post-settlement TTL for slow actions, and stable media/body errors.
 - Audit fixtures: exactly paired authenticated action attempts/completions, no events from rejected unauthenticated or cross-origin requests, and no token or request-body content in events.
 - Independent review: six security specialists reviewed injection, authentication/authorization, secrets, business logic/races, infrastructure/network boundaries, and supply chain. Findings covering public reconnaissance, audit flooding, token logging, IPv6 Host handling, replay/race behavior, and deployment documentation were addressed; injection and supply-chain passes had no findings.
