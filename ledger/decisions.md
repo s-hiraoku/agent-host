@@ -16,3 +16,7 @@
 - Reject non-loopback service binding and cross-origin browser requests by default. Allow dashboard origins only through an exact runtime allowlist.
 - Persist an auto-generated token atomically in an owner-only file instead of printing it to service logs.
 - Require an idempotency key on every action, cache in-flight/completed results for a bounded TTL, and serialize actions per agent so dashboard retries and double-clicks cannot duplicate or race mutations.
+- Make `recent` the default discovery view; expose `active`, `historical`, and `raw` explicitly without ever serializing provider metadata.
+- Keep normal Codex discovery at one recency-sorted page of 100 threads. Load up to 1,000 history records only on explicit historical/raw requests into a separate TTL cache with an independent cursor revision and no lifecycle-event burst.
+- Treat Codex `notLoaded` as unknown state, not completion, and classify recency separately from runtime status using provider timestamps.
+- Never advertise process interrupt by default. Keep loose command matches raw-only and suppress process/rich duplicates only on exact same-provider PID correlation.

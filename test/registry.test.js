@@ -190,6 +190,57 @@ test("returns stable action error codes", async () => {
   assert.equal(events.at(-1).sequence, 3);
 });
 
+test("keeps history separate and reconciles only exact process identities", async () => {
+  let historyCalls = 0;
+  const rich = {
+    id: "rich",
+    async discover() {
+      return [{
+        id: "rich:42", provider: "codex", source: "rich", name: "Rich", status: "working", pid: 42, cwd: "/work",
+        capabilities: { prompt: true }, discovery: { kind: "native", confidence: "high", visibility: "active" },
+      }];
+    },
+    async discoverHistory() {
+      historyCalls += 1;
+      return [{
+        id: "rich:old", provider: "codex", source: "rich", name: "Old", status: "unknown", cwd: "/old",
+        lastActivityAt: "2020-01-01T00:00:00.000Z", capabilities: {},
+        discovery: { kind: "native", confidence: "high", visibility: "historical" },
+      }];
+    },
+  };
+  const processes = {
+    id: "process",
+    async discover() {
+      return [
+        { id: "process:42", provider: "codex", source: "process", name: "Duplicate", status: "unknown", pid: 42, cwd: "/work", capabilities: {}, discovery: { kind: "process", confidence: "high", visibility: "active" } },
+        { id: "process:43", provider: "codex", source: "process", name: "Same cwd", status: "unknown", pid: 43, cwd: "/work", capabilities: {}, discovery: { kind: "process", confidence: "high", visibility: "active" } },
+        { id: "process:44", provider: "codex", source: "process", name: "Loose", status: "unknown", pid: 44, capabilities: {}, discovery: { kind: "process", confidence: "low", visibility: "raw" } },
+      ];
+    },
+  };
+  const registry = new AgentRegistry([rich, processes]);
+  const events = [];
+  registry.events.subscribe((event) => events.push(event));
+  await registry.refresh();
+
+  assert.deepEqual(registry.list().map((agent) => agent.id), ["rich:42", "process:43"]);
+  assert.equal(registry.get("process:42").capabilities.interrupt, undefined);
+  assert.equal(registry.get("process:42").discovery.duplicateOf, "rich:42");
+  const revision = registry.revision;
+  const eventCount = events.length;
+  const historical = await registry.listView("historical");
+  assert.deepEqual(historical.agents.map((agent) => agent.id), ["rich:old"]);
+  await registry.listView("historical");
+  assert.equal(historyCalls, 1);
+  assert.equal(registry.revision, revision);
+  assert.equal(events.length, eventCount);
+
+  const raw = await registry.listView("raw");
+  assert.deepEqual(new Set(raw.agents.map((agent) => agent.id)), new Set(["rich:old", "rich:42", "process:42", "process:43", "process:44"]));
+  assert.equal(raw.agents.find((agent) => agent.id === "process:42").discovery.duplicateOf, "rich:42");
+});
+
 test("coalesces refreshes and discovers adapters concurrently", async () => {
   const firstGate = deferred();
   const secondGate = deferred();

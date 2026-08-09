@@ -1,5 +1,6 @@
 import { AgentEventBus } from "./event-bus.js";
 import { isDeepStrictEqual } from "node:util";
+import { compareAgents, matchesView, reconcileAgents } from "./discovery.js";
 
 const ACTION_CAPABILITIES = new Map([
   ["prompt", "prompt"],
@@ -11,6 +12,7 @@ const ACTION_CAPABILITIES = new Map([
   ["read", "read"],
 ]);
 const DEFAULT_ADAPTER_TIMEOUT_MS = 20_000;
+const DEFAULT_HISTORY_TTL_MS = 5 * 60_000;
 
 function sanitizeError(error) {
   const message = String(error?.message ?? error ?? "adapter discovery failed")
@@ -47,6 +49,12 @@ export class AgentRegistry {
   #adapterHealth = new Map();
   #adapterFlights = new Map();
   #adapterTimeoutMs;
+  #historyTtlMs;
+  #historyAgents = new Map();
+  #historyRevision = 0;
+  #historyExpiresAt = 0;
+  #historyPromise;
+  #historyControllers = new Set();
   #closeController = new AbortController();
   #closedOutcome;
   #refreshPromise;
@@ -57,6 +65,7 @@ export class AgentRegistry {
 
   constructor(adapters, options = {}) {
     this.#adapterTimeoutMs = options.adapterTimeoutMs ?? DEFAULT_ADAPTER_TIMEOUT_MS;
+    this.#historyTtlMs = options.historyTtlMs ?? DEFAULT_HISTORY_TTL_MS;
     this.#closedOutcome = new Promise((resolve) => this.#closeController.signal.addEventListener(
       "abort",
       () => resolve({ status: "closed" }),
@@ -77,11 +86,28 @@ export class AgentRegistry {
   }
 
   list() {
-    return [...this.#agents.values()].sort(
-      (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
-    );
+    return reconcileAgents([...this.#agents.values()]).sort(compareAgents);
   }
-  get(id) { return this.#agents.get(id); }
+  listRaw() { return reconcileAgents([...this.#agents.values()], true).sort(compareAgents); }
+  async listView(view = "recent") {
+    if (view !== "historical" && view !== "raw") {
+      return { agents: this.list().filter((agent) => matchesView(agent, view)), cursorRevision: this.#revision };
+    }
+    await this.#loadHistory();
+    if (view === "historical") {
+      return {
+        agents: reconcileAgents([...this.#historyAgents.values()]).filter((agent) => matchesView(agent, view)).sort(compareAgents),
+        cursorRevision: `history:${this.#historyRevision}`,
+      };
+    }
+    const combined = new Map(this.#historyAgents);
+    for (const agent of this.listRaw()) combined.set(agent.id, agent);
+    return {
+      agents: reconcileAgents([...combined.values()], true).sort(compareAgents),
+      cursorRevision: `raw:${this.#revision}:${this.#historyRevision}`,
+    };
+  }
+  get(id) { return this.listRaw().find((agent) => agent.id === id) ?? this.#historyAgents.get(id); }
   get revision() { return this.#revision; }
   get initialLoading() { return this.#initialLoading; }
   get refreshing() { return Boolean(this.#refreshPromise); }
@@ -124,6 +150,7 @@ export class AgentRegistry {
   }
 
   #applyOutcome(outcome) {
+    const previousCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
     const next = new Map(this.#agents);
     const previousHealth = this.#adapterHealth.get(outcome.adapterId);
     const health = this.#healthForOutcome(previousHealth, outcome);
@@ -139,26 +166,32 @@ export class AgentRegistry {
 
     const at = new Date().toISOString();
     const normalized = new Map();
-    const changes = [];
     for (const [id, agent] of next) {
       const previous = this.#agents.get(id);
       if (!previous) {
         const discovered = { ...agent, discoveredAt: agent.discoveredAt ?? at, updatedAt: agent.updatedAt ?? at };
         normalized.set(id, discovered);
-        changes.push({ type: "agent.discovered", agent: discovered, at });
       } else if (!isDeepStrictEqual(semanticAgent(previous), semanticAgent(agent))) {
         const updated = { ...agent, discoveredAt: previous.discoveredAt, updatedAt: at };
         normalized.set(id, updated);
-        changes.push({ type: "agent.updated", agent: updated, at });
       } else {
         normalized.set(id, previous);
       }
     }
-    for (const id of this.#agents.keys()) {
-      if (!next.has(id)) changes.push({ type: "agent.removed", agentId: id, at });
+    this.#agents = normalized;
+    const nextCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
+    const changes = [];
+    for (const [id, agent] of nextCanonical) {
+      const previous = previousCanonical.get(id);
+      if (!previous) changes.push({ type: "agent.discovered", agent, at });
+      else if (!isDeepStrictEqual(semanticAgent(previous), semanticAgent(agent))) {
+        changes.push({ type: "agent.updated", agent, at });
+      }
+    }
+    for (const id of previousCanonical.keys()) {
+      if (!nextCanonical.has(id)) changes.push({ type: "agent.removed", agentId: id, at });
     }
     if (changes.length) this.#revision += 1;
-    this.#agents = normalized;
     for (const change of changes) this.events.emit({ ...change, snapshotRevision: this.#revision });
     if (healthChanged) {
       this.events.emit({
@@ -168,6 +201,53 @@ export class AgentRegistry {
         snapshotRevision: this.#revision,
       });
     }
+  }
+
+  async #loadHistory() {
+    if (this.#historyExpiresAt > Date.now()) return;
+    if (this.#historyPromise) return this.#historyPromise;
+    const adapters = [...this.#adapters.values()].filter((adapter) => adapter.discoverHistory);
+    this.#historyPromise = Promise.all(adapters.map(async (adapter) => {
+      const controller = new AbortController();
+      this.#historyControllers.add(controller);
+      const failed = { adapterId: adapter.id, agents: null };
+      let timer;
+      const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => {
+          controller.abort(new DOMException("History discovery timed out", "TimeoutError"));
+          resolve(failed);
+        }, this.#adapterTimeoutMs);
+      });
+      try {
+        const result = await Promise.race([
+          Promise.resolve()
+            .then(() => adapter.discoverHistory({ signal: controller.signal }))
+            .then((agents) => ({ adapterId: adapter.id, agents: Array.isArray(agents) ? agents : null }))
+            .catch(() => failed),
+          timeout,
+          this.#closedOutcome.then(() => failed),
+        ]);
+        return result;
+      } finally {
+        clearTimeout(timer);
+        this.#historyControllers.delete(controller);
+      }
+    })).then((results) => {
+      const next = new Map(this.#historyAgents);
+      for (const result of results) {
+        if (!result.agents) continue;
+        for (const [id, agent] of next) {
+          if (agent.source === result.adapterId) next.delete(id);
+        }
+        for (const agent of result.agents) next.set(agent.id, agent);
+      }
+      const before = [...this.#historyAgents.values()].map(semanticAgent).sort((a, b) => a.id.localeCompare(b.id));
+      const after = [...next.values()].map(semanticAgent).sort((a, b) => a.id.localeCompare(b.id));
+      if (!isDeepStrictEqual(before, after)) this.#historyRevision += 1;
+      this.#historyAgents = next;
+      this.#historyExpiresAt = Date.now() + this.#historyTtlMs;
+    }).finally(() => { this.#historyPromise = undefined; });
+    return this.#historyPromise;
   }
 
   async #discoverAdapter(adapter) {
@@ -250,13 +330,15 @@ export class AgentRegistry {
     this.#closed = true;
     this.#closeController.abort();
     for (const flight of this.#adapterFlights.values()) flight.controller.abort();
+    for (const controller of this.#historyControllers) controller.abort();
     await Promise.allSettled([...this.#adapters.values()].map((adapter) => adapter.close?.()));
-    await this.#refreshPromise;
+    await Promise.allSettled([this.#refreshPromise, this.#historyPromise].filter(Boolean));
     this.#adapterFlights.clear();
+    this.#historyControllers.clear();
   }
 
   async action(id, action, payload) {
-    const agent = this.#agents.get(id);
+    const agent = this.get(id);
     if (!agent) return { ok: false, code: "agent_not_found", agentId: id, action, message: "agent not found" };
     const adapter = this.#adapters.get(agent.source);
     if (!adapter) return { ok: false, code: "adapter_not_found", agentId: id, action, message: "adapter not found" };

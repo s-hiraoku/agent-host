@@ -58,7 +58,8 @@ if (command === "serve") {
   process.on("SIGTERM", shutdown);
 } else if (command === "list") {
   const registry = makeRegistry();
-  console.log(JSON.stringify({ agents: await registry.refresh() }, null, 2));
+  await registry.refresh();
+  console.log(JSON.stringify({ agents: (await registry.listView("recent")).agents }, null, 2));
   await registry.close();
 } else if (command === "action") {
   const [id, action, ...rest] = args;

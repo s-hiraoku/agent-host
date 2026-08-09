@@ -5,6 +5,9 @@ const APPROVAL_METHODS = new Set([
   "item/fileChange/requestApproval",
 ]);
 const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_RECENT_MS = 7 * 24 * 60 * 60_000;
+const DEFAULT_RECENT_LIMIT = 100;
+const MAX_HISTORY_THREADS = 1_000;
 const TERMINAL_TURN_METHODS = new Set(["turn/completed", "turn/failed", "turn/aborted"]);
 
 function mapStatus(status, hasApproval) {
@@ -13,7 +16,7 @@ function mapStatus(status, hasApproval) {
     case "active": return "working";
     case "idle": return "idle";
     case "systemError": return "error";
-    case "notLoaded": return "idle";
+    case "notLoaded": return "unknown";
     default: return "unknown";
   }
 }
@@ -41,10 +44,14 @@ export class CodexAdapter {
   #status = new Map();
   #started = false;
   #approvalTimeoutMs;
+  #now;
+  #recentMs;
 
   constructor(options = {}) {
     this.#client = options.client ?? new CodexRpcClient(options.rpc);
     this.#approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+    this.#now = options.now ?? Date.now;
+    this.#recentMs = options.recentMs ?? DEFAULT_RECENT_MS;
     this.#client.onServerRequest?.((message) => this.#onServerRequest(message));
     this.#client.onNotification?.((message) => this.#onNotification(message));
   }
@@ -54,43 +61,63 @@ export class CodexAdapter {
       options.signal?.throwIfAborted();
       await this.#ensureStarted();
       options.signal?.throwIfAborted();
-      const threads = await this.#listThreads(options.signal);
+      const threads = await this.#listThreads(DEFAULT_RECENT_LIMIT, options.signal);
       const now = new Date().toISOString();
-      return threads.map((thread) => {
-        const approvals = this.#approvalsForThread(thread.id);
-        const status = this.#status.get(thread.id) ?? thread.status;
-        const title = thread.name ?? thread.preview ?? thread.agentNickname ?? thread.id;
-        return {
-          id: `codex:${thread.id}`,
-          provider: "codex",
-          source: this.id,
-          name: String(title),
-          status: mapStatus(status, approvals.length > 0),
-          capabilities: {
-            prompt: true,
-            sendKeys: false,
-            approve: approvals.length > 0,
-            reject: approvals.length > 0,
-            interrupt: status?.type === "active" || this.#activeTurns.has(thread.id),
-            focus: false,
-            read: true,
-          },
-          cwd: thread.cwd,
-          sessionId: thread.id,
-          target: thread.id,
-          activeTurnId: this.#activeTurns.get(thread.id),
-          pendingApprovals: approvals.map(pendingApprovalView),
-          metadata: {
-            codex: thread,
-          },
-          discoveredAt: now,
-          updatedAt: now,
-        };
-      });
+      return threads.map((thread) => this.#mapThread(thread, now));
     } catch (error) {
       if (error?.code === "ENOENT" || String(error).includes("ENOENT")) return [];
       throw error;
     }
+  }
+
+  async discoverHistory(options = {}) {
+    options.signal?.throwIfAborted();
+    await this.#ensureStarted();
+    const threads = await this.#listThreads(MAX_HISTORY_THREADS, options.signal);
+    const now = new Date().toISOString();
+    return threads.map((thread) => this.#mapThread(thread, now));
+  }
+
+  #mapThread(thread, now) {
+    const approvals = this.#approvalsForThread(thread.id);
+    const status = this.#status.get(thread.id) ?? thread.status;
+    const title = thread.name ?? thread.preview ?? thread.agentNickname ?? thread.id;
+    const lastActivityAt = codexTimestamp(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt);
+    const mappedStatus = mapStatus(status, approvals.length > 0);
+    return {
+      id: `codex:${thread.id}`,
+      provider: "codex",
+      source: this.id,
+      name: String(title),
+      status: mappedStatus,
+      capabilities: {
+        prompt: true,
+        sendKeys: false,
+        approve: approvals.length > 0,
+        reject: approvals.length > 0,
+        interrupt: status?.type === "active" || this.#activeTurns.has(thread.id),
+        focus: false,
+        read: true,
+      },
+      cwd: thread.cwd,
+      sessionId: thread.id,
+      target: thread.id,
+      activeTurnId: this.#activeTurns.get(thread.id),
+      pendingApprovals: approvals.map(pendingApprovalView),
+      lastActivityAt,
+      discovery: {
+        kind: "native",
+        confidence: "high",
+        visibility: mappedStatus === "working" || mappedStatus === "blocked"
+          ? "active"
+          : !lastActivityAt || this.#now() - Date.parse(lastActivityAt) <= this.#recentMs
+            ? "recent"
+            : "historical",
+      },
+      metadata: { codex: thread },
+      discoveredAt: now,
+      updatedAt: now,
+    };
   }
 
   async prompt(agent, text) {
@@ -178,21 +205,21 @@ export class CodexAdapter {
     this.#started = true;
   }
 
-  async #listThreads(signal) {
+  async #listThreads(maxThreads, signal) {
     const all = [];
     let cursor = null;
     let pages = 0;
     do {
       const result = await this.#client.request("thread/list", {
         cursor,
-        limit: 100,
+        limit: Math.min(100, maxThreads - all.length),
         sortKey: "recency_at",
         sortDirection: "desc",
       }, { signal });
       all.push(...(result?.data ?? []));
       cursor = result?.nextCursor ?? null;
       pages += 1;
-    } while (cursor && all.length < 1000 && pages < 20);
+    } while (cursor && all.length < maxThreads && pages < Math.ceil(maxThreads / 100));
     return all;
   }
 
@@ -292,4 +319,9 @@ export class CodexAdapter {
   #fail(agent, action, error) {
     return { ok: false, agentId: agent.id, action, message: String(error?.message ?? error) };
   }
+}
+
+function codexTimestamp(value) {
+  if (!Number.isFinite(value)) return undefined;
+  return new Date(value * 1_000).toISOString();
 }

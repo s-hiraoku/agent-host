@@ -65,11 +65,25 @@ with the same key and payload return the original result, while conflicting reus
 returns `409 idempotency_conflict`. Mutations for one agent execute serially.
 
 `GET /v1/agents` accepts repeatable or comma-separated `provider` and `status`
-filters, plus `cwd`, free-text `q`, `limit`, and an opaque `cursor`. Responses include
+filters, plus `view`, `cwd`, free-text `q`, `limit`, and an opaque `cursor`. Responses include
 the current snapshot `revision`; a cursor returns `409 stale_cursor` if that snapshot
 changes during pagination. List entries are bounded summaries and never include raw
 provider metadata. Use the detail endpoint for controlled fields such as pending
 approvals.
+
+`view` controls discovery noise:
+
+| View | Meaning |
+| --- | --- |
+| `recent` (default) | Active agents plus the bounded recent working set |
+| `active` | Working, blocked, or confidently detected live agents |
+| `historical` | Older persisted sessions, loaded on demand and cached separately |
+| `raw` | All normalized records, including low-confidence and linked duplicates |
+
+`raw` does not expose provider metadata. Records can include provider-neutral
+`discovery.kind`, `confidence`, `visibility`, and `duplicateOf` fields. Historical
+loading has its own cursor revision and does not expand the periodic refresh workload
+or emit a burst of normal agent lifecycle events.
 
 Provider metadata is intentionally non-semantic and excluded from public responses
 and change detection. Adapter authors must lift every client-visible mutable value
@@ -238,6 +252,7 @@ src/
   core/
     types.js       unified model + capabilities
     contracts.js   versioned HTTP views, filters, pagination, errors
+    discovery.js   visibility ordering + process/rich reconciliation
     registry.js    merge discovery + route actions
     event-bus.js   normalized events
   adapters/
@@ -256,6 +271,7 @@ src/
 interface AgentAdapter {
   id: string
   discover(options?: { signal?: AbortSignal }): Promise<AgentRecord[]>
+  discoverHistory?(options?: { signal?: AbortSignal }): Promise<AgentRecord[]>
   prompt?(agent, text): Promise<AgentActionResult>
   sendKeys?(agent, keys): Promise<AgentActionResult>
   approve?(agent, payload?): Promise<AgentActionResult>
@@ -268,6 +284,12 @@ interface AgentAdapter {
 ```
 
 This keeps client integrations provider-agnostic.
+
+The process adapter treats direct agent executables as high-confidence and loose
+command-line matches as raw-only. Process records never advertise interrupt by
+default. A process record is suppressed from normal views only when a richer
+same-provider adapter reports the exact same PID; matching working directories alone
+never merges agents.
 
 ## Next adapters
 

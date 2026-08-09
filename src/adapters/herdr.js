@@ -23,6 +23,7 @@ export class HerdrAdapter {
         const target = String(item.name ?? item.pane_id ?? item.agent ?? "unknown");
         const provider = String(item.agent ?? "herdr-agent");
         const paneId = item.pane_id ? String(item.pane_id) : undefined;
+        const pid = Number(item.foreground_pid ?? item.pid) || undefined;
         return {
           id: `herdr:${paneId ?? target}`,
           provider,
@@ -33,6 +34,9 @@ export class HerdrAdapter {
           cwd: item.foreground_cwd ?? item.cwd,
           sessionId: item.agent_session?.value,
           target,
+          pid,
+          lastActivityAt: item.last_activity_at ?? item.updated_at,
+          discovery: { kind: "native", confidence: "high", visibility: "active" },
           metadata: { paneId, herdr: item },
           discoveredAt: now,
           updatedAt: now,

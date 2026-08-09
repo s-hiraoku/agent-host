@@ -265,6 +265,80 @@ test("keeps the default list response bounded with 1,000 agents", async () => {
   }
 });
 
+test("reduces a recorded 1,116-agent environment to a useful default view", async () => {
+  const capability = { prompt: false, sendKeys: false, approve: false, reject: false, interrupt: false, focus: false, read: false };
+  const codexAgents = Array.from({ length: 1_000 }, (_, index) => ({
+    id: `codex:history-${index}`,
+    provider: "codex",
+    source: "codex-fixture",
+    name: `Codex ${index}`,
+    status: index < 2 ? "working" : "unknown",
+    capabilities: capability,
+    lastActivityAt: new Date(Date.UTC(2026, 7, index < 10 ? 9 : 1)).toISOString(),
+    discovery: { kind: "native", confidence: "high", visibility: index < 2 ? "active" : index < 10 ? "recent" : "historical" },
+  }));
+  const codex = {
+    id: "codex-fixture",
+    async discover() { return codexAgents.slice(0, 10); },
+    async discoverHistory() { return codexAgents; },
+  };
+  const processAdapter = {
+    id: "process-fixture",
+    async discover() {
+      return Array.from({ length: 108 }, (_, index) => ({
+        id: `process:fixture-${index}`,
+        provider: "fixture",
+        source: "process-fixture",
+        name: `Process ${index}`,
+        status: "unknown",
+        capabilities: capability,
+        discovery: { kind: "process", confidence: index < 8 ? "high" : "low", visibility: index < 8 ? "active" : "raw" },
+      }));
+    },
+  };
+  let herdrSuffix = "";
+  const herdr = {
+    id: "herdr-fixture",
+    async discover() {
+      return Array.from({ length: 8 }, (_, index) => ({
+        id: `herdr:fixture-${index}`, provider: "fixture", source: "herdr-fixture", name: `Herdr ${index}${herdrSuffix}`,
+        status: "idle", capabilities: capability, discovery: { kind: "native", confidence: "high", visibility: "active" },
+      }));
+    },
+  };
+  const registry = new AgentRegistry([codex, processAdapter, herdr]);
+  const server = createAgentServer(registry, { host: "127.0.0.1", port: 0, refreshMs: 60_000, apiToken: API_TOKEN });
+  const address = await server.start();
+  await registry.refresh();
+  const base = `http://127.0.0.1:${address.port}/v1/agents`;
+
+  try {
+    const defaultText = await (await fetch(`${base}?limit=200`, { headers: AUTHORIZATION })).text();
+    const defaultView = JSON.parse(defaultText);
+    assert.equal(defaultView.page.total, 26);
+    assert.equal(defaultView.agents[0].status, "working");
+
+    const historical = await (await fetch(`${base}?view=historical&limit=200`, { headers: AUTHORIZATION })).json();
+    assert.equal(historical.page.total, 990);
+    const historicalDetail = await fetch(`${base}/codex%3Ahistory-10`, { headers: AUTHORIZATION });
+    assert.equal(historicalDetail.status, 200);
+    herdrSuffix = " changed";
+    await registry.refresh();
+    const nextHistoryPage = await fetch(
+      `${base}?view=historical&limit=200&cursor=${encodeURIComponent(historical.page.nextCursor)}`,
+      { headers: AUTHORIZATION },
+    );
+    assert.equal(nextHistoryPage.status, 200);
+
+    const rawText = await (await fetch(`${base}?view=raw&limit=200`, { headers: AUTHORIZATION })).text();
+    const raw = JSON.parse(rawText);
+    assert.equal(raw.page.total, 1_116);
+    assert.ok(Buffer.byteLength(defaultText) < Buffer.byteLength(rawText));
+  } finally {
+    await server.stop();
+  }
+});
+
 test("serves liveness during initial discovery and exposes degraded readiness", { timeout: 2_000 }, async () => {
   let calls = 0;
   let active = 0;

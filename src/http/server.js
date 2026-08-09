@@ -159,11 +159,12 @@ export function createAgentServer(registry, options) {
         });
       }
       if (req.method === "GET" && url.pathname === "/v1/agents") {
-        const query = parseAgentListQuery(url.searchParams, registry.revision);
+        const snapshot = await registry.listView(url.searchParams.get("view") ?? "recent");
+        const query = parseAgentListQuery(url.searchParams, snapshot.cursorRevision);
         return send(res, 200, {
           apiVersion: API_VERSION,
           revision: registry.revision,
-          ...pageAgents(registry.list(), query, registry.revision),
+          ...pageAgents(snapshot.agents, query, snapshot.cursorRevision),
         });
       }
       if (req.method === "POST" && url.pathname === "/v1/refresh") {
