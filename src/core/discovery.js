@@ -1,0 +1,42 @@
+const ACTIVE_STATUSES = new Set(["working", "blocked"]);
+const STATUS_RANK = new Map([["blocked", 0], ["working", 1], ["idle", 2], ["unknown", 3], ["done", 4], ["error", 5]]);
+
+export function reconcileAgents(agents, includeDuplicates = false) {
+  const richByProcess = new Map();
+  for (const agent of agents) {
+    if (agent.discovery?.kind === "process" || !agent.pid) continue;
+    richByProcess.set(`${agent.provider}:${agent.pid}`, agent.id);
+  }
+
+  return agents.flatMap((agent) => {
+    if (!includeDuplicates && agent.discovery?.visibility === "raw") return [];
+    if (agent.discovery?.kind !== "process" || !agent.pid) return [agent];
+    const duplicateOf = richByProcess.get(`${agent.provider}:${agent.pid}`);
+    if (!duplicateOf) return [agent];
+    const duplicate = {
+      ...agent,
+      discovery: { ...agent.discovery, visibility: "raw", duplicateOf },
+    };
+    return includeDuplicates ? [duplicate] : [];
+  });
+}
+
+export function matchesView(agent, view) {
+  const visibility = agent.discovery?.visibility ?? (ACTIVE_STATUSES.has(agent.status) ? "active" : "recent");
+  if (view === "active") return visibility === "active";
+  if (view === "historical") return visibility === "historical";
+  if (view === "raw") return true;
+  return visibility === "active" || visibility === "recent";
+}
+
+export function compareAgents(a, b) {
+  const aVisibility = a.discovery?.visibility === "active" ? 0 : 1;
+  const bVisibility = b.discovery?.visibility === "active" ? 0 : 1;
+  if (aVisibility !== bVisibility) return aVisibility - bVisibility;
+  const status = (STATUS_RANK.get(a.status) ?? 6) - (STATUS_RANK.get(b.status) ?? 6);
+  if (status) return status;
+  const aActivity = String(a.lastActivityAt ?? "");
+  const bActivity = String(b.lastActivityAt ?? "");
+  if (aActivity !== bActivity) return aActivity < bActivity ? 1 : -1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}

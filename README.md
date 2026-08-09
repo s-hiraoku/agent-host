@@ -43,6 +43,8 @@ Clients only consume a stable agent model and invoke capabilities exposed by the
 
 ```text
 GET  /health
+GET  /ready
+GET  /v1/adapters
 GET  /v1/agents                        # bounded summaries; default limit 50, maximum 200
 GET  /v1/agents/:id
 POST /v1/refresh
@@ -56,12 +58,32 @@ POST /v1/agents/:id/focus
 POST /v1/agents/:id/read
 ```
 
+Only `/health` and the aggregate `/ready` probe are unauthenticated. Every `/v1/*`
+request requires `Authorization: Bearer <token>`. Action requests also require
+`Content-Type: application/json` and an 8-128 character `Idempotency-Key`; retries
+with the same key and payload return the original result, while conflicting reuse
+returns `409 idempotency_conflict`. Mutations for one agent execute serially.
+
 `GET /v1/agents` accepts repeatable or comma-separated `provider` and `status`
-filters, plus `cwd`, free-text `q`, `limit`, and an opaque `cursor`. Responses include
+filters, plus `view`, `cwd`, free-text `q`, `limit`, and an opaque `cursor`. Responses include
 the current snapshot `revision`; a cursor returns `409 stale_cursor` if that snapshot
 changes during pagination. List entries are bounded summaries and never include raw
 provider metadata. Use the detail endpoint for controlled fields such as pending
 approvals.
+
+`view` controls discovery noise:
+
+| View | Meaning |
+| --- | --- |
+| `recent` (default) | Active agents plus the bounded recent working set |
+| `active` | Working, blocked, or confidently detected live agents |
+| `historical` | Older persisted sessions, loaded on demand and cached separately |
+| `raw` | All normalized records, including low-confidence and linked duplicates |
+
+`raw` does not expose provider metadata. Records can include provider-neutral
+`discovery.kind`, `confidence`, `visibility`, and `duplicateOf` fields. Historical
+loading has its own cursor revision and does not expand the periodic refresh workload
+or emit a burst of normal agent lifecycle events.
 
 Provider metadata is intentionally non-semantic and excluded from public responses
 and change detection. Adapter authors must lift every client-visible mutable value
@@ -97,6 +119,14 @@ types may be added without changing the version; clients should ignore fields an
 events they do not understand. Removing or renaming a field, changing its meaning or
 type, or removing an existing status, capability, action, event, or error code requires
 a new API version.
+
+`/health` is a liveness probe and responds as soon as the HTTP listener is running.
+`/ready` returns `503` only while the bounded initial discovery is still loading, then
+returns `200` even when one adapter is degraded. `GET /v1/adapters` exposes each
+adapter's `status` (`loading`, `healthy`, `error`, or `timeout`), last attempt and
+success timestamps, duration, agent count, and sanitized error. Slow and failed
+adapters retain their last successful agents while healthy adapters continue updating.
+SSE emits `adapter.health` only when status, agent count, or sanitized error changes.
 
 Example Codex agent waiting for approval:
 
@@ -138,11 +168,23 @@ npm install
 npm start
 ```
 
+Discovery runs concurrently, is coalesced when refreshes overlap, and defaults to a
+20-second timeout per adapter. Override it with a positive integer in
+`AGENT_HOST_ADAPTER_TIMEOUT_MS`; invalid values stop startup. The
+normal refresh interval remains configurable with `AGENT_HOST_REFRESH_MS`.
+
 Then:
 
 ```bash
-curl 'http://127.0.0.1:4777/v1/agents?status=working,blocked&limit=25'
-curl -N http://127.0.0.1:4777/v1/events
+AGENT_HOST_TOKEN="$(tr -d '\n' < "$HOME/.agent-host/token")"
+curl -H "Authorization: Bearer $AGENT_HOST_TOKEN" \
+  'http://127.0.0.1:4777/v1/agents?status=working,blocked&limit=25'
+curl -N -H "Authorization: Bearer $AGENT_HOST_TOKEN" \
+  http://127.0.0.1:4777/v1/events
+curl -X POST -H "Authorization: Bearer $AGENT_HOST_TOKEN" \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: prompt-example-0001' \
+  -d '{"text":"Fix the test"}' \
+  http://127.0.0.1:4777/v1/agents/codex%3Athr_123/prompt
 ```
 
 CLI:
@@ -211,6 +253,7 @@ src/
   core/
     types.js       unified model + capabilities
     contracts.js   versioned HTTP views, filters, pagination, errors
+    discovery.js   visibility ordering + process/rich reconciliation
     registry.js    merge discovery + route actions
     event-bus.js   normalized events
   adapters/
@@ -228,7 +271,8 @@ src/
 ```ts
 interface AgentAdapter {
   id: string
-  discover(): Promise<AgentRecord[]>
+  discover(options?: { signal?: AbortSignal }): Promise<AgentRecord[]>
+  discoverHistory?(options?: { signal?: AbortSignal }): Promise<AgentRecord[]>
   prompt?(agent, text): Promise<AgentActionResult>
   sendKeys?(agent, keys): Promise<AgentActionResult>
   approve?(agent, payload?): Promise<AgentActionResult>
@@ -241,6 +285,12 @@ interface AgentAdapter {
 ```
 
 This keeps client integrations provider-agnostic.
+
+The process adapter treats direct agent executables as high-confidence and loose
+command-line matches as raw-only. Process records never advertise interrupt by
+default. A process record is suppressed from normal views only when a richer
+same-provider adapter reports the exact same PID; matching working directories alone
+never merges agents.
 
 ## Next adapters
 
@@ -258,14 +308,31 @@ Use native/local protocols where available. Accessibility automation should be a
 
 ## Security
 
-- Binds to `127.0.0.1` by default.
+- Binds to loopback only. `AGENT_HOST_BIND` accepts `127.0.0.1`, `localhost`, or
+  `::1`; remote/LAN binding is rejected.
+- Set `AGENT_HOST_API_TOKEN` to supply a token. Otherwise a new 256-bit token is
+  generated before listening and atomically written to `~/.agent-host/token` with
+  owner-only permissions. Override that path with `AGENT_HOST_TOKEN_FILE`. The token
+  itself is never written to service logs.
+- All `/v1/*` routes require the bearer token. Do not commit it, put it in dashboard
+  source, or include it in URLs. A browser dashboard should receive it at runtime
+  through a user prompt or a local backend/session and keep it out of persistent web
+  assets.
+- Browser requests must have an allowed Host and Origin. Cross-origin access is
+  denied by default. Set `AGENT_HOST_ALLOWED_ORIGINS` to a comma-separated list of
+  exact dashboard origins such as `http://127.0.0.1:3000`; only those origins receive
+  CORS preflight permission for Authorization, Content-Type, and Idempotency-Key.
+  Origins must be canonical (no path or trailing slash); invalid configuration stops startup.
 - Never exposes an action unless the adapter declares it.
 - Codex semantic approvals require a real pending server request ID/context.
-- Remote access and authentication are intentionally out of scope for the first MVP.
+- Attempted and completed authenticated actions emit `audit.action` events containing
+  identifiers and outcome codes, never request bodies, headers, or tokens.
 
 ## References
 
 - Codex app-server: https://github.com/openai/codex/tree/main/codex-rs/app-server
+- Bearer token usage: https://www.rfc-editor.org/rfc/rfc6750
+- Browser CORS: https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS
 - Herdr socket/CLI API: https://herdr.dev/docs/socket-api/
 - Herdr agent automation: https://herdr.dev/docs/agent-automation/
 

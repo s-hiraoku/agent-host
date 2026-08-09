@@ -1,8 +1,11 @@
+import { compareAgents, matchesView } from "./discovery.js";
+
 export const API_VERSION = "1";
 export const DEFAULT_PAGE_LIMIT = 50;
 export const MAX_PAGE_LIMIT = 200;
 
 const STATUSES = new Set(["unknown", "idle", "working", "blocked", "done", "error"]);
+const VIEWS = new Set(["active", "recent", "historical", "raw"]);
 const CAPABILITIES = ["prompt", "sendKeys", "approve", "reject", "interrupt", "focus", "read"];
 
 function compact(object) {
@@ -37,6 +40,12 @@ export function agentSummary(agent) {
     discoveredAt: agent.discoveredAt,
     updatedAt: agent.updatedAt,
     pendingApprovalCount: pendingApprovals.length,
+    discovery: agent.discovery ? compact({
+      kind: agent.discovery.kind,
+      confidence: agent.discovery.confidence,
+      visibility: agent.discovery.visibility,
+      duplicateOf: agent.discovery.duplicateOf,
+    }) : undefined,
   });
 }
 
@@ -76,8 +85,11 @@ export function parseAgentListQuery(searchParams, revision) {
   const statuses = values(searchParams, "status");
   const invalidStatus = statuses.find((status) => !STATUSES.has(status));
   if (invalidStatus) throw new ContractError("invalid_status", `unsupported status: ${invalidStatus}`);
+  const view = searchParams.get("view") ?? "recent";
+  if (!VIEWS.has(view)) throw new ContractError("invalid_view", `unsupported view: ${view}`);
 
   const filter = {
+    view,
     providers,
     statuses,
     cwd: searchParams.get("cwd")?.trim().toLocaleLowerCase() ?? "",
@@ -90,7 +102,7 @@ export function parseAgentListQuery(searchParams, revision) {
 }
 
 export function pageAgents(agents, query, revision) {
-  const filtered = agents.filter((agent) => matches(agent, query.filter));
+  const filtered = agents.filter((agent) => matches(agent, query.filter)).sort(compareAgents);
   if (query.offset > filtered.length) {
     throw new ContractError("invalid_cursor", "cursor offset is outside the current result set");
   }
@@ -125,6 +137,7 @@ function values(searchParams, key) {
 }
 
 function matches(agent, filter) {
+  if (!matchesView(agent, filter.view)) return false;
   if (filter.providers.length && !filter.providers.includes(agent.provider)) return false;
   if (filter.statuses.length && !filter.statuses.includes(agent.status)) return false;
   if (filter.cwd && !agent.cwd?.toLocaleLowerCase().includes(filter.cwd)) return false;

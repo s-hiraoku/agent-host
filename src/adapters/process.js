@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readlink } from "node:fs/promises";
+import { basename } from "node:path";
 import { noCapabilities } from "../core/types.js";
 
 const execFileAsync = promisify(execFile);
@@ -12,24 +13,57 @@ const KNOWN = [
   [/(^|\s|\/)(hermes)(\s|$)/i, "hermes"],
   [/(^|\s|\/)(cursor-agent)(\s|$)/i, "cursor"],
 ];
+const PROVIDERS = new Map([
+  ["claude", "claude"],
+  ["codex", "codex"],
+  ["gemini", "gemini"],
+  ["opencode", "opencode"],
+  ["hermes", "hermes"],
+  ["cursor-agent", "cursor"],
+]);
+const SCRIPT_RUNNERS = new Set(["node", "bun", "deno"]);
 
-async function cwdFor(pid) {
+export function classifyProcessCommand(command) {
+  if (/agent-host|codex\s+app-server\b/i.test(command)) return undefined;
+  const tokens = command.trim().split(/\s+/);
+  while (tokens[0]?.includes("=") && !tokens[0].includes("/")) tokens.shift();
+  if (basename(tokens[0] ?? "") === "env") tokens.shift();
+  while (tokens[0]?.includes("=") && !tokens[0].includes("/")) tokens.shift();
+  const executable = basename(tokens[0] ?? "").toLowerCase();
+  const script = SCRIPT_RUNNERS.has(executable) ? basename(tokens[1] ?? "").toLowerCase() : undefined;
+  const provider = PROVIDERS.get(executable) ?? PROVIDERS.get(script);
+  if (provider) return { provider, confidence: "high" };
+  const loose = KNOWN.find(([pattern]) => pattern.test(command));
+  return loose ? { provider: loose[1], confidence: "low" } : undefined;
+}
+
+async function cwdFor(pid, signal) {
   if (process.platform === "linux") {
-    try { return await readlink(`/proc/${pid}/cwd`); } catch { return undefined; }
+    try { return await readlink(`/proc/${pid}/cwd`); }
+    catch (error) {
+      signal?.throwIfAborted();
+      return undefined;
+    }
   }
   if (process.platform === "darwin") {
     try {
-      const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
+      const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { signal });
       return stdout.split("\n").find((line) => line.startsWith("n"))?.slice(1);
-    } catch { return undefined; }
+    } catch (error) {
+      signal?.throwIfAborted();
+      return undefined;
+    }
   }
 }
 
 export class ProcessAdapter {
   id = "process";
 
-  async discover() {
-    const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,tty=,command="], { maxBuffer: 10 * 1024 * 1024 });
+  async discover(options = {}) {
+    const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,tty=,command="], {
+      maxBuffer: 10 * 1024 * 1024,
+      signal: options.signal,
+    });
     const rows = stdout.split("\n").map((line) => line.trim()).filter(Boolean);
     const agents = [];
     const now = new Date().toISOString();
@@ -40,21 +74,24 @@ export class ProcessAdapter {
       const pid = Number(match[1]);
       const tty = match[3] === "?" || match[3] === "??" ? undefined : match[3];
       const command = match[4];
-      const known = KNOWN.find(([pattern]) => pattern.test(command));
-      if (!known || pid === process.pid || command.includes("agent-host") || command.includes("codex app-server --listen stdio://")) continue;
-      const provider = known[1];
-      const cwd = await cwdFor(pid);
+      const classification = classifyProcessCommand(command);
+      if (!classification || pid === process.pid) continue;
+      const { provider, confidence } = classification;
+      options.signal?.throwIfAborted();
+      const cwd = await cwdFor(pid, options.signal);
+      options.signal?.throwIfAborted();
       agents.push({
         id: `process:${provider}:${pid}`,
         provider,
         source: this.id,
         name: `${provider}${cwd ? ` · ${cwd.split("/").filter(Boolean).at(-1)}` : ` · ${pid}`}`,
         status: "unknown",
-        capabilities: { ...noCapabilities(), interrupt: true },
+        capabilities: noCapabilities(),
         pid,
         cwd,
         tty,
-        metadata: { command },
+        discovery: { kind: "process", confidence, visibility: confidence === "high" ? "active" : "raw" },
+        metadata: { command, ppid: Number(match[2]) },
         discoveredAt: now,
         updatedAt: now,
       });

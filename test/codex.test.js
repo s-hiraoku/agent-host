@@ -13,6 +13,7 @@ class FakeCodexClient {
   closeCalls = 0;
   failSteer = false;
   threadListResult;
+  threadListHandler;
 
   onNotification(fn) { this.notifications.add(fn); }
   onServerRequest(fn) { this.serverRequests.add(fn); }
@@ -23,7 +24,7 @@ class FakeCodexClient {
 
   async request(method, params) {
     this.requests.push({ method, params });
-    if (method === "thread/list") return this.threadListResult ?? {
+    if (method === "thread/list") return this.threadListHandler?.(params) ?? this.threadListResult ?? {
       data: [{ id: "thr_1", preview: "Fix tests", cwd: "/tmp/project", status: { type: "idle" } }],
       nextCursor: null,
     };
@@ -154,7 +155,14 @@ test("Codex adapter bounds pagination and rejects unsupported server requests", 
   client.threadListResult = { data: [], nextCursor: "unchanged" };
   const adapter = new CodexAdapter({ client });
   assert.deepEqual(await adapter.discover(), []);
-  assert.equal(client.requests.filter((entry) => entry.method === "thread/list").length, 20);
+  assert.equal(client.requests.filter((entry) => entry.method === "thread/list").length, 1);
+  assert.deepEqual(await adapter.discoverHistory(), []);
+  assert.equal(client.requests.filter((entry) => entry.method === "thread/list").length, 11);
+  client.threadListResult = {
+    data: Array.from({ length: 101 }, (_, index) => ({ id: `excess-${index}`, status: { type: "notLoaded" } })),
+    nextCursor: null,
+  };
+  assert.equal((await adapter.discover()).length, 100);
 
   client.emitServerRequest({ id: 81, method: "mcpServer/elicitation/request", params: { threadId: "thr_1" } });
   assert.deepEqual(client.responseErrors, [{
@@ -162,6 +170,46 @@ test("Codex adapter bounds pagination and rejects unsupported server requests", 
     code: -32601,
     message: "Unsupported server request: mcpServer/elicitation/request",
   }]);
+});
+
+test("Codex adapter preserves activity time and separates recent history", async () => {
+  const client = new FakeCodexClient();
+  client.threadListResult = {
+    data: [
+      { id: "recent", preview: "Recent", cwd: "/tmp", status: { type: "notLoaded" }, updatedAt: 1_699_999_000 },
+      { id: "old", preview: "Old", cwd: "/tmp", status: { type: "notLoaded" }, updatedAt: 1_600_000_000 },
+    ],
+    nextCursor: null,
+  };
+  const adapter = new CodexAdapter({ client, now: () => 1_700_000_000_000, recentMs: 10_000_000 });
+  const agents = await adapter.discover();
+  assert.equal(agents[0].status, "unknown");
+  assert.equal(agents[0].lastActivityAt, "2023-11-14T21:56:40.000Z");
+  assert.equal(agents[0].discovery.visibility, "recent");
+  assert.equal(agents[1].discovery.visibility, "historical");
+});
+
+test("Codex history remains pageable beyond the one-page working set", async () => {
+  const client = new FakeCodexClient();
+  client.threadListHandler = ({ cursor }) => {
+    const offset = Number(cursor ?? 0);
+    return {
+      data: Array.from({ length: 100 }, (_, index) => ({
+        id: `thread-${offset + index}`,
+        preview: `Thread ${offset + index}`,
+        cwd: "/tmp",
+        status: { type: "notLoaded" },
+        updatedAt: 1_600_000_000,
+      })),
+      nextCursor: offset + 100 < 1_000 ? String(offset + 100) : null,
+    };
+  };
+  const adapter = new CodexAdapter({ client });
+  assert.equal((await adapter.discover()).length, 100);
+  assert.equal(client.requests.filter((entry) => entry.method === "thread/list").length, 1);
+  client.requests = [];
+  assert.equal((await adapter.discoverHistory()).length, 1_000);
+  assert.equal(client.requests.filter((entry) => entry.method === "thread/list").length, 10);
 });
 
 test("Codex adapter cancels expired approvals", { timeout: 1000 }, async () => {

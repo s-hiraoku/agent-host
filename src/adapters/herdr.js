@@ -5,17 +5,17 @@ const execFileAsync = promisify(execFile);
 const STATES = new Set(["idle", "working", "blocked", "done"]);
 const mapStatus = (value) => STATES.has(value) ? value : "unknown";
 
-async function run(args) {
-  const { stdout } = await execFileAsync("herdr", args, { maxBuffer: 10 * 1024 * 1024 });
+async function run(args, options = {}) {
+  const { stdout } = await execFileAsync("herdr", args, { maxBuffer: 10 * 1024 * 1024, signal: options.signal });
   return JSON.parse(stdout);
 }
 
 export class HerdrAdapter {
   id = "herdr";
 
-  async discover() {
+  async discover(options = {}) {
     try {
-      const payload = await run(["api", "snapshot"]);
+      const payload = await run(["api", "snapshot"], options);
       const result = payload.result ?? payload;
       const rawAgents = result.agents ?? result.snapshot?.agents ?? [];
       const now = new Date().toISOString();
@@ -23,16 +23,25 @@ export class HerdrAdapter {
         const target = String(item.name ?? item.pane_id ?? item.agent ?? "unknown");
         const provider = String(item.agent ?? "herdr-agent");
         const paneId = item.pane_id ? String(item.pane_id) : undefined;
+        const pid = Number(item.foreground_pid ?? item.pid) || undefined;
+        const status = mapStatus(item.agent_status ?? item.status);
         return {
           id: `herdr:${paneId ?? target}`,
           provider,
           source: this.id,
           name: String(item.name ?? `${provider} · ${paneId ?? target}`),
-          status: mapStatus(item.agent_status ?? item.status),
+          status,
           capabilities: { prompt: true, sendKeys: true, approve: false, reject: false, interrupt: true, focus: true, read: true },
           cwd: item.foreground_cwd ?? item.cwd,
           sessionId: item.agent_session?.value,
           target,
+          pid,
+          lastActivityAt: item.last_activity_at ?? item.updated_at,
+          discovery: {
+            kind: "native",
+            confidence: "high",
+            visibility: status === "working" || status === "blocked" ? "active" : "recent",
+          },
           metadata: { paneId, herdr: item },
           discoveredAt: now,
           updatedAt: now,
