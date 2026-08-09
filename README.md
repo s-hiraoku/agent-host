@@ -169,7 +169,8 @@ npm start
 ```
 
 Discovery runs concurrently, is coalesced when refreshes overlap, and defaults to a
-20-second timeout per adapter. Override it with `AGENT_HOST_ADAPTER_TIMEOUT_MS`; the
+20-second timeout per adapter. Override it with a positive integer in
+`AGENT_HOST_ADAPTER_TIMEOUT_MS`; invalid values stop startup. The
 normal refresh interval remains configurable with `AGENT_HOST_REFRESH_MS`.
 
 Then:

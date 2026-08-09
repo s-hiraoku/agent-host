@@ -64,7 +64,11 @@ export class AgentRegistry {
   events = new AgentEventBus();
 
   constructor(adapters, options = {}) {
-    this.#adapterTimeoutMs = options.adapterTimeoutMs ?? DEFAULT_ADAPTER_TIMEOUT_MS;
+    const adapterTimeoutMs = options.adapterTimeoutMs ?? DEFAULT_ADAPTER_TIMEOUT_MS;
+    if (!Number.isInteger(adapterTimeoutMs) || adapterTimeoutMs <= 0) {
+      throw new RangeError("adapterTimeoutMs must be a positive integer");
+    }
+    this.#adapterTimeoutMs = adapterTimeoutMs;
     this.#historyTtlMs = options.historyTtlMs ?? DEFAULT_HISTORY_TTL_MS;
     this.#closedOutcome = new Promise((resolve) => this.#closeController.signal.addEventListener(
       "abort",
