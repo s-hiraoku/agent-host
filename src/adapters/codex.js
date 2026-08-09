@@ -4,6 +4,8 @@ const APPROVAL_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
 ]);
+const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60_000;
+const TERMINAL_TURN_METHODS = new Set(["turn/completed", "turn/failed", "turn/aborted"]);
 
 function mapStatus(status, hasApproval) {
   if (hasApproval) return "blocked";
@@ -38,9 +40,11 @@ export class CodexAdapter {
   #activeTurns = new Map();
   #status = new Map();
   #started = false;
+  #approvalTimeoutMs;
 
   constructor(options = {}) {
     this.#client = options.client ?? new CodexRpcClient(options.rpc);
+    this.#approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
     this.#client.onServerRequest?.((message) => this.#onServerRequest(message));
     this.#client.onNotification?.((message) => this.#onNotification(message));
   }
@@ -94,16 +98,27 @@ export class CodexAdapter {
       const threadId = agent.sessionId ?? agent.target;
       await this.#client.request("thread/resume", { threadId });
       const activeTurnId = this.#activeTurns.get(threadId);
-      const result = activeTurnId
-        ? await this.#client.request("turn/steer", {
+      let result;
+      if (activeTurnId) {
+        try {
+          result = await this.#client.request("turn/steer", {
             threadId,
             expectedTurnId: activeTurnId,
             input: [{ type: "text", text }],
-          })
-        : await this.#client.request("turn/start", {
+          });
+        } catch {
+          this.#activeTurns.delete(threadId);
+          result = await this.#client.request("turn/start", {
             threadId,
             input: [{ type: "text", text }],
           });
+        }
+      } else {
+        result = await this.#client.request("turn/start", {
+          threadId,
+          input: [{ type: "text", text }],
+        });
+      }
       const turnId = result?.turn?.id ?? result?.turnId;
       if (turnId) this.#activeTurns.set(threadId, turnId);
       return { ok: true, agentId: agent.id, action: "prompt", data: result };
@@ -127,6 +142,7 @@ export class CodexAdapter {
       const turnId = this.#activeTurns.get(threadId) ?? await this.#findActiveTurn(threadId);
       if (!turnId) return this.#fail(agent, "interrupt", "no active turn found");
       const result = await this.#client.request("turn/interrupt", { threadId, turnId });
+      this.#activeTurns.delete(threadId);
       return { ok: true, agentId: agent.id, action: "interrupt", data: result };
     } catch (error) {
       return this.#fail(agent, "interrupt", error);
@@ -145,7 +161,13 @@ export class CodexAdapter {
   }
 
   async close() {
-    await this.#client.close?.();
+    try { await this.#client.close?.(); }
+    finally {
+      this.#started = false;
+      for (const entry of this.#pendingApprovals.values()) clearTimeout(entry.timer);
+      this.#pendingApprovals.clear();
+      this.#activeTurns.clear();
+    }
   }
 
   async #ensureStarted() {
@@ -157,6 +179,7 @@ export class CodexAdapter {
   async #listThreads() {
     const all = [];
     let cursor = null;
+    let pages = 0;
     do {
       const result = await this.#client.request("thread/list", {
         cursor,
@@ -166,24 +189,40 @@ export class CodexAdapter {
       });
       all.push(...(result?.data ?? []));
       cursor = result?.nextCursor ?? null;
-    } while (cursor && all.length < 1000);
+      pages += 1;
+    } while (cursor && all.length < 1000 && pages < 20);
     return all;
   }
 
   async #findActiveTurn(threadId) {
     const result = await this.#client.request("thread/read", { threadId, includeTurns: true });
     const turns = result?.thread?.turns ?? [];
-    const active = [...turns].reverse().find((turn) => turn?.status === "inProgress" || turn?.status?.type === "inProgress");
+    const active = turns.findLast((turn) => turn?.status === "inProgress" || turn?.status?.type === "inProgress");
     if (active?.id) this.#activeTurns.set(threadId, active.id);
     return active?.id;
   }
 
   #onServerRequest(message) {
-    if (!APPROVAL_METHODS.has(message.method)) return;
+    if (!APPROVAL_METHODS.has(message.method)) {
+      this.#client.respondError?.(message.id, -32601, `Unsupported server request: ${message.method}`);
+      return;
+    }
     const threadId = message.params?.threadId;
-    if (!threadId) return;
+    if (!threadId) {
+      this.#client.respondError?.(message.id, -32602, "Approval request is missing threadId");
+      return;
+    }
     const approvalId = String(message.id);
-    this.#pendingApprovals.set(approvalId, { approvalId, rawId: message.id, message, receivedAt: Date.now() });
+    this.#deleteApproval(approvalId);
+    const entry = { approvalId, rawId: message.id, message, receivedAt: Date.now() };
+    entry.timer = setTimeout(() => {
+      if (this.#pendingApprovals.get(approvalId) !== entry) return;
+      try { this.#client.respond(entry.rawId, { decision: "cancel" }); }
+      catch {}
+      finally { this.#pendingApprovals.delete(approvalId); }
+    }, this.#approvalTimeoutMs);
+    entry.timer.unref?.();
+    this.#pendingApprovals.set(approvalId, entry);
   }
 
   #onNotification(message) {
@@ -198,13 +237,14 @@ export class CodexAdapter {
       this.#activeTurns.set(params.threadId, params.turn.id);
       this.#status.set(params.threadId, { type: "active", activeFlags: [] });
     }
-    if (message.method === "turn/completed" && params.threadId) {
+    if (TERMINAL_TURN_METHODS.has(message.method) && params.threadId) {
       this.#activeTurns.delete(params.threadId);
-      this.#status.set(params.threadId, { type: "idle" });
+      const failed = params.turn?.status === "failed" || message.method === "turn/failed";
+      this.#status.set(params.threadId, { type: failed ? "systemError" : "idle" });
       this.#clearApprovalsForThread(params.threadId);
     }
     if (message.method === "serverRequest/resolved" && params.requestId !== undefined) {
-      this.#pendingApprovals.delete(String(params.requestId));
+      this.#deleteApproval(String(params.requestId));
     }
   }
 
@@ -214,8 +254,14 @@ export class CodexAdapter {
 
   #clearApprovalsForThread(threadId) {
     for (const [id, entry] of this.#pendingApprovals) {
-      if (entry.message.params?.threadId === threadId) this.#pendingApprovals.delete(id);
+      if (entry.message.params?.threadId === threadId) this.#deleteApproval(id);
     }
+  }
+
+  #deleteApproval(id) {
+    const entry = this.#pendingApprovals.get(id);
+    if (entry) clearTimeout(entry.timer);
+    this.#pendingApprovals.delete(id);
   }
 
   async #resolveApproval(agent, payload, decision, action) {
@@ -228,13 +274,13 @@ export class CodexAdapter {
         ? approvals.find((candidate) => candidate.approvalId === requestedId)
         : approvals.length === 1 ? approvals[0] : undefined;
       if (!entry) {
-        const message = approvals.length > 1
+        const message = requestedId === undefined && approvals.length > 1
           ? "multiple approvals are pending; pass approvalId"
           : "no matching approval is pending";
         return this.#fail(agent, action, message);
       }
       this.#client.respond(entry.rawId, { decision });
-      this.#pendingApprovals.delete(entry.approvalId);
+      this.#deleteApproval(entry.approvalId);
       return { ok: true, agentId: agent.id, action, data: { approvalId: entry.approvalId, decision } };
     } catch (error) {
       return this.#fail(agent, action, error);

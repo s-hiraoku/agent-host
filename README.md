@@ -156,6 +156,8 @@ item/fileChange/requestApproval
 serverRequest/resolved
 ```
 
+Command and file-change approvals expire after five minutes by default and are cancelled so unattended requests do not leave a thread blocked indefinitely. Other server-initiated request types receive an explicit unsupported-method response instead of stalling the App Server connection.
+
 ### Important limitation
 
 The current adapter owns its App Server connection. It can list persisted Codex threads that are visible from the same Codex home and it can resume/control work through the host-owned App Server.

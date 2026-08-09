@@ -1,15 +1,20 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const DEFAULT_TIMEOUT_MS = 20_000;
+const STDERR_TAIL_BYTES = 4096;
+const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
 
 export class CodexRpcClient {
   #command;
   #args;
   #env;
   #cwd;
+  #spawn;
   #proc;
   #reader;
+  #stderrTail = "";
   #pending = new Map();
   #nextId = 1;
   #notificationHandlers = new Set();
@@ -22,6 +27,7 @@ export class CodexRpcClient {
     this.#args = options.args ?? ["app-server", "--listen", "stdio://"];
     this.#env = options.env ?? process.env;
     this.#cwd = options.cwd;
+    this.#spawn = options.spawn ?? spawn;
   }
 
   onNotification(handler) {
@@ -43,41 +49,52 @@ export class CodexRpcClient {
   }
 
   async #startInternal() {
-    const proc = spawn(this.#command, this.#args, {
+    const proc = this.#spawn(this.#command, this.#args, {
       cwd: this.#cwd,
       env: this.#env,
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.#proc = proc;
 
-    await new Promise((resolve, reject) => {
-      const onSpawn = () => { cleanup(); resolve(); };
-      const onError = (error) => { cleanup(); reject(error); };
-      const cleanup = () => {
-        proc.off("spawn", onSpawn);
-        proc.off("error", onError);
-      };
-      proc.once("spawn", onSpawn);
-      proc.once("error", onError);
-    });
+    this.#stderrTail = "";
 
-    proc.once("exit", (code, signal) => {
-      this.#started = false;
-      const error = new Error(`codex app-server exited (${code ?? signal ?? "unknown"})`);
-      for (const pending of this.#pending.values()) pending.reject(error);
-      this.#pending.clear();
-    });
-    proc.stderr?.on("data", () => {});
+    try {
+      await new Promise((resolve, reject) => {
+        const onSpawn = () => { cleanup(); resolve(); };
+        const onError = (error) => { cleanup(); reject(error); };
+        const cleanup = () => {
+          proc.off("spawn", onSpawn);
+          proc.off("error", onError);
+        };
+        proc.once("spawn", onSpawn);
+        proc.once("error", onError);
+      });
 
-    this.#reader = createInterface({ input: proc.stdout });
-    this.#reader.on("line", (line) => this.#handleLine(line));
-    this.#started = true;
+      proc.once("exit", (code, signal) => {
+        this.#started = false;
+        const error = new Error(`codex app-server exited (${code ?? signal ?? "unknown"})`);
+        for (const pending of this.#pending.values()) pending.reject(error);
+        this.#pending.clear();
+      });
+      proc.stderr?.on("data", (chunk) => {
+        this.#stderrTail = `${this.#stderrTail}${chunk}`.slice(-STDERR_TAIL_BYTES);
+      });
 
-    await this.request("initialize", {
-      clientInfo: { name: "agent_host", title: "agent-host", version: "0.2.0" },
-      capabilities: { experimentalApi: true },
-    });
-    this.notify("initialized");
+      this.#reader = createInterface({ input: proc.stdout });
+      this.#reader.on("line", (line) => this.#handleLine(line));
+      this.#started = true;
+
+      await this.request("initialize", {
+        clientInfo: { name: "agent_host", title: "agent-host", version: PACKAGE_VERSION },
+        capabilities: { experimentalApi: true },
+      });
+      this.notify("initialized");
+    } catch (error) {
+      const stderr = this.#stderrTail.trim();
+      await this.close();
+      const detail = stderr ? `\ncodex app-server stderr:\n${stderr}` : "";
+      throw new Error(`${error?.message ?? error}${detail}`, { cause: error });
+    }
   }
 
   async request(method, params, options = {}) {
@@ -116,9 +133,16 @@ export class CodexRpcClient {
     this.#write({ id, result });
   }
 
+  respondError(id, code, message, data) {
+    const error = { code, message };
+    if (data !== undefined) error.data = data;
+    this.#write({ id, error });
+  }
+
   async close() {
     this.#started = false;
     this.#reader?.close();
+    this.#reader = undefined;
     const proc = this.#proc;
     this.#proc = undefined;
     if (!proc || proc.exitCode !== null) return;
@@ -154,12 +178,17 @@ export class CodexRpcClient {
     }
 
     if (message.id !== undefined && message.method) {
-      for (const handler of this.#serverRequestHandlers) handler(message);
+      for (const handler of this.#serverRequestHandlers) this.#safeInvoke(handler, message);
       return;
     }
 
     if (message.method) {
-      for (const handler of this.#notificationHandlers) handler(message);
+      for (const handler of this.#notificationHandlers) this.#safeInvoke(handler, message);
     }
+  }
+
+  #safeInvoke(handler, message) {
+    try { handler(message); }
+    catch {}
   }
 }
