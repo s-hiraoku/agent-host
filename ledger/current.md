@@ -28,7 +28,7 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 - Branch: `codex/issue-7-live-transports`
 - Issue: https://github.com/s-hiraoku/agent-host/issues/7
 - Base: `main` at merge commit `9344c82` (PR #16)
-- PR: pending
+- PR: https://github.com/s-hiraoku/agent-host/pull/17
 - Next: open the Issue #7 PR, complete PR Guardian, then continue with Issue #8 after merge.
 
 ## Progress notes
