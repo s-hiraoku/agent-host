@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { CodexWebSocketWire } from "./codex-websocket-wire.js";
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const STDERR_TAIL_BYTES = 4096;
@@ -12,19 +13,28 @@ export class CodexRpcClient {
   #env;
   #cwd;
   #spawn;
+  #transport;
   #proc;
   #reader;
+  #wire;
+  #writer;
   #stderrTail = "";
   #pending = new Map();
   #nextId = 1;
   #notificationHandlers = new Set();
   #serverRequestHandlers = new Set();
+  #stateHandlers = new Set();
   #started = false;
   #startPromise;
+  #generation = 0;
+  #initializationResult;
 
   constructor(options = {}) {
     this.#command = options.command ?? "codex";
-    this.#args = options.args ?? ["app-server", "--listen", "stdio://"];
+    this.#transport = options.transport ?? "stdio";
+    this.#args = options.args ?? (this.#transport === "control"
+      ? ["app-server", "proxy", "--sock", options.socketPath]
+      : ["app-server", "--listen", "stdio://"]);
     this.#env = options.env ?? process.env;
     this.#cwd = options.cwd;
     this.#spawn = options.spawn ?? spawn;
@@ -39,6 +49,14 @@ export class CodexRpcClient {
     this.#serverRequestHandlers.add(handler);
     return () => this.#serverRequestHandlers.delete(handler);
   }
+
+  onStateChange(handler) {
+    this.#stateHandlers.add(handler);
+    return () => this.#stateHandlers.delete(handler);
+  }
+
+  get generation() { return this.#generation; }
+  get initializationResult() { return this.#initializationResult; }
 
   async start() {
     if (this.#started) return;
@@ -70,25 +88,37 @@ export class CodexRpcClient {
         proc.once("error", onError);
       });
 
-      proc.once("exit", (code, signal) => {
-        this.#started = false;
-        const error = new Error(`codex app-server exited (${code ?? signal ?? "unknown"})`);
-        for (const pending of this.#pending.values()) pending.reject(error);
-        this.#pending.clear();
-      });
+      const generation = this.#generation + 1;
+      this.#generation = generation;
+      proc.once("exit", (code, signal) => this.#disconnect(
+        generation,
+        new Error(`codex app-server exited (${code ?? signal ?? "unknown"})`),
+      ));
       proc.stderr?.on("data", (chunk) => {
         this.#stderrTail = `${this.#stderrTail}${chunk}`.slice(-STDERR_TAIL_BYTES);
       });
 
-      this.#reader = createInterface({ input: proc.stdout });
-      this.#reader.on("line", (line) => this.#handleLine(line));
+      if (this.#transport === "control") {
+        const wire = new CodexWebSocketWire({ readable: proc.stdout, writable: proc.stdin });
+        wire.onMessage = (message) => this.#handleLine(message, generation);
+        wire.onError = (error) => this.#transportFailed(proc, generation, error);
+        wire.onClose = () => this.#transportFailed(proc, generation, new Error("Codex control socket closed"));
+        this.#wire = wire;
+        await wire.start();
+        this.#writer = (message) => wire.send(JSON.stringify(message));
+      } else {
+        this.#reader = createInterface({ input: proc.stdout });
+        this.#reader.on("line", (line) => this.#handleLine(line, generation));
+        this.#writer = (message) => proc.stdin.write(`${JSON.stringify(message)}\n`);
+      }
       this.#started = true;
 
-      await this.request("initialize", {
+      this.#initializationResult = await this.request("initialize", {
         clientInfo: { name: "agent_host", title: "agent-host", version: PACKAGE_VERSION },
         capabilities: { experimentalApi: true },
       });
       this.notify("initialized");
+      this.#emitState({ state: "connected", generation, initialization: this.#initializationResult });
     } catch (error) {
       const stderr = this.#stderrTail.trim();
       await this.close();
@@ -98,6 +128,10 @@ export class CodexRpcClient {
   }
 
   async request(method, params, options = {}) {
+    if (options.expectedGeneration !== undefined
+      && (!this.#started || this.#generation !== options.expectedGeneration)) {
+      throw new Error(`Codex connection generation ${options.expectedGeneration} is no longer active`);
+    }
     if (!this.#started && method !== "initialize") await this.start();
     options.signal?.throwIfAborted();
     const id = `ah-${this.#nextId++}`;
@@ -122,11 +156,18 @@ export class CodexRpcClient {
       }, timeoutMs);
       timer.unref?.();
       this.#pending.set(id, {
+        generation: this.#generation,
         resolve: (value) => { cleanup(); resolve(value); },
         reject: (error) => { cleanup(); reject(error); },
       });
       options.signal?.addEventListener("abort", onAbort, { once: true });
-      try { this.#write(message); }
+      try {
+        if (options.expectedGeneration !== undefined
+          && (!this.#started || this.#generation !== options.expectedGeneration)) {
+          throw new Error(`Codex connection generation ${options.expectedGeneration} is no longer active`);
+        }
+        this.#write(message);
+      }
       catch (error) {
         cleanup();
         this.#pending.delete(id);
@@ -152,9 +193,13 @@ export class CodexRpcClient {
   }
 
   async close() {
-    this.#started = false;
+    const generation = this.#generation;
     this.#reader?.close();
     this.#reader = undefined;
+    this.#wire?.close();
+    this.#wire = undefined;
+    this.#writer = undefined;
+    this.#disconnect(generation, new Error("Codex RPC client closed"));
     const proc = this.#proc;
     this.#proc = undefined;
     if (!proc || proc.exitCode !== null) return;
@@ -170,11 +215,12 @@ export class CodexRpcClient {
   }
 
   #write(message) {
-    if (!this.#proc?.stdin?.writable) throw new Error("codex app-server is not writable");
-    this.#proc.stdin.write(`${JSON.stringify(message)}\n`);
+    if (!this.#writer) throw new Error("codex app-server is not writable");
+    this.#writer(message);
   }
 
-  #handleLine(line) {
+  #handleLine(line, generation) {
+    if (generation !== this.#generation) return;
     if (!line.trim()) return;
     let message;
     try { message = JSON.parse(line); }
@@ -182,12 +228,14 @@ export class CodexRpcClient {
 
     if (message.id !== undefined && !message.method) {
       const pending = this.#pending.get(String(message.id));
-      if (!pending) return;
+      if (!pending || pending.generation !== generation) return;
       this.#pending.delete(String(message.id));
       if (message.error) pending.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
       else pending.resolve(message.result);
       return;
     }
+
+    Object.defineProperty(message, "connectionGeneration", { value: generation, enumerable: false });
 
     if (message.id !== undefined && message.method) {
       for (const handler of this.#serverRequestHandlers) this.#safeInvoke(handler, message);
@@ -202,5 +250,32 @@ export class CodexRpcClient {
   #safeInvoke(handler, message) {
     try { handler(message); }
     catch {}
+  }
+
+  #transportFailed(proc, generation, error) {
+    this.#disconnect(generation, error);
+    if (proc.exitCode === null) proc.kill("SIGTERM");
+  }
+
+  #disconnect(generation, error) {
+    if (generation !== this.#generation) return;
+    const wasConnected = this.#started;
+    this.#reader?.close();
+    this.#reader = undefined;
+    this.#wire?.close();
+    this.#wire = undefined;
+    this.#started = false;
+    this.#initializationResult = undefined;
+    this.#writer = undefined;
+    for (const [id, pending] of this.#pending) {
+      if (pending.generation !== generation) continue;
+      this.#pending.delete(id);
+      pending.reject(error);
+    }
+    if (wasConnected) this.#emitState({ state: "disconnected", generation, error });
+  }
+
+  #emitState(event) {
+    for (const handler of this.#stateHandlers) this.#safeInvoke(handler, event);
   }
 }

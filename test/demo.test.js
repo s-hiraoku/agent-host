@@ -6,6 +6,22 @@ import { createRuntimeAdapters } from "../src/runtime.js";
 test("demo mode is opt-in and replaces live adapters", () => {
   assert.deepEqual(createRuntimeAdapters().map((adapter) => adapter.id), ["codex", "herdr", "process"]);
   assert.deepEqual(createRuntimeAdapters({ demoMode: true }).map((adapter) => adapter.id), ["demo"]);
+  assert.deepEqual(createRuntimeAdapters({
+    codexTransport: "control",
+    codexSocket: "/tmp/codex-control.sock",
+  }).map((adapter) => adapter.id), ["codex", "herdr", "process"]);
+  assert.throws(
+    () => createRuntimeAdapters({ codexTransport: "control" }),
+    /AGENT_HOST_CODEX_SOCKET must be an absolute path/,
+  );
+  assert.throws(
+    () => createRuntimeAdapters({ codexTransport: "control", codexSocket: "relative.sock" }),
+    /AGENT_HOST_CODEX_SOCKET must be an absolute path/,
+  );
+  assert.throws(
+    () => createRuntimeAdapters({ codexTransport: "websocket" }),
+    /AGENT_HOST_CODEX_TRANSPORT must be owned or control/,
+  );
 });
 
 test("demo adapter exposes every state and deterministic capability combinations", async () => {

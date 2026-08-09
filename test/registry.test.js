@@ -175,6 +175,78 @@ test("preserves last-known agents when adapter discovery fails", async () => {
   assert.equal(events.at(-1).adapter.status, "error");
 });
 
+test("marks adapter records stale immediately when its live transport disconnects", async () => {
+  let changeHandler;
+  let disconnected = false;
+  let unsubscribed = false;
+  const adapter = {
+    id: "live",
+    onChange(handler) {
+      changeHandler = handler;
+      return () => { unsubscribed = true; };
+    },
+    async discover() {
+      if (disconnected) throw new Error("control socket lost");
+      return [{
+        id: "live:1", provider: "codex", source: "live", name: "live", status: "working",
+        capabilities: { prompt: true, interrupt: true },
+        pendingApprovals: [{ approvalId: "1" }],
+        discovery: { kind: "native", confidence: "high", visibility: "active" },
+      }];
+    },
+    markStale(agent) {
+      return {
+        ...agent,
+        status: "unknown",
+        capabilities: { prompt: false, interrupt: false },
+        pendingApprovals: [],
+        discovery: { ...agent.discovery, confidence: "low", visibility: "recent" },
+      };
+    },
+  };
+  const registry = new AgentRegistry([adapter]);
+  await registry.refresh();
+  disconnected = true;
+  changeHandler({ type: "disconnected", error: new Error("control socket lost") });
+
+  const stale = registry.get("live:1");
+  assert.equal(stale.status, "unknown");
+  assert.equal(stale.capabilities.prompt, false);
+  assert.deepEqual(stale.pendingApprovals, []);
+  assert.equal(stale.discovery.confidence, "low");
+  await new Promise((resolve) => setImmediate(resolve));
+  await registry.close();
+  assert.equal(unsubscribed, true);
+});
+
+test("rejects discovery results from an obsolete adapter transport", async () => {
+  let current = true;
+  let name = "initial";
+  const adapter = {
+    id: "generation",
+    async discover() {
+      return [{
+        id: "generation:1", provider: "test", source: "generation", name, status: "working",
+        capabilities: { prompt: true },
+      }];
+    },
+    isDiscoveryCurrent() { return current; },
+    markStale(agent) {
+      return { ...agent, status: "unknown", capabilities: { prompt: false } };
+    },
+  };
+  const registry = new AgentRegistry([adapter]);
+  await registry.refresh();
+  name = "obsolete";
+  current = false;
+  await registry.refresh();
+  assert.equal(registry.get("generation:1").name, "initial");
+  assert.equal(registry.get("generation:1").status, "unknown");
+  assert.equal(registry.get("generation:1").capabilities.prompt, false);
+  assert.equal(registry.adapterHealth()[0].status, "error");
+  await registry.close();
+});
+
 test("returns stable action error codes", async () => {
   const throwing = {
     id: "throwing",

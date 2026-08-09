@@ -66,6 +66,8 @@ export class AgentRegistry {
   #initialLoading = true;
   #closed = false;
   #revision = 0;
+  #adapterUnsubscribers = [];
+  #adapterRefreshQueued = false;
   events = new AgentEventBus();
 
   constructor(adapters, options = {}) {
@@ -95,6 +97,21 @@ export class AgentRegistry {
         agentCount: 0,
         error: null,
       });
+      const unsubscribe = adapter.onChange?.((event) => {
+        if (this.#closed) return;
+        if (event?.type === "disconnected") {
+          this.#applyOutcome({
+            adapterId: adapter.id,
+            attemptedAt: new Date().toISOString(),
+            durationMs: 0,
+            status: "error",
+            error: event.error ?? new Error("adapter transport disconnected"),
+          });
+        }
+        if (this.#refreshPromise) this.#adapterRefreshQueued = true;
+        else void this.refresh();
+      });
+      if (typeof unsubscribe === "function") this.#adapterUnsubscribers.push(unsubscribe);
     }
   }
 
@@ -164,6 +181,10 @@ export class AgentRegistry {
     this.#refreshPromise = this.#runRefresh().finally(() => {
       this.#initialLoading = false;
       this.#refreshPromise = undefined;
+      if (this.#adapterRefreshQueued && !this.#closed) {
+        this.#adapterRefreshQueued = false;
+        queueMicrotask(() => { void this.refresh(); });
+      }
     });
     return this.#refreshPromise;
   }
@@ -179,6 +200,11 @@ export class AgentRegistry {
   }
 
   #applyOutcome(outcome) {
+    const adapter = this.#adapters.get(outcome.adapterId);
+    if (outcome.status === "success" && adapter?.isDiscoveryCurrent
+      && !adapter.isDiscoveryCurrent(outcome.agents)) {
+      outcome = { ...outcome, status: "error", error: new Error("adapter discovery used a stale transport") };
+    }
     const previousCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
     const previousRaw = this.listRaw().map(semanticAgent);
     const previousOverlay = historyOverlay(previousRaw, this.#historyAgents);
@@ -193,6 +219,12 @@ export class AgentRegistry {
         if (agent.source === outcome.adapterId) next.delete(id);
       }
       for (const agent of outcome.agents) next.set(agent.id, agent);
+    } else {
+      if (adapter?.markStale) {
+        for (const [id, agent] of next) {
+          if (agent.source === outcome.adapterId) next.set(id, adapter.markStale(agent));
+        }
+      }
     }
 
     const at = new Date().toISOString();
@@ -366,6 +398,7 @@ export class AgentRegistry {
   async close() {
     if (this.#closed) return;
     this.#closed = true;
+    for (const unsubscribe of this.#adapterUnsubscribers.splice(0)) unsubscribe();
     this.#closeController.abort();
     for (const flight of this.#adapterFlights.values()) flight.controller.abort();
     for (const controller of this.#historyControllers) controller.abort();

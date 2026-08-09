@@ -17,7 +17,7 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 - [x] #4 Secure browser-facing local action API
 - [x] #5 Useful discovery defaults and deduplication
 - [x] #6 Demo adapter and conformance fixtures
-- [ ] #7 Supported live-session integration
+- [x] #7 Supported live-session integration
 - [ ] #8 Configuration and service lifecycle
 - [ ] #9 Operational resilience and diagnostics
 - [ ] #10 Packaging, versioning, and updates
@@ -25,11 +25,11 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 
 ## Current step
 
-- Branch: `codex/issue-6-demo-conformance`
-- Issue: https://github.com/s-hiraoku/agent-host/issues/6
-- Base: `main` at merge commit `0d0c6e1` (PR #15)
-- PR: https://github.com/s-hiraoku/agent-host/pull/16
-- Next: finish Issue #6 verification and PR Guardian, then continue with Issue #7 after merge.
+- Branch: `codex/issue-7-live-transports`
+- Issue: https://github.com/s-hiraoku/agent-host/issues/7
+- Base: `main` at merge commit `9344c82` (PR #16)
+- PR: pending
+- Next: open the Issue #7 PR, complete PR Guardian, then continue with Issue #8 after merge.
 
 ## Progress notes
 
@@ -42,3 +42,4 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 - 2026-08-09: PR Guardian found that #13 and #14 were merged into already-merged stacked branches rather than `main`, so PR #15 was rebased onto current `main` to carry Issues #3-#5 as the integration PR. It also found and addressed invalid adapter timeout configuration, raw-only cursor invalidation, and stale historical/live overlays. `npm run check` passes with 36 tests.
 - 2026-08-09: Current-head Codex and CodeRabbit review added boundary findings covering live-only historical cursors, token-file replacement ordering, history retry TTL, Bearer scheme casing, configuration validation, bounded provider responses, and hot-path reconciliation. The fixes plus deterministic non-timing TTL coverage pass `npm run check` with 38 tests.
 - 2026-08-09: Confirmed PR #15 merged into `main`, then implemented Issue #6 from that merge commit. Opt-in demo mode replaces all live adapters with six deterministic states, predictable prompt/interrupt/approval transitions, sanitized language-neutral fixtures, a checked-in 1,000-agent scale fixture, and a reusable live HTTP/SSE client conformance runner.
+- 2026-08-09: Confirmed PR #16 merged into `main`, then implemented Issue #7. Explicit control mode connects through the official Codex Unix control proxy, subscribes loaded threads, propagates live status and approvals, scopes state/actions to connection generations, marks records stale on loss, and keeps unsupported Codex processes raw-only.

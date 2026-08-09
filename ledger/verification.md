@@ -59,3 +59,31 @@
 - Client conformance: a reusable runner validates a live demo server's bounded raw snapshot, approval detail, authenticated idempotent action, `audit.action` / `agent.action` / `agent.updated` events, structured error, and SSE reconnect ready state.
 - Privacy/schema: seven versioned JSON fixtures are parsed and scanned for personal local paths, bearer credentials, token/session content, cwd, and raw metadata. The scale fixture contains exactly 1,000 unique schema-compatible agents.
 - One-command smoke test: `npm run demo` listened on loopback with only the demo adapter; an authenticated raw snapshot returned six agents and all six normalized states. A supplied test token avoided touching the generated-token file.
+
+## Issue #7 implementation — 2026-08-09
+
+- Commands: `git diff --check` and `npm run check`
+- Result: pass
+- Tests: 61 passed, 0 failed.
+- Transport fixtures: HTTP 101/accept validation, masked client frames, partial and
+  fragmented text frames, combined frames, ping/pong, close, invalid handshake,
+  oversized payload rejection, explicit proxy argv, and old-generation isolation.
+- Live-session fixtures: string-valued loaded thread IDs from the official protocol,
+  per-thread resume isolation, persisted-only capability gating, direct-input gating,
+  notification-driven working/blocked/completed registry updates, generation-scoped
+  approval correlation, stale discovery rejection, disconnect/reconnect, and raw-only
+  process detection.
+- Manual smoke: Codex CLI 0.144.6 served an isolated temporary `CODEX_HOME` over a Unix
+  socket. A second control-proxy connection completed initialize, loaded-list, and
+  persisted-list requests without stopping the App Server. The smoke exposed the
+  official loaded-list string-ID shape, which was added to the adapter and tests. The
+  temporary App Server and directory were stopped and removed; no user daemon or
+  existing session was accessed.
+- Independent review: Adviser (`gpt-5.6-sol`, medium caller to high reviewer) set the
+  explicit-socket boundary and required generation scoping, stale capability removal,
+  shared-approval semantics, action-time validation, raw-only unsupported processes,
+  and WebSocket subset checks. Completion review then found action/reconnect, stream
+  EOF, unload cleanup, direct-input fail-open, coalesced-handshake, and race-coverage
+  gaps; all were fixed and covered before PR creation. A final follow-up identified
+  uncertain `turn/steer` replay as the last blocker, so shared control now returns the
+  failure without automatically resending the prompt as a new turn.
