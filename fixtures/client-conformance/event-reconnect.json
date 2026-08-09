@@ -1,0 +1,12 @@
+{
+  "fixtureVersion": 1,
+  "scenario": "event-reconnect",
+  "firstConnection": {
+    "ready": { "apiVersion": "1", "revision": 1, "sequence": 0 },
+    "event": { "type": "agent.action", "sequence": 3, "snapshotRevision": 1 }
+  },
+  "reconnection": {
+    "ready": { "apiVersion": "1", "revision": 2, "sequence": 5 },
+    "clientRule": "replace the local snapshot when the ready revision differs; do not infer replay"
+  }
+}

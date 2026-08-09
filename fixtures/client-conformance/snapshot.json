@@ -1,0 +1,11 @@
+{
+  "fixtureVersion": 1,
+  "scenario": "snapshot",
+  "request": { "method": "GET", "path": "/v1/agents?view=raw&limit=200" },
+  "expected": {
+    "apiVersion": "1",
+    "agentCount": 6,
+    "statuses": ["unknown", "idle", "working", "blocked", "done", "error"],
+    "provider": "demo"
+  }
+}

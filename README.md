@@ -201,6 +201,41 @@ Checks:
 npm run check
 ```
 
+## Dashboard demo and client conformance
+
+Start a deterministic, local-only demo host with one command:
+
+```bash
+npm run demo
+```
+
+Demo mode disables the Codex, Herdr, and process adapters and exposes only six
+clearly named `demo:*` agents covering `idle`, `working`, `blocked`, `done`,
+`error`, and `unknown`. It is opt-in: normal `npm start` behavior is unchanged.
+Read the generated bearer token from `~/.agent-host/token`, as in the API examples
+above. Dashboard development commonly also needs an exact origin allowlist:
+
+```bash
+AGENT_HOST_ALLOWED_ORIGINS=http://127.0.0.1:3000 npm run demo
+```
+
+The demo supports predictable transitions: prompting an idle/error agent moves it
+to working, interrupting a working agent moves it to idle, and accepting or declining
+`demo-approval-1` moves the blocked agent to working or done. An action immediately
+emits `agent.action`; call `POST /v1/refresh` to publish the resulting `agent.updated`
+snapshot transition.
+
+Language-neutral fixtures live in `fixtures/client-conformance/`, including approval,
+adapter-failure, SSE reconnect, and a 1,000-agent scale case. The reusable Node runner
+in `conformance/client-suite.js` verifies snapshot, action, error, event, and reconnect
+behavior against a fresh demo server. Regenerate the checked-in scale fixture with
+`npm run fixtures:generate`, or run only the live contract checks with
+`npm run conformance`.
+
+SSE is a live stream, not a replay log. After disconnect or a sequence gap, clients
+must reconnect, inspect the new `ready` event, and fetch a fresh snapshot before
+applying later events.
+
 ## Adapter tiers
 
 The host separates **detection** from **control**.
@@ -257,13 +292,19 @@ src/
     registry.js    merge discovery + route actions
     event-bus.js   normalized events
   adapters/
+    demo.js        deterministic opt-in dashboard states and transitions
     process.js     OS process discovery
     herdr.js       Herdr adapter
     codex-rpc.js   Codex App Server JSON-RPC transport
     codex.js       Codex thread/status/action adapter
   http/
     server.js      HTTP + SSE interface
+  runtime.js       live versus demo adapter composition
   cli.js           daemon / local CLI
+conformance/
+  client-suite.js  reusable HTTP/SSE client contract checks
+fixtures/
+  client-conformance/  sanitized versioned scenarios and scale data
 ```
 
 ### Adapter contract

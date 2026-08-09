@@ -1,0 +1,16 @@
+{
+  "fixtureVersion": 1,
+  "scenario": "action",
+  "request": {
+    "method": "POST",
+    "path": "/v1/agents/demo%3Aidle/prompt",
+    "body": { "text": "conformance prompt" }
+  },
+  "expected": {
+    "status": 200,
+    "agentId": "demo:idle",
+    "action": "prompt",
+    "transition": { "from": "idle", "to": "working" },
+    "events": ["audit.action", "agent.action", "agent.updated"]
+  }
+}

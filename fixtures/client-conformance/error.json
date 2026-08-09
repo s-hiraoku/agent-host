@@ -1,0 +1,6 @@
+{
+  "fixtureVersion": 1,
+  "scenario": "error",
+  "request": { "method": "GET", "path": "/v1/agents/demo%3Amissing" },
+  "expected": { "status": 404, "apiVersion": "1", "code": "agent_not_found" }
+}

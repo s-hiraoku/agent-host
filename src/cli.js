@@ -1,19 +1,18 @@
 #!/usr/bin/env node
 import { AgentRegistry } from "./core/registry.js";
-import { ProcessAdapter } from "./adapters/process.js";
-import { HerdrAdapter } from "./adapters/herdr.js";
-import { CodexAdapter } from "./adapters/codex.js";
+import { createRuntimeAdapters } from "./runtime.js";
 import { createAgentServer } from "./http/server.js";
 import { chmod, lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
+const [command = "serve", ...args] = process.argv.slice(2);
+const demoMode = command === "demo" || process.env.AGENT_HOST_DEMO === "1";
 const makeRegistry = () => new AgentRegistry(
-  [new CodexAdapter(), new HerdrAdapter(), new ProcessAdapter()],
+  createRuntimeAdapters({ demoMode }),
   { adapterTimeoutMs: Number(process.env.AGENT_HOST_ADAPTER_TIMEOUT_MS ?? "20000") },
 );
-const [command = "serve", ...args] = process.argv.slice(2);
 const host = process.env.AGENT_HOST_BIND ?? "127.0.0.1";
 const port = Number(process.env.AGENT_HOST_PORT ?? "4777");
 
@@ -35,7 +34,7 @@ async function writeGeneratedToken(path, token) {
   }
 }
 
-if (command === "serve") {
+if (command === "serve" || command === "demo") {
   if (!new Set(["127.0.0.1", "localhost", "::1"]).has(host)) {
     throw new Error("AGENT_HOST_BIND must be a loopback host");
   }
@@ -57,6 +56,7 @@ if (command === "serve") {
   }
   const displayHost = host.includes(":") ? `[${host}]` : host;
   console.log(`[agent-host] listening on http://${displayHost}:${port}`);
+  if (demoMode) console.log("[agent-host] deterministic demo mode enabled; live adapters are disabled");
   if (server.generatedToken) console.log(`[agent-host] generated API token written to ${tokenPath}`);
   const shutdown = async () => { await server.stop(); process.exit(0); };
   process.on("SIGINT", shutdown);

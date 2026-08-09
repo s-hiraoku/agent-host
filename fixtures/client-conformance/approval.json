@@ -1,0 +1,11 @@
+{
+  "fixtureVersion": 1,
+  "scenario": "approval",
+  "agentId": "demo:blocked",
+  "status": "blocked",
+  "pendingApproval": {
+    "approvalId": "demo-approval-1",
+    "method": "demo/requestApproval",
+    "availableDecisions": ["accept", "decline"]
+  }
+}

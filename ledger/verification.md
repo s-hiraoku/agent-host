@@ -49,3 +49,13 @@
 - Independent review: Adviser rejected permanent history mode, `notLoaded => done`, and implicit process interruption. The implementation uses an isolated history cache/revision, separates visibility from runtime status, and leaves destructive process control disabled.
 - PR Guardian follow-up: added invalid timeout configuration coverage, proved raw-only changes advance raw cursor revisions, and proved cached historical records are overlaid by live state while unrelated live changes do not invalidate historical pagination.
 - Current-head bot review follow-up: validated history TTL configuration, immediate retry after failed history loads, live-only historical cursor invalidation, case-insensitive Bearer scheme parsing, canonical origin configuration errors, defensive Codex result truncation, environment-prefixed process classification, immutable list-cache results, and deterministic idempotency TTL timing.
+
+## Issue #6 implementation — 2026-08-09
+
+- Commands: `npm run fixtures:generate`, `git diff --check`, `npm run check`, and `npm run conformance`
+- Result: pass
+- Tests: 43 passed, 0 failed.
+- Demo fixtures: all six stable statuses, read-only/promptable/interruptible/approval-blocked capability combinations, fixed timestamps, and deterministic prompt/interrupt/approve/reject transitions.
+- Client conformance: a reusable runner validates a live demo server's bounded raw snapshot, approval detail, authenticated idempotent action, `audit.action` / `agent.action` / `agent.updated` events, structured error, and SSE reconnect ready state.
+- Privacy/schema: seven versioned JSON fixtures are parsed and scanned for personal local paths, bearer credentials, token/session content, cwd, and raw metadata. The scale fixture contains exactly 1,000 unique schema-compatible agents.
+- One-command smoke test: `npm run demo` listened on loopback with only the demo adapter; an authenticated raw snapshot returned six agents and all six normalized states. A supplied test token avoided touching the generated-token file.
