@@ -2,6 +2,7 @@ import { noCapabilities } from "../core/types.js";
 
 const BASE_TIME = Date.parse("2026-01-01T00:00:00.000Z");
 const ACTIVE_STATUSES = new Set(["working", "blocked"]);
+const ACTION_CAPABILITIES = { prompt: "prompt", interrupt: "interrupt", approve: "approve", reject: "reject" };
 
 function capabilities(overrides = {}) {
   return { ...noCapabilities(), ...overrides };
@@ -104,6 +105,16 @@ export class DemoAdapter {
     const current = this.#agents.get(agent.id);
     if (!current) {
       return { ok: false, code: "agent_not_found", agentId: agent.id, action, message: "demo agent not found" };
+    }
+    const capability = ACTION_CAPABILITIES[action];
+    if (capability && !current.capabilities[capability]) {
+      return {
+        ok: false,
+        code: "capability_not_available",
+        agentId: agent.id,
+        action,
+        message: `capability ${capability} is not available`,
+      };
     }
     const previousStatus = current.status;
     this.#transition += 1;

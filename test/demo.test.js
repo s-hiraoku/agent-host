@@ -34,6 +34,9 @@ test("demo adapter transitions prompts, interrupts, and approvals predictably", 
   const interrupt = await adapter.interrupt(workingIdle);
   assert.deepEqual(interrupt.data.transition, { from: "working", to: "idle" });
   assert.equal(interrupt.data.transitionNumber, 2);
+  const repeatedInterrupt = await adapter.interrupt(workingIdle);
+  assert.equal(repeatedInterrupt.code, "capability_not_available");
+  assert.equal(repeatedInterrupt.action, "interrupt");
 
   const blocked = initial.find((agent) => agent.id === "demo:blocked");
   const missing = await adapter.approve(blocked, { approvalId: "wrong" });
