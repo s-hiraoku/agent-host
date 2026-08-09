@@ -28,7 +28,7 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 - Branch: `codex/issue-6-demo-conformance`
 - Issue: https://github.com/s-hiraoku/agent-host/issues/6
 - Base: `main` at merge commit `0d0c6e1` (PR #15)
-- PR: pending
+- PR: https://github.com/s-hiraoku/agent-host/pull/16
 - Next: finish Issue #6 verification and PR Guardian, then continue with Issue #7 after merge.
 
 ## Progress notes
