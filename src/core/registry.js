@@ -52,6 +52,8 @@ export class AgentRegistry {
   #historyTtlMs;
   #historyAgents = new Map();
   #historyRevision = 0;
+  #historyOverlayRevision = 0;
+  #rawRevision = 0;
   #historyExpiresAt = 0;
   #historyPromise;
   #historyControllers = new Set();
@@ -99,16 +101,18 @@ export class AgentRegistry {
     }
     await this.#loadHistory();
     if (view === "historical") {
+      const combined = new Map(this.#historyAgents);
+      for (const agent of this.listRaw()) combined.set(agent.id, agent);
       return {
-        agents: reconcileAgents([...this.#historyAgents.values()]).filter((agent) => matchesView(agent, view)).sort(compareAgents),
-        cursorRevision: `history:${this.#historyRevision}`,
+        agents: reconcileAgents([...combined.values()]).filter((agent) => matchesView(agent, view)).sort(compareAgents),
+        cursorRevision: `history:${this.#historyRevision}:${this.#historyOverlayRevision}`,
       };
     }
     const combined = new Map(this.#historyAgents);
     for (const agent of this.listRaw()) combined.set(agent.id, agent);
     return {
       agents: reconcileAgents([...combined.values()], true).sort(compareAgents),
-      cursorRevision: `raw:${this.#revision}:${this.#historyRevision}`,
+      cursorRevision: `raw:${this.#rawRevision}:${this.#historyRevision}`,
     };
   }
   get(id) { return this.listRaw().find((agent) => agent.id === id) ?? this.#historyAgents.get(id); }
@@ -155,6 +159,8 @@ export class AgentRegistry {
 
   #applyOutcome(outcome) {
     const previousCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
+    const previousRaw = this.listRaw().map(semanticAgent);
+    const previousOverlay = historyOverlay(previousRaw, this.#historyAgents);
     const next = new Map(this.#agents);
     const previousHealth = this.#adapterHealth.get(outcome.adapterId);
     const health = this.#healthForOutcome(previousHealth, outcome);
@@ -183,6 +189,11 @@ export class AgentRegistry {
       }
     }
     this.#agents = normalized;
+    const nextRaw = this.listRaw().map(semanticAgent);
+    if (!isDeepStrictEqual(previousRaw, nextRaw)) this.#rawRevision += 1;
+    if (!isDeepStrictEqual(previousOverlay, historyOverlay(nextRaw, this.#historyAgents))) {
+      this.#historyOverlayRevision += 1;
+    }
     const nextCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
     const changes = [];
     for (const [id, agent] of nextCanonical) {
@@ -383,4 +394,8 @@ export class AgentRegistry {
     });
     return normalizedResult;
   }
+}
+
+function historyOverlay(agents, historyAgents) {
+  return agents.filter((agent) => historyAgents.has(agent.id));
 }

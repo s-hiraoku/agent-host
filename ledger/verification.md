@@ -41,9 +41,10 @@
 
 - Command: `git diff --check && npm run check`
 - Result: pass
-- Tests: 35 passed, 0 failed
+- Tests: 36 passed, 0 failed
 - Recorded scale fixture: 1,000 Codex threads + 108 process records + 8 Herdr agents = 1,116 raw records; the default recent view returns 26 records and a smaller 200-limit payload, while 990 historical Codex records remain explicitly pageable.
 - Codex fixtures: normal discovery performs one bounded request, history is separately bounded, provider activity becomes ISO `lastActivityAt`, and `notLoaded` remains `unknown`.
 - Process fixtures: direct executables are high confidence; wrappers, helpers, and search commands are excluded or raw-only; no process record advertises interrupt.
 - Reconciliation fixtures: exact same-provider PID duplicates link through `duplicateOf`, while same-cwd/different-PID records remain distinct; history caching does not change the live revision or emit lifecycle events.
 - Independent review: Adviser rejected permanent history mode, `notLoaded => done`, and implicit process interruption. The implementation uses an isolated history cache/revision, separates visibility from runtime status, and leaves destructive process control disabled.
+- PR Guardian follow-up: added invalid timeout configuration coverage, proved raw-only changes advance raw cursor revisions, and proved cached historical records are overlaid by live state while unrelated live changes do not invalidate historical pagination.

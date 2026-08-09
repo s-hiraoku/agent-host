@@ -201,21 +201,29 @@ test("returns stable action error codes", async () => {
 
 test("keeps history separate and reconciles only exact process identities", async () => {
   let historyCalls = 0;
+  let richName = "Rich";
+  let looseName = "Loose";
   const rich = {
     id: "rich",
     async discover() {
       return [{
-        id: "rich:42", provider: "codex", source: "rich", name: "Rich", status: "working", pid: 42, cwd: "/work",
+        id: "rich:42", provider: "codex", source: "rich", name: richName, status: "working", pid: 42, cwd: "/work",
         capabilities: { prompt: true }, discovery: { kind: "native", confidence: "high", visibility: "active" },
       }];
     },
     async discoverHistory() {
       historyCalls += 1;
-      return [{
-        id: "rich:old", provider: "codex", source: "rich", name: "Old", status: "unknown", cwd: "/old",
-        lastActivityAt: "2020-01-01T00:00:00.000Z", capabilities: {},
-        discovery: { kind: "native", confidence: "high", visibility: "historical" },
-      }];
+      return [
+        {
+          id: "rich:old", provider: "codex", source: "rich", name: "Old", status: "unknown", cwd: "/old",
+          lastActivityAt: "2020-01-01T00:00:00.000Z", capabilities: {},
+          discovery: { kind: "native", confidence: "high", visibility: "historical" },
+        },
+        {
+          id: "rich:42", provider: "codex", source: "rich", name: "Stale Rich", status: "unknown", pid: 42,
+          capabilities: {}, discovery: { kind: "native", confidence: "high", visibility: "historical" },
+        },
+      ];
     },
   };
   const processes = {
@@ -224,7 +232,7 @@ test("keeps history separate and reconciles only exact process identities", asyn
       return [
         { id: "process:42", provider: "codex", source: "process", name: "Duplicate", status: "unknown", pid: 42, cwd: "/work", capabilities: {}, discovery: { kind: "process", confidence: "high", visibility: "active" } },
         { id: "process:43", provider: "codex", source: "process", name: "Same cwd", status: "unknown", pid: 43, cwd: "/work", capabilities: {}, discovery: { kind: "process", confidence: "high", visibility: "active" } },
-        { id: "process:44", provider: "codex", source: "process", name: "Loose", status: "unknown", pid: 44, capabilities: {}, discovery: { kind: "process", confidence: "low", visibility: "raw" } },
+        { id: "process:44", provider: "codex", source: "process", name: looseName, status: "unknown", pid: 44, capabilities: {}, discovery: { kind: "process", confidence: "low", visibility: "raw" } },
       ];
     },
   };
@@ -248,6 +256,18 @@ test("keeps history separate and reconciles only exact process identities", asyn
   const raw = await registry.listView("raw");
   assert.deepEqual(new Set(raw.agents.map((agent) => agent.id)), new Set(["rich:old", "rich:42", "process:42", "process:43", "process:44"]));
   assert.equal(raw.agents.find((agent) => agent.id === "process:42").discovery.duplicateOf, "rich:42");
+
+  looseName = "Loose changed";
+  await registry.refresh();
+  const rawAfterLooseChange = await registry.listView("raw");
+  assert.notEqual(rawAfterLooseChange.cursorRevision, raw.cursorRevision);
+
+  const historicalCursorRevision = historical.cursorRevision;
+  richName = "Rich changed";
+  await registry.refresh();
+  const historicalAfterLiveChange = await registry.listView("historical");
+  assert.notEqual(historicalAfterLiveChange.cursorRevision, historicalCursorRevision);
+  assert.deepEqual(historicalAfterLiveChange.agents.map((agent) => agent.id), ["rich:old"]);
 });
 
 test("coalesces refreshes and discovers adapters concurrently", async () => {

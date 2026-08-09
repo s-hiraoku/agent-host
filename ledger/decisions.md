@@ -20,3 +20,4 @@
 - Keep normal Codex discovery at one recency-sorted page of 100 threads. Load up to 1,000 history records only on explicit historical/raw requests into a separate TTL cache with an independent cursor revision and no lifecycle-event burst.
 - Treat Codex `notLoaded` as unknown state, not completion, and classify recency separately from runtime status using provider timestamps.
 - Never advertise process interrupt by default. Keep loose command matches raw-only and suppress process/rich duplicates only on exact same-provider PID correlation.
+- Track raw snapshot revisions separately so raw-only process changes invalidate raw cursors without emitting normal lifecycle events. Overlay current records on cached history and invalidate historical cursors only when a history-linked live record changes.
