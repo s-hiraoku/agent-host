@@ -221,6 +221,7 @@ test("marks adapter records stale immediately when its live transport disconnect
   assert.deepEqual(stale.pendingApprovals, []);
   assert.equal(stale.discovery.confidence, "low");
   await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(registry.get("live:1"), stale);
   await registry.close();
   assert.equal(unsubscribed, true);
 });

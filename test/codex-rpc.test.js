@@ -74,6 +74,7 @@ function fakeControlProcess(onMessage) {
       upgraded = true;
     }
     while (input.length >= 6) {
+      const opcode = input[0] & 0x0f;
       let length = input[1] & 0x7f;
       assert.ok(input[1] & 0x80, "client frames must be masked");
       let offset = 2;
@@ -91,7 +92,7 @@ function fakeControlProcess(onMessage) {
       const payload = Buffer.from(input.subarray(offset + 4, offset + 4 + length));
       input = input.subarray(offset + 4 + length);
       for (let index = 0; index < payload.length; index += 1) payload[index] ^= mask[index % 4];
-      if ((payload[0] ?? 0) === 0) continue;
+      if (opcode !== 0x1) continue;
       onMessage(proc, JSON.parse(payload.toString()));
     }
   });

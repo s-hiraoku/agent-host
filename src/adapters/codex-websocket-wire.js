@@ -154,7 +154,9 @@ export class CodexWebSocketWire {
         length = Number(largeLength);
         offset = 10;
       }
-      if (length > this.#maxPayloadBytes || this.#fragmentBytes + length > this.#maxPayloadBytes) {
+      const isDataFrame = opcode === 0x0 || opcode === 0x1 || opcode === 0x2;
+      if (length > this.#maxPayloadBytes
+        || (isDataFrame && this.#fragmentBytes + length > this.#maxPayloadBytes)) {
         throw new Error("Codex websocket payload is too large");
       }
       if (this.#buffer.length < offset + length) return;

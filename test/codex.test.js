@@ -24,6 +24,8 @@ class FakeCodexClient {
   failSteer = false;
   threadListResult;
   threadListHandler;
+  loadedThreadsHandler;
+  resumeThreadHandler;
   loadedThreads = [];
   resumeFailures = new Set();
   generation = 1;
@@ -49,9 +51,12 @@ class FakeCodexClient {
       data: [{ id: "thr_1", preview: "Fix tests", cwd: "/tmp/project", status: { type: "idle" } }],
       nextCursor: null,
     };
-    if (method === "thread/loaded/list") return { data: this.loadedThreads };
+    if (method === "thread/loaded/list") {
+      return this.loadedThreadsHandler?.(params) ?? { data: this.loadedThreads };
+    }
     if (method === "thread/resume") {
       if (this.resumeFailures.has(params.threadId)) throw new Error("resume failed");
+      if (this.resumeThreadHandler) return { thread: this.resumeThreadHandler(params) };
       const loaded = this.loadedThreads.find((thread) => (
         typeof thread === "string" ? thread : thread.id ?? thread.threadId
       ) === params.threadId);
@@ -330,6 +335,8 @@ test("Codex control mode invalidates approvals and capabilities across reconnect
 
   client.generation = 2;
   client.emitState({ state: "connected", generation: 2 });
+  client.defaultCanAcceptDirectInput = undefined;
+  client.loadedThreads = [{ id: "thr_1", status: { type: "active" } }];
   await adapter.discover();
   client.emitServerRequest({
     id: 101,
@@ -345,9 +352,43 @@ test("Codex control mode invalidates approvals and capabilities across reconnect
   });
   [agent] = await adapter.discover();
   assert.deepEqual(agent.pendingApprovals.map((approval) => approval.approvalId), ["2:thr_1:101"]);
+  assert.equal(agent.capabilities.prompt, false);
   assert.equal((await adapter.approve(agent, { approvalId: "1:thr_1:101" })).ok, false);
   assert.equal((await adapter.approve(agent, { approvalId: "2:thr_1:101" })).ok, true);
   assert.ok(changes >= 3);
+  await adapter.close();
+});
+
+test("Codex control mode retains subscriptions when loaded-thread pagination is truncated", async () => {
+  const client = new FakeCodexClient();
+  client.loadedThreads = [{ id: "thr_1", status: { type: "idle" }, canAcceptDirectInput: true }];
+  const adapter = new CodexAdapter({ mode: "control", client });
+  let [agent] = await adapter.discover();
+  assert.equal(agent.capabilities.prompt, true);
+
+  client.loadedThreadsHandler = () => ({ data: [], nextCursor: "more" });
+  [agent] = await adapter.discover();
+
+  assert.equal(client.requests.filter((entry) => entry.method === "thread/loaded/list").length, 11);
+  assert.equal(agent.capabilities.prompt, true);
+  assert.equal(agent.capabilities.read, true);
+  await adapter.close();
+});
+
+test("Codex control mode normalizes threadId-only resume records", async () => {
+  const client = new FakeCodexClient();
+  client.loadedThreads = [{ threadId: "thr_1" }];
+  client.resumeThreadHandler = ({ threadId }) => ({
+    threadId,
+    status: { type: "idle" },
+    canAcceptDirectInput: true,
+  });
+  const adapter = new CodexAdapter({ mode: "control", client });
+
+  const [agent] = await adapter.discover();
+
+  assert.equal(agent.sessionId, "thr_1");
+  assert.equal(agent.capabilities.prompt, true);
   await adapter.close();
 });
 

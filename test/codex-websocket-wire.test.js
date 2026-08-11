@@ -99,6 +99,23 @@ test("Codex websocket proxy wire rejects invalid handshakes and oversized payloa
   assert.match((await errored).message, /payload is too large/);
 });
 
+test("Codex websocket proxy wire excludes interleaved control frames from fragmented payload size", async () => {
+  const target = fixture({ maxPayloadBytes: 4 });
+  await open(target);
+  const received = [];
+  target.wire.onMessage = (message) => received.push(message);
+
+  target.fromServer.write(Buffer.concat([
+    serverFrame(0x1, "1234", false),
+    serverFrame(0x9, "x"),
+    serverFrame(0x0, ""),
+  ]));
+
+  assert.deepEqual(received, ["1234"]);
+  assert.deepEqual(decodeClientFrame(target.writes.shift()), { opcode: 0xA, masked: true, payload: "x" });
+  target.wire.close();
+});
+
 test("Codex websocket proxy wire accepts a small handshake coalesced with large frames", async () => {
   const target = fixture();
   const started = target.wire.start();

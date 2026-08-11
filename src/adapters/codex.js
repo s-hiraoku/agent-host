@@ -259,6 +259,7 @@ export class CodexAdapter {
     const generation = this.#connectionGeneration;
     const loaded = [];
     let cursor = null;
+    let complete = false;
     for (let page = 0; page < 10; page += 1) {
       const result = await this.#client.request(
         "thread/loaded/list",
@@ -267,10 +268,13 @@ export class CodexAdapter {
       );
       loaded.push(...(result?.data ?? result?.threads ?? []));
       cursor = result?.nextCursor ?? null;
-      if (!cursor) break;
+      if (!cursor) {
+        complete = true;
+        break;
+      }
     }
     const loadedIds = new Set(loaded.map(loadedThreadId).filter(Boolean));
-    for (const threadId of [...this.#subscriptions.keys()]) {
+    for (const threadId of complete ? [...this.#subscriptions.keys()] : []) {
       if (!loadedIds.has(threadId)) {
         this.#subscriptions.delete(threadId);
         this.#directInput.delete(threadId);
@@ -322,11 +326,13 @@ export class CodexAdapter {
   }
 
   #rememberThread(thread, rememberStatus = true) {
-    if (!thread?.id) return;
-    this.#loadedThreads.set(thread.id, { ...this.#loadedThreads.get(thread.id), ...thread });
-    if (rememberStatus && thread.status) this.#status.set(thread.id, thread.status);
+    const threadId = loadedThreadId(thread);
+    if (!threadId) return;
+    const normalized = { ...thread, id: threadId };
+    this.#loadedThreads.set(threadId, { ...this.#loadedThreads.get(threadId), ...normalized });
+    if (rememberStatus && thread.status) this.#status.set(threadId, thread.status);
     if (thread.canAcceptDirectInput !== undefined) {
-      this.#directInput.set(thread.id, Boolean(thread.canAcceptDirectInput));
+      this.#directInput.set(threadId, Boolean(thread.canAcceptDirectInput));
     }
   }
 
@@ -458,12 +464,18 @@ export class CodexAdapter {
 
   #onStateChange(event) {
     if (event.state === "connected") {
+      if (event.generation !== this.#connectionGeneration) this.#clearConnectionState();
       this.#connectionGeneration = event.generation;
       this.#started = true;
       return;
     }
     if (event.state !== "disconnected" || event.generation !== this.#connectionGeneration) return;
     this.#started = false;
+    this.#clearConnectionState();
+    this.#emitChange({ type: "disconnected", error: event.error });
+  }
+
+  #clearConnectionState() {
     for (const entry of this.#pendingApprovals.values()) clearTimeout(entry.timer);
     this.#pendingApprovals.clear();
     this.#subscriptions.clear();
@@ -471,7 +483,6 @@ export class CodexAdapter {
     this.#loadedThreads.clear();
     this.#activeTurns.clear();
     this.#status.clear();
-    this.#emitChange({ type: "disconnected", error: event.error });
   }
 
   #approvalsForThread(threadId) {
