@@ -149,11 +149,16 @@ test("uses agent id as the deterministic list order tie-breaker", async () => {
 
 test("preserves last-known agents when adapter discovery fails", async () => {
   let failing = false;
+  let staleCalls = 0;
   const adapter = {
     id: "sometimes",
     async discover() {
       if (failing) throw new Error("temporarily unavailable");
       return [{ id: "sometimes:1", provider: "test", source: "sometimes", name: "agent", status: "idle", capabilities: {} }];
+    },
+    markStale(agent) {
+      staleCalls += 1;
+      return { ...agent, status: "unknown", capabilities: {} };
     },
   };
   const registry = new AgentRegistry([adapter]);
@@ -169,6 +174,7 @@ test("preserves last-known agents when adapter discovery fails", async () => {
   try { await registry.refresh(); }
   finally { console.error = originalError; }
   assert.equal(registry.get("sometimes:1"), first);
+  assert.equal(staleCalls, 0);
   assert.equal(registry.revision, 1);
   assert.equal(events.filter((event) => event.type.startsWith("agent.")).length, agentEventCount);
   assert.equal(events.at(-1).type, "adapter.health");

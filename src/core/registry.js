@@ -105,6 +105,7 @@ export class AgentRegistry {
             attemptedAt: new Date().toISOString(),
             durationMs: 0,
             status: "error",
+            markStale: true,
             error: event.error ?? new Error("adapter transport disconnected"),
           });
         }
@@ -203,7 +204,12 @@ export class AgentRegistry {
     const adapter = this.#adapters.get(outcome.adapterId);
     if (outcome.status === "success" && adapter?.isDiscoveryCurrent
       && !adapter.isDiscoveryCurrent(outcome.agents)) {
-      outcome = { ...outcome, status: "error", error: new Error("adapter discovery used a stale transport") };
+      outcome = {
+        ...outcome,
+        status: "error",
+        markStale: true,
+        error: new Error("adapter discovery used a stale transport"),
+      };
     }
     const previousCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
     const previousRaw = this.listRaw().map(semanticAgent);
@@ -220,7 +226,7 @@ export class AgentRegistry {
       }
       for (const agent of outcome.agents) next.set(agent.id, agent);
     } else {
-      if (adapter?.markStale) {
+      if (outcome.markStale && adapter?.markStale) {
         for (const [id, agent] of next) {
           if (agent.source === outcome.adapterId) next.set(id, adapter.markStale(agent));
         }

@@ -505,3 +505,26 @@ test("Codex live notifications refresh the registry without polling history", as
   assert.deepEqual(registry.get("codex:thr_1").pendingApprovals, []);
   await registry.close();
 });
+
+test("Codex ignores notifications that do not change canonical state", async () => {
+  const client = new FakeCodexClient();
+  client.loadedThreads = [{ id: "thr_1", status: { type: "idle" }, canAcceptDirectInput: true }];
+  const adapter = new CodexAdapter({ mode: "control", client });
+  let changes = 0;
+  adapter.onChange(() => { changes += 1; });
+  await adapter.discover();
+
+  client.emitNotification({
+    method: "item/agentMessage/delta",
+    params: { threadId: "thr_1", delta: "streamed output" },
+    connectionGeneration: 1,
+  });
+  client.emitNotification({
+    method: "thread/status/changed",
+    params: { threadId: "thr_1", status: { type: "idle" } },
+    connectionGeneration: 1,
+  });
+
+  assert.equal(changes, 0);
+  await adapter.close();
+});

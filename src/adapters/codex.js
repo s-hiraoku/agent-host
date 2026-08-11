@@ -1,5 +1,6 @@
 import { CodexRpcClient } from "./codex-rpc.js";
 import { noCapabilities } from "../core/types.js";
+import { isDeepStrictEqual } from "node:util";
 
 const APPROVAL_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -407,33 +408,52 @@ export class CodexAdapter {
     if (generation !== this.#connectionGeneration) return;
     const params = message.params ?? {};
     const threadId = params.threadId ?? params.thread?.id;
+    let changed = false;
     if (this.#mode === "control" && threadId
       && this.#subscriptions.get(threadId) !== generation) return;
     if (message.method === "thread/status/changed" && params.threadId) {
+      changed = !isDeepStrictEqual(this.#status.get(params.threadId), params.status);
       this.#status.set(params.threadId, params.status);
     }
     if (message.method === "thread/started" && params.thread?.id) {
+      const previousThread = this.#loadedThreads.get(params.thread.id);
+      const previousStatus = this.#status.get(params.thread.id);
+      const previousDirectInput = this.#directInput.get(params.thread.id);
       this.#rememberThread(params.thread);
-      this.#status.set(params.thread.id, params.thread.status);
+      changed = changed
+        || !isDeepStrictEqual(previousThread, this.#loadedThreads.get(params.thread.id))
+        || !isDeepStrictEqual(previousStatus, this.#status.get(params.thread.id))
+        || previousDirectInput !== this.#directInput.get(params.thread.id);
     }
     if (message.method === "turn/started" && params.threadId && params.turn?.id) {
+      const activeStatus = { type: "active", activeFlags: [] };
+      changed = changed
+        || this.#activeTurns.get(params.threadId) !== params.turn.id
+        || !isDeepStrictEqual(this.#status.get(params.threadId), activeStatus);
       this.#activeTurns.set(params.threadId, params.turn.id);
-      this.#status.set(params.threadId, { type: "active", activeFlags: [] });
+      this.#status.set(params.threadId, activeStatus);
     }
     if (TERMINAL_TURN_METHODS.has(message.method) && params.threadId) {
+      const nextStatus = {
+        type: params.turn?.status === "failed" || message.method === "turn/failed" ? "systemError" : "idle",
+      };
+      const approvalCount = this.#pendingApprovals.size;
+      changed = changed
+        || this.#activeTurns.has(params.threadId)
+        || !isDeepStrictEqual(this.#status.get(params.threadId), nextStatus);
       this.#activeTurns.delete(params.threadId);
-      const failed = params.turn?.status === "failed" || message.method === "turn/failed";
-      this.#status.set(params.threadId, { type: failed ? "systemError" : "idle" });
+      this.#status.set(params.threadId, nextStatus);
       this.#clearApprovalsForThread(params.threadId);
+      changed = changed || approvalCount !== this.#pendingApprovals.size;
     }
     if (message.method === "serverRequest/resolved" && params.requestId !== undefined) {
       for (const [approvalId, entry] of this.#pendingApprovals) {
         if (entry.generation === generation && String(entry.rawId) === String(params.requestId)) {
-          this.#deleteApproval(approvalId);
+          changed = this.#deleteApproval(approvalId) || changed;
         }
       }
     }
-    this.#emitChange();
+    if (changed) this.#emitChange();
   }
 
   #onStateChange(event) {
@@ -467,7 +487,7 @@ export class CodexAdapter {
   #deleteApproval(id) {
     const entry = this.#pendingApprovals.get(id);
     if (entry) clearTimeout(entry.timer);
-    this.#pendingApprovals.delete(id);
+    return this.#pendingApprovals.delete(id);
   }
 
   async #resolveApproval(agent, payload, decision, action) {
