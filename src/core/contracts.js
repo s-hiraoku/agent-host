@@ -1,6 +1,6 @@
 import { compareAgents, matchesView } from "./discovery.js";
 import { createHash } from "node:crypto";
-import { basename, isAbsolute, resolve, sep } from "node:path";
+import { posix, sep, win32 } from "node:path";
 
 export const API_VERSION = "1";
 export const DEFAULT_PAGE_LIMIT = 50;
@@ -75,12 +75,14 @@ function publicApprovalPath(value) {
   return normalized.length <= 240 ? normalized : undefined;
 }
 
-function projectView(cwd) {
-  if (typeof cwd !== "string" || !isAbsolute(cwd)) return undefined;
-  const canonical = resolve(cwd);
+export function projectView(cwd, platform = process.platform) {
+  const paths = platform === "win32" ? win32 : posix;
+  if (typeof cwd !== "string" || !paths.isAbsolute(cwd)) return undefined;
+  const resolved = paths.resolve(cwd);
+  const canonical = platform === "win32" ? resolved.toLowerCase() : resolved;
   return {
     id: `local:${createHash("sha256").update(canonical).digest("base64url").slice(0, 22)}`,
-    name: basename(canonical) || canonical,
+    name: paths.basename(resolved) || resolved,
     scope: "local",
   };
 }

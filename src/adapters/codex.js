@@ -500,21 +500,25 @@ export class CodexAdapter {
       && this.#subscriptions.get(threadId) !== generation) return;
     if ((message.method === "item/started" || message.method === "item/completed") && threadId) {
       const context = fileChangeContext(params.item, this.#threadCwds.get(threadId));
-      if (context && params.item?.id) {
+      if (params.item?.id) {
         const key = contextKey(generation, threadId, params.turnId, params.item.id);
         this.#fileChangeContexts.delete(key);
-        this.#fileChangeContexts.set(key, context);
-        while (this.#fileChangeContexts.size > MAX_FILE_CHANGE_CONTEXTS) {
-          this.#fileChangeContexts.delete(this.#fileChangeContexts.keys().next().value);
+        if (context) {
+          this.#fileChangeContexts.set(key, context);
+          while (this.#fileChangeContexts.size > MAX_FILE_CHANGE_CONTEXTS) {
+            this.#fileChangeContexts.delete(this.#fileChangeContexts.keys().next().value);
+          }
         }
         for (const entry of this.#pendingApprovals.values()) {
           if (entry.message.method === "item/fileChange/requestApproval"
+            && entry.generation === generation
             && entry.message.params?.threadId === threadId
             && entry.message.params?.turnId === params.turnId
             && entry.message.params?.itemId === params.item.id) {
+            const actionable = Boolean(context);
+            changed = changed || !isDeepStrictEqual(entry.context, context) || entry.actionable !== actionable;
             entry.context = context;
-            entry.actionable = true;
-            changed = true;
+            entry.actionable = actionable;
           }
         }
       }

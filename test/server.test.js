@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEventBus } from "../src/core/event-bus.js";
 import { AgentRegistry } from "../src/core/registry.js";
-import { agentSummary } from "../src/core/contracts.js";
+import { agentSummary, projectView } from "../src/core/contracts.js";
 import { createAgentServer } from "../src/http/server.js";
 import { OperationsContext } from "../src/operations/context.js";
 
@@ -25,6 +25,7 @@ test("project identity preserves significant cwd whitespace", () => {
   assert.equal(ordinary.project.id, terminalSeparator.project.id);
   assert.notEqual(ordinary.project.id, trailingSpace.project.id);
   assert.equal(trailingSpace.project.name, "project ");
+  assert.equal(projectView("C:\\Work\\Repo", "win32").id, projectView("c:\\work\\repo", "win32").id);
 });
 
 test("serves the pinned dashboard and same-origin API alias without weakening authentication", async (t) => {

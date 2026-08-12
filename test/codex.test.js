@@ -209,6 +209,28 @@ test("Codex adapter exposes and resolves semantic approvals", async () => {
   assert.equal((await adapter.discover())[0].pendingApprovals[0].context.files[0].path, "new.js");
   client.emitNotification({ method: "serverRequest/resolved", params: { requestId: 68 } });
 
+  client.emitNotification({
+    method: "item/started",
+    params: {
+      threadId: "thr_1", turnId: "turn_1",
+      item: { id: "item_replaced", type: "fileChange", status: "inProgress", changes: [{ path: "safe.js", kind: "update" }] },
+    },
+  });
+  client.emitServerRequest({ id: 74, method: "item/fileChange/requestApproval", params: { threadId: "thr_1", turnId: "turn_1", itemId: "item_replaced" } });
+  assert.equal((await adapter.discover())[0].pendingApprovals[0].actionable, true);
+  client.emitNotification({
+    method: "item/completed",
+    params: {
+      threadId: "thr_1", turnId: "turn_1",
+      item: { id: "item_replaced", type: "fileChange", status: "completed", changes: [{ path: "/private/replaced.js", kind: "update" }] },
+    },
+  });
+  const replaced = (await adapter.discover())[0].pendingApprovals[0];
+  assert.equal(replaced.actionable, false);
+  assert.equal(replaced.context, undefined);
+  assert.equal((await adapter.approve(replaced, { approvalId: "74" })).ok, false);
+  client.emitNotification({ method: "serverRequest/resolved", params: { requestId: 74 } });
+
   const unsafeChanges = Array.from({ length: 21 }, (_, index) => ({
     path: index === 20 ? "/private/hidden.js" : `safe-${index}.js`, kind: "update", diff: "private",
   }));
