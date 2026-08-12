@@ -97,8 +97,8 @@ function spdx(packageJson, compatibility) {
       creators: ["Tool: agent-host-build-release"],
     },
     packages: [
-      { SPDXID: "SPDXRef-agent-host", name: packageJson.name, versionInfo: packageJson.version, downloadLocation: "NOASSERTION", filesAnalyzed: true, licenseConcluded: packageJson.license },
-      { SPDXID: "SPDXRef-dashboard", name: "agent-host-dashboard", versionInfo: compatibility.dashboard.version, downloadLocation: `git+https://github.com/${compatibility.dashboard.repository}@${compatibility.dashboard.commit}`, filesAnalyzed: true, licenseConcluded: "NOASSERTION" },
+      { SPDXID: "SPDXRef-agent-host", name: packageJson.name, versionInfo: packageJson.version, downloadLocation: "NOASSERTION", filesAnalyzed: false, licenseConcluded: packageJson.license, licenseDeclared: packageJson.license, copyrightText: "NOASSERTION" },
+      { SPDXID: "SPDXRef-dashboard", name: "agent-host-dashboard", versionInfo: compatibility.dashboard.version, downloadLocation: `git+https://github.com/${compatibility.dashboard.repository}@${compatibility.dashboard.commit}`, filesAnalyzed: false, licenseConcluded: "NOASSERTION", licenseDeclared: "NOASSERTION", copyrightText: "NOASSERTION" },
     ],
   };
 }

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadConfiguration, parseCommandLine } from "../src/config.js";
+import { loadConfiguration, parseCommandLine, serializableConfiguration } from "../src/config.js";
 
 test("configuration precedence is CLI over environment over file over defaults", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "agent-host-config-"));
@@ -40,6 +40,12 @@ test("configuration precedence is CLI over environment over file over defaults",
   });
   assert.equal(cwdRelative.configuration.tokenFile, join(process.cwd(), "cli-token"));
   assert.equal(cwdRelative.configuration.lockFile, join(process.cwd(), "env-lock"));
+
+  const dashboardOnly = await loadConfiguration({
+    cli: { configFile, dashboardDirectory: "dashboard" }, env: {}, homeDirectory: home,
+  });
+  assert.equal(dashboardOnly.configuration.dashboardDirectory, join(process.cwd(), "dashboard"));
+  assert.equal("dashboardDirectory" in serializableConfiguration(dashboardOnly.configuration), false);
 });
 
 test("configuration rejects unknown keys and invalid boundaries", async (t) => {
@@ -48,6 +54,8 @@ test("configuration rejects unknown keys and invalid boundaries", async (t) => {
   const configFile = join(home, "config.json");
   await writeFile(configFile, JSON.stringify({ schemaVersion: 1, porrt: 4777 }));
   await assert.rejects(loadConfiguration({ cli: { configFile }, env: {}, homeDirectory: home }), /unknown configuration key: porrt/);
+  await writeFile(configFile, JSON.stringify({ schemaVersion: 1, dashboardDirectory: "dashboard" }));
+  await assert.rejects(loadConfiguration({ cli: { configFile }, env: {}, homeDirectory: home }), /unknown configuration key: dashboardDirectory/);
   await unlink(configFile);
   await writeFile(configFile, "{}");
   await assert.rejects(loadConfiguration({ cli: { configFile }, env: {}, homeDirectory: home }), /schemaVersion is required/);
