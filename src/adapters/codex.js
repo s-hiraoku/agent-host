@@ -1,7 +1,7 @@
 import { CodexRpcClient } from "./codex-rpc.js";
 import { noCapabilities } from "../core/types.js";
 import { isDeepStrictEqual } from "node:util";
-import { basename, isAbsolute, normalize, relative, resolve, sep } from "node:path";
+import { isAbsolute, normalize, relative, resolve, sep } from "node:path";
 
 const APPROVAL_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -56,7 +56,7 @@ function publicFilePath(value, cwd) {
     candidate = relative(resolve(cwd), resolve(raw));
   }
   const normalized = normalize(candidate).split(sep).join("/");
-  if (!normalized || normalized === ".") return basename(raw).slice(0, 240) || undefined;
+  if (!normalized || normalized === ".") return undefined;
   if (normalized === ".." || normalized.startsWith("../") || isAbsolute(normalized)) {
     return undefined;
   }
