@@ -32,7 +32,9 @@ jobs:
           persist-credentials: false
       - id: compatibility
         working-directory: agent-host
-        run: echo "dashboard_sha=$(node -p \"require('./release-compatibility.json').dashboard.commit\")" >> "$GITHUB_OUTPUT"
+        run: |
+          dashboard_sha="$(node -p "require('./release-compatibility.json').dashboard.commit")"
+          echo "dashboard_sha=$dashboard_sha" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: s-hiraoku/agent-host-dashboard
