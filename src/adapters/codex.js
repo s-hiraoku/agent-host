@@ -47,6 +47,7 @@ function pendingApprovalView(entry) {
 function publicFilePath(value, cwd) {
   if (typeof value !== "string" || !value || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
   const raw = value;
+  if (/^[A-Za-z]:/.test(raw)) return undefined;
   const rawSegments = sep === "\\" ? raw.split(/[\\/]/) : raw.split("/");
   if (rawSegments.includes("..")) return undefined;
   let candidate = raw;
@@ -471,6 +472,7 @@ export class CodexAdapter {
       receivedAt: Date.now(),
       context,
       actionable: message.method !== "item/fileChange/requestApproval" || Boolean(context),
+      contextInvalidated: false,
     };
     entry.timer = setTimeout(() => {
       if (this.#pendingApprovals.get(approvalId) !== entry) return;
@@ -515,10 +517,16 @@ export class CodexAdapter {
             && entry.message.params?.threadId === threadId
             && entry.message.params?.turnId === params.turnId
             && entry.message.params?.itemId === params.item.id) {
-            const actionable = Boolean(context);
-            changed = changed || !isDeepStrictEqual(entry.context, context) || entry.actionable !== actionable;
-            entry.context = context;
-            entry.actionable = actionable;
+            if (entry.context && !isDeepStrictEqual(entry.context, context)) {
+              entry.context = undefined;
+              entry.actionable = false;
+              entry.contextInvalidated = true;
+              changed = true;
+            } else if (!entry.context && !entry.contextInvalidated && context) {
+              entry.context = context;
+              entry.actionable = true;
+              changed = true;
+            }
           }
         }
       }

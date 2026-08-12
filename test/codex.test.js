@@ -222,7 +222,7 @@ test("Codex adapter exposes and resolves semantic approvals", async () => {
     method: "item/completed",
     params: {
       threadId: "thr_1", turnId: "turn_1",
-      item: { id: "item_replaced", type: "fileChange", status: "completed", changes: [{ path: "/private/replaced.js", kind: "update" }] },
+      item: { id: "item_replaced", type: "fileChange", status: "completed", changes: [{ path: "different-safe.js", kind: "update" }] },
     },
   });
   const replaced = (await adapter.discover())[0].pendingApprovals[0];
@@ -242,7 +242,7 @@ test("Codex adapter exposes and resolves semantic approvals", async () => {
   assert.equal((await adapter.discover())[0].pendingApprovals[0].actionable, false);
   client.emitNotification({ method: "serverRequest/resolved", params: { requestId: 69 } });
 
-  for (const [id, path] of [[70, "safe/\u0000../secret"], [71, `${"a".repeat(241)}.js`], [73, "link/../secret"]]) {
+  for (const [id, path] of [[70, "safe/\u0000../secret"], [71, `${"a".repeat(241)}.js`], [73, "link/../secret"], [75, "C:secret.txt"]]) {
     client.emitNotification({ method: "item/started", params: { threadId: "thr_1", turnId: "turn_1", item: { id: `item_${id}`, type: "fileChange", status: "inProgress", changes: [{ path, kind: "update", diff: "private" }] } } });
     client.emitServerRequest({ id, method: "item/fileChange/requestApproval", params: { threadId: "thr_1", turnId: "turn_1", itemId: `item_${id}` } });
     assert.equal((await adapter.discover())[0].pendingApprovals[0].actionable, false);

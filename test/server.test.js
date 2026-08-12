@@ -26,6 +26,15 @@ test("project identity preserves significant cwd whitespace", () => {
   assert.notEqual(ordinary.project.id, trailingSpace.project.id);
   assert.equal(trailingSpace.project.name, "project ");
   assert.equal(projectView("C:\\Work\\Repo", "win32").id, projectView("c:\\work\\repo", "win32").id);
+  const driveRelative = agentSummary({
+    ...base,
+    capabilities: { approve: true },
+    pendingApprovals: [{
+      approvalId: "drive-relative", method: "item/fileChange/requestApproval", actionable: true,
+      context: { kind: "file-change", files: [{ path: "C:secret.txt", kind: "update" }] },
+    }],
+  });
+  assert.equal(driveRelative.capabilities.approve, false);
 });
 
 test("serves the pinned dashboard and same-origin API alias without weakening authentication", async (t) => {
@@ -375,7 +384,7 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
       capabilities: { approve: true }, cwd: "/work/truncated", discoveredAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       pendingApprovals: [{
         approvalId: "truncated", method: "item/fileChange/requestApproval", actionable: true,
-        context: { kind: "file-change", fileCount: 21, truncated: false, files: Array.from({ length: 20 }, (_, index) => ({ path: `safe-${index}.js`, kind: "update" })) },
+        context: { kind: "file-change", fileCount: 20, truncated: false, files: Array.from({ length: 21 }, (_, index) => ({ path: `safe-${index}.js`, kind: "update" })) },
       }],
     }];
     await registry.refresh();

@@ -54,9 +54,9 @@ function approvalContextView(context) {
   });
   if (validated.length !== supplied.length || validated.length === 0) return undefined;
   const files = validated.slice(0, 20);
-  const fileCount = Number.isInteger(context.fileCount) && context.fileCount >= files.length
+  const fileCount = Number.isInteger(context.fileCount) && context.fileCount >= supplied.length
     ? context.fileCount
-    : files.length;
+    : supplied.length;
   return {
     kind: "file-change",
     fileCount,
@@ -68,7 +68,7 @@ function approvalContextView(context) {
 function publicApprovalPath(value) {
   if (typeof value !== "string" || !value || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
   const portable = sep === "\\" ? value.replaceAll("\\", "/") : value;
-  if (portable.startsWith("/") || /^[A-Za-z]:\//.test(portable)) return undefined;
+  if (portable.startsWith("/") || /^[A-Za-z]:/.test(portable)) return undefined;
   const segments = portable.split("/").filter((segment) => segment && segment !== ".");
   if (segments.length === 0 || segments.includes("..")) return undefined;
   const normalized = segments.join("/");
