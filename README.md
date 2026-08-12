@@ -4,7 +4,7 @@ A local control plane for AI coding agents.
 
 `agent-host` discovers agents running on your machine, normalizes their state/capabilities, and exposes one local API that thin clients can use. A watch, Stream Deck, menu bar app, web UI, phone app, or another agent should not need to know whether the target is Codex, Claude Code, Herdr, or something else.
 
-> Status: early MVP. Herdr control, a host-owned Codex App Server integration, and opt-in attachment to an explicitly configured Codex App Server control socket are implemented. Other external desktop/CLI processes remain detection-only until a reliable transport exists.
+> Status: early MVP. Herdr control, a host-owned Codex App Server integration, opt-in attachment to an explicitly configured Codex App Server control socket, and a macOS LaunchAgent lifecycle are implemented. Other external desktop/CLI processes remain detection-only until a reliable transport exists.
 
 ## Why
 
@@ -166,6 +166,94 @@ Requires Node.js 22+ and optionally the CLIs for the adapters you want to use. T
 
 ```bash
 npm install
+npm start                # foreground
+```
+
+Initialize a versioned user configuration and private API token:
+
+```bash
+node src/cli.js init
+node src/cli.js config validate
+node src/cli.js config show --json
+```
+
+The default configuration is `~/.agent-host/config.json`. Precedence is CLI flags,
+then `AGENT_HOST_*` environment variables, then the JSON file, then defaults. Unknown
+JSON keys and invalid values fail startup instead of being ignored. The supported
+settings are:
+
+| JSON key | CLI / environment | Purpose |
+| --- | --- | --- |
+| `bind` | `--bind` / `AGENT_HOST_BIND` | loopback bind address |
+| `port` | `--port` / `AGENT_HOST_PORT` | HTTP port |
+| `refreshMs` | `--refresh-ms` / `AGENT_HOST_REFRESH_MS` | periodic refresh interval |
+| `adapterTimeoutMs` | `--adapter-timeout-ms` / `AGENT_HOST_ADAPTER_TIMEOUT_MS` | per-adapter timeout |
+| `enabledAdapters` | `--enabled-adapters` / `AGENT_HOST_ENABLED_ADAPTERS` | comma-separated `codex,herdr,process` subset |
+| `codexTransport` | `--codex-transport` / `AGENT_HOST_CODEX_TRANSPORT` | `owned` or `control` |
+| `codexSocket` | `--codex-socket` / `AGENT_HOST_CODEX_SOCKET` | control-mode Unix socket |
+| `tokenFile` | `--token-file` / `AGENT_HOST_TOKEN_FILE` | private bearer token file |
+| `lockFile` | `--lock-file` / `AGENT_HOST_LOCK_FILE` | single-instance ownership file |
+| `logLevel` | `--log-level` / `AGENT_HOST_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` |
+| `logFile` | `--log-file` / `AGENT_HOST_LOG_FILE` | LaunchAgent output log |
+| `dashboardUrl` | `--dashboard-url` / `AGENT_HOST_DASHBOARD_URL` | canonical dashboard origin |
+| `allowedOrigins` | repeatable `--allowed-origin` / `AGENT_HOST_ALLOWED_ORIGINS` | additional canonical browser origins |
+
+Relative paths in the JSON file resolve from the configuration directory. CLI and
+environment paths resolve from the current working directory. State directories are
+owner-only; configuration, token, lock, and LaunchAgent files reject unsafe ownership
+or symbolic-link use where they are read or replaced.
+
+### Service lifecycle
+
+Portable foreground operation remains `agent-host serve`. On macOS, install an
+auto-starting per-user LaunchAgent, then control it explicitly:
+
+```bash
+node src/cli.js service install
+node src/cli.js start
+node src/cli.js status --json
+node src/cli.js restart
+node src/cli.js stop
+node src/cli.js service uninstall
+```
+
+`service install` writes `~/Library/LaunchAgents/dev.agent-host.plist` but does not
+start it. The plist contains absolute Node, CLI, config, and log paths; it never embeds
+the API token. `RunAtLoad` and `KeepAlive` restore the service after login or a crash.
+Only the managed plist is removed on uninstall—configuration, token, and logs remain.
+`start`, `stop`, and `restart` are macOS service commands; use Ctrl-C or SIGTERM for a
+portable foreground process.
+
+The instance lock prevents duplicate daemons and is released after graceful shutdown.
+A stale crash lock is recovered only after its recorded process is no longer alive and
+the lock inode is rechecked. Port conflicts and invalid configuration return actionable
+errors.
+
+Rotate the persistent token only while the daemon is stopped:
+
+```bash
+node src/cli.js stop
+node src/cli.js token rotate
+node src/cli.js start
+```
+
+`AGENT_HOST_API_TOKEN` is a non-persistent startup override and is deliberately not
+changed by `token rotate`.
+
+For a reversible real LaunchAgent smoke test on a Mac with no existing
+`dev.agent-host` service loaded:
+
+```bash
+AGENT_HOST_RUN_SERVICE_SMOKE=1 npm run smoke:macos-service
+```
+
+The script uses an isolated temporary home, verifies start/status/stop/restart and
+uninstall, confirms configuration and token preservation, then cleans up.
+
+To start directly without initialization, the first foreground run securely creates
+the token as needed:
+
+```bash
 npm start
 ```
 
