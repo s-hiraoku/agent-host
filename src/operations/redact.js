@@ -16,11 +16,11 @@ function sanitize(value, state, key = "") {
   if (typeof value === "string") return sanitizeString(value, state);
   if (typeof value === "bigint") return String(value);
   if (typeof value !== "object") return undefined;
-  const metrics = state.metrics || key === "metrics";
-  if (state.depth >= (metrics ? 8 : 4)) return "[TRUNCATED]";
+  const structured = state.structured || key === "metrics" || key === "readiness";
+  if (state.depth >= (structured ? 8 : 4)) return "[TRUNCATED]";
   if (state.seen.has(value)) return "[CIRCULAR]";
   state.seen.add(value);
-  const childState = { ...state, depth: state.depth + 1, metrics };
+  const childState = { ...state, depth: state.depth + 1, structured };
   if (value instanceof Error) {
     return compact({
       name: sanitizeString(value.name, state),

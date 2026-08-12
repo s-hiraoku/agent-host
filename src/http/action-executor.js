@@ -142,7 +142,7 @@ export class ActionExecutor {
       } catch (error) {
         this.#operations?.metrics.observe("action_latency_ms", Math.max(0, this.#now() - startedAt), {
           actionKind: item.action,
-          outcome: "failure",
+          outcome: error?.code === "action_timeout" ? "timeout" : "failure",
         });
         item.reject(error);
       } finally {
