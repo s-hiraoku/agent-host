@@ -251,6 +251,8 @@ test("rejects discovery results from an obsolete adapter transport", async () =>
   assert.equal(registry.get("generation:1").status, "unknown");
   assert.equal(registry.get("generation:1").capabilities.prompt, false);
   assert.equal(registry.adapterHealth()[0].status, "error");
+  assert.equal(registry.adapterHealth()[0].circuit.consecutiveFailures, 1);
+  assert.notEqual(registry.adapterHealth()[0].circuit.nextAttemptAt, null);
   await registry.close();
 });
 

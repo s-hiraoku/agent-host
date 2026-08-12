@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { createRedactor } from "../src/operations/redact.js";
 import { MAX_LOG_RECORD_BYTES, StructuredLogger } from "../src/operations/logger.js";
 import { OperationalMetrics } from "../src/operations/metrics.js";
+import { OperationsContext } from "../src/operations/context.js";
 
 test("central redaction bounds nested values and removes secrets, auth, paths, prompts, and URL credentials", () => {
   const redact = createRedactor({
@@ -149,4 +150,15 @@ test("operational metrics use bounded fixed label series and cumulative histogra
   assert.equal(snapshot.histograms[0].value.buckets.at(-1).upperBound, "+Inf");
   assert.equal(snapshot.gauges[0].value, 3);
   assert.doesNotMatch(JSON.stringify(snapshot), /requestId|agentId|secret|different/);
+});
+
+test("diagnostics redaction preserves the bounded metric schema and values", () => {
+  const operations = new OperationsContext();
+  operations.metrics.observe("action_latency_ms", 75, { actionKind: "prompt", outcome: "success" });
+  const snapshot = operations.snapshot();
+  const histogram = snapshot.metrics.histograms[0];
+  assert.equal(histogram.labels.actionKind, "prompt");
+  assert.equal(histogram.value.count, 1);
+  assert.equal(histogram.value.sum, 75);
+  assert.equal(histogram.value.buckets.find((bucket) => bucket.upperBound === 100).count, 1);
 });

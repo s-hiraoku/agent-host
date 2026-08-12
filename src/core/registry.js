@@ -248,7 +248,7 @@ export class AgentRegistry {
           this.#operations?.metrics.increment("circuit_skips", { adapter: adapter.id });
           return;
         }
-        const outcome = await this.#discoverAdapter(adapter);
+        const outcome = this.#normalizeOutcome(adapter, await this.#discoverAdapter(adapter));
         if (!this.#closed) {
           this.#recordCircuitOutcome(adapter.id, outcome, admission.probe);
           this.#applyOutcome(outcome);
@@ -260,15 +260,6 @@ export class AgentRegistry {
 
   #applyOutcome(outcome) {
     const adapter = this.#adapters.get(outcome.adapterId);
-    if (outcome.status === "success" && adapter?.isDiscoveryCurrent
-      && !adapter.isDiscoveryCurrent(outcome.agents)) {
-      outcome = {
-        ...outcome,
-        status: "error",
-        markStale: true,
-        error: new Error("adapter discovery used a stale transport"),
-      };
-    }
     const previousCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
     const previousRaw = this.listRaw().map(semanticAgent);
     const previousOverlay = historyOverlay(previousRaw, this.#historyAgents);
@@ -341,6 +332,17 @@ export class AgentRegistry {
       code: health.error?.code,
       durationMs: outcome.durationMs,
     });
+  }
+
+  #normalizeOutcome(adapter, outcome) {
+    if (outcome.status !== "success" || !adapter?.isDiscoveryCurrent
+      || adapter.isDiscoveryCurrent(outcome.agents)) return outcome;
+    return {
+      ...outcome,
+      status: "error",
+      markStale: true,
+      error: new Error("adapter discovery used a stale transport"),
+    };
   }
 
   #admitAdapter(adapterId, force) {
