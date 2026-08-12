@@ -96,7 +96,7 @@ export async function runClientConformance({ baseUrl, token, fetchImpl = fetch }
     await stream.close();
   }
 
-  const reconnected = await openEventStream(baseUrl, headers, fetchImpl);
+  const reconnected = await openEventStream(baseUrl, { ...headers, "last-event-id": String(lastSequence) }, fetchImpl);
   let reconnectReady;
   try {
     reconnectReady = await reconnected.next();
