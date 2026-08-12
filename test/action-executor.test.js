@@ -66,3 +66,22 @@ test("action executor rejects queued work and aborts active work at shutdown dea
     (error) => error.code === "shutting_down",
   );
 });
+
+test("action executor times out a hung action and advances its queue", async () => {
+  let calls = 0;
+  const registry = {
+    async action(agentId, action) {
+      calls += 1;
+      if (calls === 1) return new Promise(() => {});
+      return { ok: true, agentId, action };
+    },
+  };
+  const executor = new ActionExecutor(registry, { actionTimeoutMs: 5 });
+  const hung = executor.execute("agent:1", "prompt", {}, "timeout-action-1");
+  const next = executor.execute("agent:1", "prompt", {}, "timeout-action-2");
+  await assert.rejects(hung, (error) => error.code === "action_timeout" && error.status === 504);
+  assert.equal((await next).result.ok, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2);
+  assert.equal(executor.queueDepth, 0);
+});

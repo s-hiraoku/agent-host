@@ -9,6 +9,8 @@ import { OperationsContext } from "../src/operations/context.js";
 import { DEFAULT_RECENT_LOG_LIMIT } from "../src/operations/logger.js";
 
 export async function runSoak({ cycles = 28_800, agentCount = 1_000 } = {}) {
+  if (!Number.isSafeInteger(cycles) || cycles < 1) throw new RangeError("cycles must be a positive safe integer");
+  if (!Number.isSafeInteger(agentCount) || agentCount < 1) throw new RangeError("agentCount must be a positive safe integer");
   let clock = 0;
   let cycle = 0;
   let childProcesses = 0;

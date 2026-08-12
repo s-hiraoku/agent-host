@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { ContractError } from "../core/contracts.js";
 
 const IDEMPOTENCY_TTL_MS = 5 * 60_000;
+const DEFAULT_ACTION_TIMEOUT_MS = 60_000;
 const MAX_IDEMPOTENCY_ENTRIES = 1_000;
 export const MAX_ACTIONS_PER_AGENT = 32;
 export const MAX_ACTIONS_GLOBAL = 256;
@@ -18,6 +19,7 @@ export class ActionExecutor {
   #now;
   #perAgentLimit;
   #globalLimit;
+  #actionTimeoutMs;
 
   constructor(registry, options = {}) {
     this.#registry = registry;
@@ -26,6 +28,10 @@ export class ActionExecutor {
     this.#now = options.idempotencyNow ?? Date.now;
     this.#perAgentLimit = options.maxActionsPerAgent ?? MAX_ACTIONS_PER_AGENT;
     this.#globalLimit = options.maxActionsGlobal ?? MAX_ACTIONS_GLOBAL;
+    this.#actionTimeoutMs = options.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS;
+    if (!Number.isFinite(this.#actionTimeoutMs) || this.#actionTimeoutMs <= 0) {
+      throw new RangeError("actionTimeoutMs must be a positive finite number");
+    }
   }
 
   async execute(agentId, action, payload, key) {
@@ -115,8 +121,20 @@ export class ActionExecutor {
     item.started = true;
     item.promise = Promise.resolve().then(async () => {
       const startedAt = this.#now();
+      let timer;
       try {
-        const result = await this.#registry.action(item.agentId, item.action, item.payload, { signal: item.controller.signal });
+        const deadline = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const error = new ContractError("action_timeout", "agent action timed out", 504);
+            item.controller.abort(error);
+            reject(error);
+          }, this.#actionTimeoutMs);
+          timer.unref?.();
+        });
+        const result = await Promise.race([
+          this.#registry.action(item.agentId, item.action, item.payload, { signal: item.controller.signal }),
+          deadline,
+        ]);
         this.#operations?.metrics.observe("action_latency_ms", Math.max(0, this.#now() - startedAt), {
           actionKind: item.action,
           outcome: result.ok ? "success" : "failure",
@@ -128,6 +146,8 @@ export class ActionExecutor {
           outcome: "failure",
         });
         item.reject(error);
+      } finally {
+        clearTimeout(timer);
       }
     }).finally(() => {
       this.#active.delete(item);

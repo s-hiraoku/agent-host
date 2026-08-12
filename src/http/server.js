@@ -288,6 +288,7 @@ export function createAgentServer(registry, options) {
       const actionState = await actionExecutor.shutdown({ graceMs: options.shutdownGraceMs });
       try {
         await registry.close?.();
+        server.closeIdleConnections?.();
         if (actionState.timedOut) server.closeAllConnections?.();
         let shutdownTimer;
         await Promise.race([
@@ -295,6 +296,8 @@ export function createAgentServer(registry, options) {
           new Promise((resolve) => { shutdownTimer = setTimeout(resolve, options.shutdownGraceMs ?? 5_000); }),
         ]);
         clearTimeout(shutdownTimer);
+        server.closeAllConnections?.();
+        await closed;
       } finally {
         eventClients.clear();
         clientDepths.clear();
