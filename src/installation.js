@@ -290,10 +290,13 @@ async function withInstallLock(prefix, callback) {
   await mkdir(prefix, { recursive: true, mode: 0o700 });
   await assertPrivateDirectory(prefix);
   const lock = join(prefix, ".install-lock");
-  const identity = await acquireInstallLock(lock);
+  const ownership = await acquireInstallLock(lock);
   try { return await callback(); }
   finally {
-    await unlinkOwnedLock(lock, identity);
+    await unlinkOwnedLock(lock, ownership.identity);
+    for (const quarantine of ownership.quarantines) {
+      await unlinkOwnedLock(quarantine.path, quarantine.identity);
+    }
   }
 }
 
@@ -309,7 +312,7 @@ async function acquireInstallLock(path) {
       await rm(path, { recursive: true, force: true });
       throw error;
     }
-    return lstat(path);
+    return { identity: await lstat(path), quarantines: [] };
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
     let record;
@@ -328,8 +331,15 @@ async function acquireInstallLock(path) {
       }
       throw takeoverError;
     }
-    try { return await acquireInstallLock(path); }
-    finally { await rm(quarantine, { recursive: true, force: true }); }
+    const quarantineIdentity = await lstat(quarantine);
+    try {
+      const ownership = await acquireInstallLock(path);
+      ownership.quarantines.push({ path: quarantine, identity: quarantineIdentity });
+      return ownership;
+    } catch (error) {
+      await unlinkOwnedLock(quarantine, quarantineIdentity);
+      throw error;
+    }
   }
 }
 
