@@ -28,8 +28,8 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - Branch: `codex/issue-9-operational-resilience`
 - Issue: https://github.com/s-hiraoku/agent-host/issues/9
 - Base: `main` at merge commit `443461a` (PR #18)
-- PR: not opened yet
-- Next: commit the verified Issue #9 implementation, open a regular ready-for-review PR, and monitor its checks and review feedback.
+- PR: https://github.com/s-hiraoku/agent-host/pull/19
+- Next: monitor PR #19 checks and review feedback, then begin Issue #10 from the verified Issue #9 head while merge remains user-gated.
 
 ## Progress notes
 
@@ -49,3 +49,4 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - 2026-08-12: PR #18 is mergeable and its CodeRabbit status completed successfully, but the bot skipped an actual review due to its 58-minute usage limit; there are no review threads. Created dependent branch `codex/issue-9-operational-resilience` without merging. Issue #9 Adviser design review selected split redaction/logger/metrics/diagnostics components with fixed retention, circuit-breaker state in the registry, bounded SSE/action queues, deadline-bounded shutdown, and separate app JSONL versus LaunchAgent console logs.
 - 2026-08-12: User merged PR #18 as `443461a`. Rebasing the Issue #9 branch onto that merge required no conflict; all in-progress #9 changes were preserved.
 - 2026-08-12: Completed Issue #9 implementation with centrally redacted bounded JSONL logging and metrics, authenticated/offline diagnostics, per-adapter circuit backoff and recovery, bounded SSE/action queues, abort-aware actions, deadline-bounded shutdown, and an eight-hour-equivalent accelerated soak. Adviser completion review identified untested logging sink failures; EACCES, ENOSPC, and rotation-rename fault injection now proves failures degrade into bounded diagnostics rather than terminating the host. The final 100-test suite and 28,800-cycle soak pass.
+- 2026-08-12: Opened regular ready-for-review PR #19 for Issue #9. Merge remains gated on explicit user authorization; packaging and upgrade work continues separately under Issue #10.
