@@ -13,7 +13,7 @@
     "soak": "node --expose-gc scripts/soak.js --cycles=28800",
     "soak:quick": "node --expose-gc scripts/soak.js --cycles=2000",
     "list": "node src/cli.js list",
-    "test": "node --test test/**/*.test.js",
+    "test": "node --expose-gc --test test/**/*.test.js",
     "check": "find src -name '*.js' -exec node --check {} \\; && npm test"
   },
   "engines": { "node": ">=22" },

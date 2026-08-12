@@ -147,6 +147,7 @@ test("offline diagnostics writes an owner-only redacted bounded JSON bundle", as
     homeDirectory: home,
     env: {},
     platform: "linux",
+    fetchDiagnostics: async () => { throw new Error("forced offline fixture"); },
     output: (line) => lines.push(line),
   }), 0);
   const contents = await readFile(outputFile, "utf8");

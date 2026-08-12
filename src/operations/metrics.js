@@ -35,11 +35,15 @@ export class OperationalMetrics {
 
   setGauge(name, value, labels = {}) {
     if (!GAUGES.has(name)) throw new Error(`unknown gauge: ${name}`);
-    this.#gauges.set(seriesKey(name, labels), Number(value));
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) throw new TypeError(`gauge ${name} requires a finite value`);
+    this.#gauges.set(seriesKey(name, labels), numeric);
   }
 
   observe(name, value, labels = {}) {
     if (!HISTOGRAMS.has(name)) throw new Error(`unknown histogram: ${name}`);
+    const observed = Number(value);
+    if (!Number.isFinite(observed)) throw new TypeError(`histogram ${name} requires a finite value`);
     const key = seriesKey(name, labels);
     const histogram = this.#histograms.get(key) ?? {
       count: 0,
@@ -51,10 +55,10 @@ export class OperationalMetrics {
       })),
     };
     histogram.count += 1;
-    histogram.sum += value;
-    histogram.max = Math.max(histogram.max, value);
+    histogram.sum += observed;
+    histogram.max = Math.max(histogram.max, observed);
     for (const bucket of histogram.buckets) {
-      if (bucket.upperBound === "+Inf" || value <= bucket.upperBound) bucket.count += 1;
+      if (bucket.upperBound === "+Inf" || observed <= bucket.upperBound) bucket.count += 1;
     }
     this.#histograms.set(key, histogram);
   }

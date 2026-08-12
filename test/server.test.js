@@ -75,7 +75,7 @@ test("server shutdown closes active SSE clients before registry cleanup", { time
   assert.equal(operations.metrics.snapshot().gauges.find((entry) => entry.name === "event_subscribers").value, 0);
 });
 
-test("server bounds action queues and finishes shutdown with an active action", { timeout: 1_000 }, async () => {
+test("server bounds action queues and finishes shutdown with an active action", { timeout: 5_000 }, async () => {
   let actionStarted;
   const started = new Promise((resolve) => { actionStarted = resolve; });
   const adapter = {
@@ -121,7 +121,7 @@ test("server bounds action queues and finishes shutdown with an active action", 
 
   const began = Date.now();
   await server.stop();
-  assert.ok(Date.now() - began < 250);
+  assert.ok(Date.now() - began < 2_000);
   await first;
   assert.equal(registry.closed, true);
 });

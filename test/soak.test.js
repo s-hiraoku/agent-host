@@ -2,6 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { runSoak } from "../scripts/soak.js";
 
+test("soak rejects invalid dimensions", async () => {
+  for (const cycles of [0, -1, 1.5, NaN, Infinity]) {
+    await assert.rejects(runSoak({ cycles, agentCount: 1 }), /cycles must be a positive safe integer/);
+  }
+  for (const agentCount of [0, -1, 1.5, NaN, Infinity]) {
+    await assert.rejects(runSoak({ cycles: 1, agentCount }), /agentCount must be a positive safe integer/);
+  }
+});
+
 test("accelerated soak keeps queues, logs, metrics, handles, and children bounded", { timeout: 15_000 }, async () => {
   const result = await runSoak({ cycles: 2_000, agentCount: 250 });
   assert.equal(result.passed, true, result.failures.join("; "));

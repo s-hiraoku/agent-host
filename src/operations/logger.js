@@ -72,6 +72,7 @@ export class StructuredLogger {
     if (this.#recent.length > this.#recentLimit) this.#recent.splice(0, this.#recent.length - this.#recentLimit);
     if (this.#path && Date.now() >= this.#sinkRetryAt) {
       try {
+        if (this.#sinkFailure) ensureLogPath(this.#path);
         this.#append(line);
         this.#sinkFailure = null;
       } catch (error) {
