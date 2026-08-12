@@ -26,7 +26,7 @@ node agent-host-NEW/scripts/manage-installation.js update agent-host-NEW
 If readiness fails, switch back and restart:
 
 ```bash
-~/.local/share/agent-host/current/scripts/manage-installation.js rollback
+node ~/.local/share/agent-host/current/scripts/manage-installation.js rollback
 ~/.local/bin/agent-host restart
 ```
 
