@@ -19,7 +19,6 @@ const CONFIG_KEYS = new Set([
   "logLevel",
   "logFile",
   "dashboardUrl",
-  "dashboardDirectory",
   "allowedOrigins",
 ]);
 
@@ -180,7 +179,6 @@ export function serializableConfiguration(configuration) {
     logLevel: configuration.logLevel,
     logFile: configuration.logFile,
     dashboardUrl: configuration.dashboardUrl,
-    dashboardDirectory: configuration.dashboardDirectory,
     allowedOrigins: configuration.allowedOrigins,
   }).filter(([, value]) => value !== undefined));
 }

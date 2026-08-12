@@ -66,6 +66,13 @@ jobs:
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: "${{ steps.subject.outputs.path }}"
-      - run: gh release create "$GITHUB_REF_NAME" agent-host/dist/* --title "agent-host $GITHUB_REF_NAME" --notes-file agent-host/CHANGELOG.md
+      - run: >-
+          gh release create "$GITHUB_REF_NAME"
+          agent-host/dist/checksums.txt
+          agent-host/dist/agent-host-*.tar.gz
+          agent-host/dist/agent-host-*-release-manifest.json
+          agent-host/dist/agent-host-*.spdx.json
+          --title "agent-host $GITHUB_REF_NAME"
+          --notes-file agent-host/CHANGELOG.md
         env:
           GH_TOKEN: "${{ github.token }}"

@@ -241,7 +241,7 @@ settings are:
 | `logLevel` | `--log-level` / `AGENT_HOST_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` |
 | `logFile` | `--log-file` / `AGENT_HOST_LOG_FILE` | rotating application JSONL log |
 | `dashboardUrl` | `--dashboard-url` / `AGENT_HOST_DASHBOARD_URL` | canonical dashboard origin |
-| `dashboardDirectory` | `--dashboard-dir` / `AGENT_HOST_DASHBOARD_DIR` | optional built dashboard assets served from `/` |
+| `dashboardDirectory` | `--dashboard-dir` / `AGENT_HOST_DASHBOARD_DIR` | optional built dashboard assets served from `/`; CLI/environment only so schema-1 configs remain rollback-readable |
 | `allowedOrigins` | repeatable `--allowed-origin` / `AGENT_HOST_ALLOWED_ORIGINS` | additional canonical browser origins |
 
 Relative paths in the JSON file resolve from the configuration directory. CLI and

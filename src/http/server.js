@@ -306,5 +306,5 @@ export function createAgentServer(registry, options) {
 }
 
 function formatSse(type, body) {
-  return `event: ${type}\ndata: ${JSON.stringify(body)}\n\n`;
+  return `id: ${body.sequence}\nevent: ${type}\ndata: ${JSON.stringify(body)}\n\n`;
 }
