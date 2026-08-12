@@ -184,6 +184,13 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
             method: "item/commandExecution/requestApproval",
             command: "npm test",
             reason: "Run tests",
+            actionable: true,
+            context: {
+              kind: "file-change",
+              fileCount: 1,
+              files: [{ path: "src/index.js", kind: "update", diff: "private diff" }],
+              providerPayload: "private context",
+            },
           }],
           metadata: { secretProviderPayload: "must not leave the host" },
           discoveredAt: now,
@@ -196,7 +203,7 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
           name: "Beta",
           status: "idle",
           capabilities: { prompt: true },
-          cwd: "/work/beta",
+          cwd: "/work/alpha",
           metadata: { secretProviderPayload: "must not leave the host" },
           discoveredAt: now,
           updatedAt: now,
@@ -233,6 +240,21 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
     assert.equal(first.page.total, 2);
     assert.equal(first.agents[0].id, "fixture:alpha");
     assert.equal(first.agents[0].pendingApprovalCount, 1);
+    assert.match(first.agents[0].project.id, /^local:[A-Za-z0-9_-]{22}$/);
+    assert.deepEqual(first.agents[0].project, {
+      id: first.agents[0].project.id,
+      name: "alpha",
+      scope: "local",
+    });
+    assert.deepEqual(first.facets.providers, [
+      { value: "codex", count: 2 },
+      { value: "herdr", count: 1 },
+    ]);
+    assert.deepEqual(first.facets.statuses, [
+      { value: "blocked", count: 1 },
+      { value: "working", count: 1 },
+    ]);
+    assert.equal(first.facets.revision, 1);
     assert.deepEqual(Object.keys(first.agents[0].capabilities), [
       "prompt", "sendKeys", "approve", "reject", "interrupt", "focus", "read",
     ]);
@@ -245,6 +267,23 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
     )).json();
     assert.equal(second.agents[0].id, "fixture:gamma");
     assert.equal(second.page.nextCursor, undefined);
+
+    const byName = await (await fetch(
+      `${base}/v1/agents?provider=codex&sort=name&direction=desc`,
+      { headers: AUTHORIZATION },
+    )).json();
+    assert.deepEqual(byName.agents.map((agent) => agent.id), ["fixture:gamma", "fixture:alpha"]);
+    assert.deepEqual(byName.page, { limit: 50, total: 2, sort: "name", direction: "desc" });
+
+    const faceted = await (await fetch(
+      `${base}/v1/agents?provider=codex&status=blocked`,
+      { headers: AUTHORIZATION },
+    )).json();
+    assert.deepEqual(faceted.facets.providers, [{ value: "codex", count: 1 }]);
+    assert.deepEqual(faceted.facets.statuses, [
+      { value: "blocked", count: 1 },
+      { value: "working", count: 1 },
+    ]);
 
     const filtered = await (await fetch(`${base}/v1/agents?status=idle&cwd=WORK&q=beta`, { headers: AUTHORIZATION })).json();
     assert.deepEqual(filtered.agents.map((agent) => agent.id), ["fixture:beta"]);
@@ -260,12 +299,52 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
     const detail = await (await fetch(`${base}/v1/agents/${encodeURIComponent("fixture:alpha")}`, { headers: AUTHORIZATION })).json();
     assert.equal(detail.agent.sessionId, "session-alpha");
     assert.equal(detail.agent.pendingApprovals[0].approvalId, "approval-1");
+    assert.deepEqual(detail.agent.pendingApprovals[0].context, {
+      kind: "file-change",
+      fileCount: 1,
+      files: [{ path: "src/index.js", kind: "update" }],
+      truncated: false,
+    });
+    assert.equal(detail.agent.pendingApprovals[0].actionable, true);
+    const betaDetail = await (await fetch(`${base}/v1/agents/${encodeURIComponent("fixture:beta")}`, { headers: AUTHORIZATION })).json();
+    assert.equal(betaDetail.agent.project.id, detail.agent.project.id);
     assert.equal("metadata" in detail.agent, false);
     assert.equal(JSON.stringify(detail).includes("secretProviderPayload"), false);
+
+    const originalDiscover = adapter.discover;
+    let unsafeApprovalInvoked = false;
+    const originalApprove = adapter.approve;
+    adapter.approve = async () => { unsafeApprovalInvoked = true; return { ok: true }; };
+    adapter.discover = async () => [{
+      id: "fixture:unsafe", provider: "codex", source: "fixture", name: "Unsafe", status: "blocked",
+      capabilities: { approve: true, reject: true }, cwd: "/work/unsafe", discoveredAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      pendingApprovals: [{ approvalId: "unsafe", method: "item/fileChange/requestApproval", actionable: true, context: { kind: "file-change", fileCount: 21, files: [...Array.from({ length: 20 }, (_, index) => ({ path: `safe-${index}.js`, kind: "update" })), { path: "../../etc/passwd", kind: "update" }] } }],
+    }];
+    await registry.refresh();
+    const unsafe = await (await fetch(`${base}/v1/agents/${encodeURIComponent("fixture:unsafe")}`, { headers: AUTHORIZATION })).json();
+    assert.equal(unsafe.agent.pendingApprovals[0].actionable, false);
+    assert.equal(unsafe.agent.capabilities.approve, false);
+    assert.equal("context" in unsafe.agent.pendingApprovals[0], false);
+    assert.equal(JSON.stringify(unsafe).includes("alice"), false);
+    const unsafeAction = await fetch(`${base}/v1/agents/fixture%3Aunsafe/approve`, {
+      method: "POST",
+      headers: { ...AUTHORIZATION, "content-type": "application/json", "idempotency-key": "unsafe-approval-0001" },
+      body: JSON.stringify({ approvalId: "unsafe" }),
+    });
+    assert.equal(unsafeAction.status, 409);
+    assert.equal((await unsafeAction.json()).error.code, "capability_not_available");
+    assert.equal(unsafeApprovalInvoked, false);
+    adapter.discover = originalDiscover;
+    adapter.approve = originalApprove;
+    await registry.refresh();
 
     const invalidLimitResponse = await fetch(`${base}/v1/agents?limit=0`, { headers: AUTHORIZATION });
     assert.equal(invalidLimitResponse.status, 400);
     assert.equal((await invalidLimitResponse.json()).error.code, "invalid_limit");
+
+    const invalidSortResponse = await fetch(`${base}/v1/agents?sort=private-field`, { headers: AUTHORIZATION });
+    assert.equal(invalidSortResponse.status, 400);
+    assert.equal((await invalidSortResponse.json()).error.code, "invalid_sort");
 
     const missingResponse = await fetch(`${base}/v1/agents/missing`, { headers: AUTHORIZATION });
     assert.equal(missingResponse.status, 404);

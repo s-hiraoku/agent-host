@@ -127,10 +127,105 @@ test("Codex adapter exposes and resolves semantic approvals", async () => {
     method: "item/fileChange/requestApproval",
     params: { threadId: "thr_1", turnId: "turn_1", itemId: "item_2" },
   });
+  const [opaque] = await adapter.discover();
+  assert.equal(opaque.capabilities.approve, false);
+  assert.equal(opaque.pendingApprovals[0].actionable, false);
+  assert.equal((await adapter.reject(opaque, { approvalId: "62" })).ok, false);
+
+  client.emitNotification({
+    method: "item/started",
+    params: {
+      threadId: "thr_1",
+      turnId: "turn_1",
+      item: {
+        id: "item_2",
+        type: "fileChange",
+        status: "inProgress",
+        changes: [
+          { path: "/tmp/project/src/added.js", kind: "add", diff: "private content" },
+          { path: "/tmp/project/test/changed.js", kind: "update", diff: "private diff" },
+        ],
+      },
+    },
+  });
   const [pendingReject] = await adapter.discover();
+  assert.equal(pendingReject.capabilities.reject, true);
+  assert.deepEqual(pendingReject.pendingApprovals[0].context, {
+    kind: "file-change",
+    fileCount: 2,
+    files: [
+      { path: "src/added.js", kind: "add" },
+      { path: "test/changed.js", kind: "update" },
+    ],
+    truncated: false,
+  });
+  assert.equal(JSON.stringify(pendingReject.pendingApprovals[0]).includes("private"), false);
   const rejected = await adapter.reject(pendingReject, { approvalId: "62" });
   assert.equal(rejected.ok, true);
   assert.deepEqual(client.responses.at(-1), { id: 62, result: { decision: "decline" } });
+
+  client.emitNotification({
+    method: "item/started",
+    params: {
+      threadId: "thr_1",
+      turnId: "turn_1",
+      item: {
+        id: "item_outside",
+        type: "fileChange",
+        status: "inProgress",
+        changes: [{ path: "/private/outside.js", kind: "update", diff: "private diff" }],
+      },
+    },
+  });
+  client.emitServerRequest({
+    id: 67,
+    method: "item/fileChange/requestApproval",
+    params: { threadId: "thr_1", turnId: "turn_1", itemId: "item_outside" },
+  });
+  const [outside] = await adapter.discover();
+  assert.equal(outside.pendingApprovals[0].actionable, false);
+  client.emitNotification({ method: "serverRequest/resolved", params: { requestId: 67 } });
+
+  client.emitServerRequest({
+    id: 68,
+    method: "item/fileChange/requestApproval",
+    params: { threadId: "thr_1", turnId: "turn_new", itemId: "item_reused" },
+  });
+  client.emitNotification({
+    method: "item/started",
+    params: {
+      threadId: "thr_1", turnId: "turn_old",
+      item: { id: "item_reused", type: "fileChange", status: "inProgress", changes: [{ path: "old.js", kind: "update", diff: "private" }] },
+    },
+  });
+  assert.equal((await adapter.discover())[0].pendingApprovals[0].actionable, false);
+  client.emitNotification({
+    method: "item/started",
+    params: {
+      threadId: "thr_1", turnId: "turn_new",
+      item: { id: "item_reused", type: "fileChange", status: "inProgress", changes: [{ path: "new.js", kind: "update", diff: "private" }] },
+    },
+  });
+  assert.equal((await adapter.discover())[0].pendingApprovals[0].context.files[0].path, "new.js");
+  client.emitNotification({ method: "serverRequest/resolved", params: { requestId: 68 } });
+
+  const unsafeChanges = Array.from({ length: 21 }, (_, index) => ({
+    path: index === 20 ? "/private/hidden.js" : `safe-${index}.js`, kind: "update", diff: "private",
+  }));
+  client.emitNotification({
+    method: "item/started",
+    params: { threadId: "thr_1", turnId: "turn_1", item: { id: "item_many", type: "fileChange", status: "inProgress", changes: unsafeChanges } },
+  });
+  client.emitServerRequest({ id: 69, method: "item/fileChange/requestApproval", params: { threadId: "thr_1", turnId: "turn_1", itemId: "item_many" } });
+  assert.equal((await adapter.discover())[0].pendingApprovals[0].actionable, false);
+  client.emitNotification({ method: "serverRequest/resolved", params: { requestId: 69 } });
+
+  for (const [id, path] of [[70, "safe/\u0000../secret"], [71, `${"a".repeat(241)}.js`]]) {
+    client.emitNotification({ method: "item/started", params: { threadId: "thr_1", turnId: "turn_1", item: { id: `item_${id}`, type: "fileChange", status: "inProgress", changes: [{ path, kind: "update", diff: "private" }] } } });
+    client.emitServerRequest({ id, method: "item/fileChange/requestApproval", params: { threadId: "thr_1", turnId: "turn_1", itemId: `item_${id}` } });
+    assert.equal((await adapter.discover())[0].pendingApprovals[0].actionable, false);
+    client.emitNotification({ method: "serverRequest/resolved", params: { requestId: id } });
+  }
 
   for (const id of [63, 64]) client.emitServerRequest({
     id,
@@ -267,6 +362,27 @@ test("Codex adapter cancels expired approvals", { timeout: 1000 }, async () => {
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(client.responses, [{ id: 91, result: { decision: "cancel" } }]);
   assert.equal((await adapter.discover())[0].capabilities.approve, false);
+});
+
+test("Codex adapter bounds retained thread working directories", async () => {
+  const client = new FakeCodexClient();
+  const adapter = new CodexAdapter({ client });
+  await adapter.discover();
+  for (let index = 0; index < 1_001; index += 1) {
+    client.emitNotification({
+      method: "thread/started",
+      params: { thread: { id: `churn_${index}`, cwd: `/tmp/project-${index}`, status: { type: "idle" } } },
+    });
+  }
+  client.emitNotification({
+    method: "item/started",
+    params: { threadId: "churn_0", turnId: "turn_1", item: { id: "item_1", type: "fileChange", status: "inProgress", changes: [{ path: "/tmp/project-0/file.js", kind: "update", diff: "private" }] } },
+  });
+  client.emitServerRequest({ id: 80, method: "item/fileChange/requestApproval", params: { threadId: "churn_0", turnId: "turn_1", itemId: "item_1" } });
+  client.threadListResult = { data: [{ id: "churn_0", status: { type: "idle" } }], nextCursor: null };
+  const [agent] = await adapter.discover();
+  assert.equal(agent.pendingApprovals[0].actionable, false);
+  await adapter.close();
 });
 
 test("Codex control mode subscribes only loaded threads and gates persisted-only sessions", async () => {

@@ -69,11 +69,20 @@ Action queues are bounded at 32 entries per agent and 256 globally; excess work
 returns `429 queue_full` with `Retry-After: 1`.
 
 `GET /v1/agents` accepts repeatable or comma-separated `provider` and `status`
-filters, plus `view`, `cwd`, free-text `q`, `limit`, and an opaque `cursor`. Responses include
-the current snapshot `revision`; a cursor returns `409 stale_cursor` if that snapshot
-changes during pagination. List entries are bounded summaries and never include raw
-provider metadata. Use the detail endpoint for controlled fields such as pending
-approvals.
+filters, plus `view`, `cwd`, free-text `q`, `sort`, `direction`, `limit`, and an opaque
+`cursor`. The allowlisted sorts are `attention`, `activity`, `name`, `provider`, and
+`status`; direction is `asc` or `desc`. The default is `attention asc`, except
+`activity` defaults to `desc`. Sorting is applied to the complete filtered snapshot
+before pagination.
+
+Responses include the current snapshot `revision` and revision-consistent `providers`
+and `statuses` facets. Provider facets apply every filter except `provider`; status
+facets apply every filter except `status`. Their opaque `facets.revision` identifies
+the exact view snapshot used for both counts and rows. A cursor returns
+`409 stale_cursor` if that snapshot changes during pagination. List entries are bounded
+summaries and never include raw provider metadata. A stable local `project.id` groups
+agents with the same normalized cwd without making the cwd itself the identifier. Use
+the detail endpoint for controlled fields such as pending approvals.
 
 `view` controls discovery noise:
 
@@ -158,13 +167,20 @@ Example Codex agent waiting for approval:
       "approvalId": "1:thr_123:61",
       "method": "item/commandExecution/requestApproval",
       "command": "npm test",
-      "reason": "Run tests"
+      "reason": "Run tests",
+      "actionable": true
     }
   ]
 }
 ```
 
 `approve` and `reject` are deliberately **not** mapped to blind Enter/Escape presses. The Codex adapter only exposes these capabilities after App Server sends a real approval request and resolves that exact server request ID. Approval IDs are opaque; clients must return the value received from the API unchanged.
+
+File-change approvals are fail-closed. The adapter correlates the approval with the
+Codex file-change item and publishes only workspace-relative path, change kind, file
+count, and truncation metadata—never diff or file content. If sanitized context cannot
+be correlated, the pending record has `actionable: false`, approve/reject capabilities
+are not advertised for that request, and a direct resolution attempt is refused.
 
 ## Install a release
 
@@ -186,6 +202,8 @@ The packaged dashboard is then available at `http://127.0.0.1:4777/`; its same-o
 memory-only onboarding and are never embedded in assets. Full update, rollback, and
 removal commands are in [docs/install.md](docs/install.md); version/API/config/dashboard
 rules and verified Node/adapter ranges are in [docs/compatibility.md](docs/compatibility.md).
+The current integrated MVP decision, evidence, and remaining real-environment gates
+are tracked in [docs/release-gate.md](docs/release-gate.md).
 
 ## Run from source
 
@@ -400,7 +418,8 @@ emits `agent.action`; call `POST /v1/refresh` to publish the resulting `agent.up
 snapshot transition.
 
 Language-neutral fixtures live in `fixtures/client-conformance/`, including approval,
-adapter-failure, SSE reconnect, and a 1,000-agent scale case. The reusable Node runner
+sanitized file approval, global list/facet/project semantics, adapter failure, SSE
+reconnect, and a 1,000-agent scale case. The reusable Node runner
 in `conformance/client-suite.js` verifies snapshot, action, error, event, and reconnect
 behavior against a fresh demo server. Regenerate the checked-in scale fixture with
 `npm run fixtures:generate`, or run only the live contract checks with
