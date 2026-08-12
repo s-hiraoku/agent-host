@@ -28,8 +28,8 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - Branch: `codex/issue-10-packaging-updates`
 - Issue: https://github.com/s-hiraoku/agent-host/issues/10
 - Base: `codex/issue-9-operational-resilience` at `2b5478e` (PR #19)
-- PR: not opened yet
-- Next: commit the verified Issue #10 implementation, open a stacked regular ready-for-review PR, and monitor CI/review while merge remains user-gated.
+- PR: https://github.com/s-hiraoku/agent-host/pull/20 (stacked on PR #19)
+- Next: monitor PR #20 CI/review, retarget it to `main` after PR #19 merges, then complete the backend evidence portion of Issue #11.
 
 ## Progress notes
 
@@ -52,3 +52,4 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - 2026-08-12: Opened regular ready-for-review PR #19 for Issue #9. Merge remains gated on explicit user authorization; packaging and upgrade work continues separately under Issue #10.
 - 2026-08-12: Began Issue #10 on a dependent branch. Adviser review selected an integrated source artifact containing host plus built assets from a pinned dashboard commit, same-origin serving through the existing listener, immutable version directories behind an atomic pointer, a stable LaunchAgent launcher, checksums/SBOM/provenance, and transactional rollback while preserving `~/.agent-host` state.
 - 2026-08-12: Completed Issue #10 implementation and candidate verification. The exact pinned dashboard commit passed 158 tests/build/live conformance; the host passed 110 tests; extracted-artifact install/version and real macOS LaunchAgent lifecycle passed. Adviser completion review found stale-lock takeover and transaction-cleanup recovery races; deterministic inode quarantine, ownership-safe release, durable recovery markers, Node 23 CI, and fault-injection tests resolved every blocker. Adviser re-review returned GO.
+- 2026-08-12: Opened regular ready-for-review stacked PR #20 for Issue #10 with base PR #19. No release tag or GitHub Release was created; merging and publication remain explicitly user-gated.
