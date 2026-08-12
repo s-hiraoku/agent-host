@@ -1,10 +1,10 @@
 # Current objective
 
-Deliver the `agent-host` backend roadmap in dependency order from GitHub issues #2 through #10, with focused ready-for-review pull requests, local and CI verification, review follow-up, and a final integrated daily-driver release assessment against issue #11. The dashboard repository is owned by another agent and is out of scope here except for documented API compatibility and integration dependencies.
+Complete the remaining `agent-host` backend roadmap in dependency order: configuration and service lifecycle (#8), operational resilience and diagnostics (#9), packaging and upgrades (#10), then the backend portions of the integrated daily-driver gate (#11). Deliver each coherent issue as a focused ready-for-review pull request with local and CI verification, review follow-up, durable checkpoints, and no merge without explicit user authorization. The separately maintained dashboard remains out of scope except for versioned backend contracts and integration evidence required by #11.
 
 ## Success criteria
 
-- Issues #2 through #10 are implemented or have a concrete externally owned blocker.
+- Issues #8 through #10 are implemented or have a concrete externally owned blocker.
 - Each coherent change is delivered through a regular ready-for-review PR.
 - Tests, documentation, CI, and review threads are complete for every delivered PR.
 - Backend evidence required by issue #11 is recorded and linked.
@@ -18,18 +18,18 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 - [x] #5 Useful discovery defaults and deduplication
 - [x] #6 Demo adapter and conformance fixtures
 - [x] #7 Supported live-session integration
-- [ ] #8 Configuration and service lifecycle
+- [x] #8 Configuration and service lifecycle
 - [ ] #9 Operational resilience and diagnostics
 - [ ] #10 Packaging, versioning, and updates
 - [ ] #11 Backend portion of integrated release gate
 
 ## Current step
 
-- Branch: `codex/issue-7-live-transports`
-- Issue: https://github.com/s-hiraoku/agent-host/issues/7
-- Base: `main` at merge commit `9344c82` (PR #16)
-- PR: https://github.com/s-hiraoku/agent-host/pull/17
-- Next: open the Issue #7 PR, complete PR Guardian, then continue with Issue #8 after merge.
+- Branch: `codex/issue-8-service-lifecycle`
+- Issue: https://github.com/s-hiraoku/agent-host/issues/8
+- Base: `main` at merge commit `187773c` (PR #17)
+- PR: pending creation
+- Next: commit and open the ready-for-review Issue #8 PR, complete its review/CI follow-up, then branch Issue #9 without merging absent explicit user authorization.
 
 ## Progress notes
 
@@ -43,3 +43,5 @@ Deliver the `agent-host` backend roadmap in dependency order from GitHub issues 
 - 2026-08-09: Current-head Codex and CodeRabbit review added boundary findings covering live-only historical cursors, token-file replacement ordering, history retry TTL, Bearer scheme casing, configuration validation, bounded provider responses, and hot-path reconciliation. The fixes plus deterministic non-timing TTL coverage pass `npm run check` with 38 tests.
 - 2026-08-09: Confirmed PR #15 merged into `main`, then implemented Issue #6 from that merge commit. Opt-in demo mode replaces all live adapters with six deterministic states, predictable prompt/interrupt/approval transitions, sanitized language-neutral fixtures, a checked-in 1,000-agent scale fixture, and a reusable live HTTP/SSE client conformance runner.
 - 2026-08-09: Confirmed PR #16 merged into `main`, then implemented Issue #7. Explicit control mode connects through the official Codex Unix control proxy, subscribes loaded threads, propagates live status and approvals, scopes state/actions to connection generations, marks records stale on loss, and keeps unsupported Codex processes raw-only.
+- 2026-08-12: Confirmed PR #17 merged as `187773c`, synchronized `main`, and created `codex/issue-8-service-lifecycle`. Began Issue #8 with a modular plan for configuration, secure state/token storage, instance ownership, testable CLI lifecycle commands, and a macOS LaunchAgent integration.
+- 2026-08-12: Completed Issue #8 implementation: strict versioned configuration, secure token lifecycle, race-aware instance ownership, foreground and LaunchAgent lifecycle commands, selective adapters, documentation, and isolated service smoke coverage. The full 82-test suite and a real macOS launchctl install/start/status/stop/restart/uninstall smoke passed; the test service and temporary state were removed. Adviser completion review found no PR blocker and kept logging/diagnostics in #9 and installed-path stability in #10.

@@ -4,23 +4,25 @@ import { HerdrAdapter } from "./adapters/herdr.js";
 import { ProcessAdapter } from "./adapters/process.js";
 import { isAbsolute } from "node:path";
 
-export function createRuntimeAdapters({ demoMode = false, codexTransport = "owned", codexSocket } = {}) {
+export function createRuntimeAdapters({
+  demoMode = false,
+  codexTransport = "owned",
+  codexSocket,
+  enabledAdapters = ["codex", "herdr", "process"],
+} = {}) {
   if (demoMode) return [new DemoAdapter()];
   if (codexTransport !== "owned" && codexTransport !== "control") {
     throw new Error("AGENT_HOST_CODEX_TRANSPORT must be owned or control");
   }
-  if (codexTransport === "control" && (!codexSocket || !isAbsolute(codexSocket))) {
+  if (enabledAdapters.includes("codex") && codexTransport === "control" && (!codexSocket || !isAbsolute(codexSocket))) {
     throw new Error("AGENT_HOST_CODEX_SOCKET must be an absolute path in control mode");
   }
-  const codex = codexTransport === "control"
-    ? new CodexAdapter({
-      mode: "control",
-      rpc: { transport: "control", socketPath: codexSocket },
-    })
-    : new CodexAdapter();
-  return [
-    codex,
-    new HerdrAdapter(),
-    new ProcessAdapter({ rawOnlyProviders: codexTransport === "control" ? ["codex"] : [] }),
-  ];
+  const factories = new Map([
+    ["codex", () => codexTransport === "control"
+      ? new CodexAdapter({ mode: "control", rpc: { transport: "control", socketPath: codexSocket } })
+      : new CodexAdapter()],
+    ["herdr", () => new HerdrAdapter()],
+    ["process", () => new ProcessAdapter({ rawOnlyProviders: codexTransport === "control" ? ["codex"] : [] })],
+  ]);
+  return enabledAdapters.map((name) => factories.get(name)?.()).filter(Boolean);
 }

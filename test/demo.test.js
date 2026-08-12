@@ -18,6 +18,10 @@ test("demo mode is opt-in and replaces live adapters", () => {
     () => createRuntimeAdapters({ codexTransport: "control", codexSocket: "relative.sock" }),
     /AGENT_HOST_CODEX_SOCKET must be an absolute path/,
   );
+  assert.deepEqual(createRuntimeAdapters({
+    enabledAdapters: ["process"],
+    codexTransport: "control",
+  }).map((adapter) => adapter.id), ["process"]);
   assert.throws(
     () => createRuntimeAdapters({ codexTransport: "websocket" }),
     /AGENT_HOST_CODEX_TRANSPORT must be owned or control/,

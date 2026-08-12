@@ -9,6 +9,7 @@
     "demo": "node src/cli.js demo",
     "fixtures:generate": "node scripts/generate-large-fixture.js",
     "conformance": "node --test test/client-conformance.test.js",
+    "smoke:macos-service": "scripts/smoke-macos-launchagent.sh",
     "list": "node src/cli.js list",
     "test": "node --test test/**/*.test.js",
     "check": "find src -name '*.js' -exec node --check {} \\; && npm test"

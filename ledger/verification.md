@@ -87,3 +87,13 @@
   gaps; all were fixed and covered before PR creation. A final follow-up identified
   uncertain `turn/steer` replay as the last blocker, so shared control now returns the
   failure without automatically resending the prompt as a new turn.
+
+## Issue #8 implementation — 2026-08-12
+
+- Commands: `git diff --check`, `sh -n scripts/smoke-macos-launchagent.sh`, and `npm run check`.
+- Result: pass; 82 tests, 0 failures.
+- Configuration fixtures: version requirement, unknown keys, numeric and loopback boundaries, CLI > environment > file > defaults precedence, source-aware relative paths, canonical origins, adapter selection, and control-socket requirements.
+- State fixtures: owner-only atomic config/token files, non-empty 256-bit tokens, stopped-only rotation, symbolic-link rejection, live/stale lock handling, inode and instance-ID release ownership, and malformed-config stop recovery.
+- Lifecycle fixtures: explicit foreground versus service commands, startup cleanup and port-conflict diagnostics, token-free escaped plist generation, mocked install/start/status/stop/restart/uninstall, state preservation, and unchanged existing LaunchAgents directory permissions.
+- Real macOS smoke: an isolated temporary HOME passed LaunchAgent install, start, healthy status, stop, restart, healthy status, stop, and managed uninstall. Configuration and token survived uninstall; the service was confirmed unloaded and all temporary state was removed.
+- Independent completion review: Adviser (`gpt-5.6-sol`, medium caller to high reviewer) found no Issue #8 PR blocker. It confirmed source-tree path stability belongs to #10 and structured operations diagnostics belong to #9.
