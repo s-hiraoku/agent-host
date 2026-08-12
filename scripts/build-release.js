@@ -10,7 +10,10 @@ import { promisify } from "node:util";
 const run = promisify(execFile);
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = Object.fromEntries(process.argv.slice(2).map((arg) => arg.split("=", 2)));
-const dashboardDirectory = resolve(args["--dashboard-dir"] ?? "");
+if (!args["--dashboard-dir"]) {
+  throw new Error("--dashboard-dir is required; run npm run release:build -- --dashboard-dir=/path/to/dashboard/dist");
+}
+const dashboardDirectory = resolve(args["--dashboard-dir"]);
 const outputDirectory = resolve(args["--output"] ?? join(repository, "dist"));
 const packageJson = JSON.parse(await readFile(join(repository, "package.json"), "utf8"));
 const compatibility = JSON.parse(await readFile(join(repository, "release-compatibility.json"), "utf8"));

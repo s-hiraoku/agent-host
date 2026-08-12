@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -124,6 +124,15 @@ test("installer rejects incompatible dashboard releases, links, unsafe roots, an
   const locked = join(home, "locked");
   await mkdir(join(locked, ".install-lock"), { recursive: true });
   await assert.rejects(installRelease({ source: valid, prefix: locked, binDirectory }), /in progress/);
+
+  const incomplete = join(home, "incomplete-lock");
+  await mkdir(join(incomplete, ".install-lock"), { recursive: true });
+  await writeFile(join(incomplete, ".install-lock", "owner.json"), "{");
+  const old = new Date(Date.now() - 10_000);
+  await utimes(join(incomplete, ".install-lock"), old, old);
+  assert.equal((await installRelease({
+    source: valid, prefix: incomplete, binDirectory: join(home, "incomplete-bin"),
+  })).current, "0.3.2");
 
   const stale = join(home, "stale-lock");
   await mkdir(stale, { recursive: true });

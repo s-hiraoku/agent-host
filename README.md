@@ -187,6 +187,12 @@ memory-only onboarding and are never embedded in assets. Full update, rollback, 
 removal commands are in [docs/install.md](docs/install.md); version/API/config/dashboard
 rules and verified Node/adapter ranges are in [docs/compatibility.md](docs/compatibility.md).
 
+Release builds require the already-built pinned dashboard as an explicit input:
+
+```bash
+npm run release:build -- --dashboard-dir=/path/to/pinned-dashboard/dist
+```
+
 ## Run from source
 
 Requires Node.js 22+ and optionally the CLIs for the adapters you want to use. The Codex semantic adapter requires `codex` to be available on `PATH`.
