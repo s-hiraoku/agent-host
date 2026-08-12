@@ -658,3 +658,35 @@ test("explicit refresh queued during a scheduled refresh is not swallowed", asyn
   assert.equal(calls, 2);
   await registry.close();
 });
+
+test("forced follow-up does not adopt itself when adapter change queues another refresh", async () => {
+  let calls = 0;
+  let onChange;
+  const firstGate = deferred();
+  const secondGate = deferred();
+  const adapter = {
+    id: "fixture",
+    onChange(handler) { onChange = handler; },
+    async discover() {
+      calls += 1;
+      if (calls === 1) await firstGate.promise;
+      if (calls === 2) await secondGate.promise;
+      return [];
+    },
+  };
+  const registry = new AgentRegistry([adapter]);
+  const scheduled = registry.refresh({ force: false });
+  onChange({ type: "changed" });
+  const explicit = registry.refresh({ force: true });
+  firstGate.resolve();
+  await scheduled;
+  await nextTurn();
+  secondGate.resolve();
+  await Promise.race([
+    explicit,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("forced refresh remained pending")), 100)),
+  ]);
+  await nextTurn();
+  assert.equal(calls, 3);
+  await registry.close();
+});
