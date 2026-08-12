@@ -4,6 +4,7 @@ import { get } from "node:http";
 import { AgentEventBus } from "../src/core/event-bus.js";
 import { AgentRegistry } from "../src/core/registry.js";
 import { createAgentServer } from "../src/http/server.js";
+import { OperationsContext } from "../src/operations/context.js";
 
 const API_TOKEN = "test-api-token";
 const AUTHORIZATION = { authorization: `Bearer ${API_TOKEN}` };
@@ -16,12 +17,20 @@ test("server shutdown closes active SSE clients before registry cleanup", { time
     async refresh() { return []; },
     async close() { closeCalls += 1; },
   };
-  const server = createAgentServer(registry, { host: "127.0.0.1", port: 0, refreshMs: 60_000, apiToken: API_TOKEN });
+  const operations = new OperationsContext();
+  const server = createAgentServer(registry, {
+    host: "127.0.0.1", port: 0, refreshMs: 60_000, apiToken: API_TOKEN, operations,
+  });
   const address = await server.start();
 
   let response;
   let ready;
-  const request = get({ host: "127.0.0.1", port: address.port, path: "/v1/events", headers: AUTHORIZATION });
+  const request = get({
+    host: "127.0.0.1",
+    port: address.port,
+    path: "/v1/events",
+    headers: { ...AUTHORIZATION, "last-event-id": "42" },
+  });
   await new Promise((resolve, reject) => {
     request.once("error", reject);
     request.once("response", (res) => {
@@ -37,6 +46,9 @@ test("server shutdown closes active SSE clients before registry cleanup", { time
   assert.match(ready, /"apiVersion":"1"/);
   assert.match(ready, /"revision":0/);
   assert.match(ready, /"sequence":0/);
+  const connectedMetrics = operations.metrics.snapshot();
+  assert.equal(connectedMetrics.gauges.find((entry) => entry.name === "event_subscribers").value, 1);
+  assert.equal(connectedMetrics.counters.find((entry) => entry.name === "sse_reconnects").value, 1);
 
   const eventData = new Promise((resolve) => response.once("data", resolve));
   registry.events.emit({
@@ -58,6 +70,58 @@ test("server shutdown closes active SSE clients before registry cleanup", { time
   await ended;
   assert.equal(closeCalls, 1);
   assert.equal(response.complete, true);
+  assert.equal(operations.metrics.snapshot().gauges.find((entry) => entry.name === "event_subscribers").value, 0);
+});
+
+test("server bounds action queues and finishes shutdown with an active action", { timeout: 1_000 }, async () => {
+  let actionStarted;
+  const started = new Promise((resolve) => { actionStarted = resolve; });
+  const adapter = {
+    id: "shutdown-fixture",
+    async discover() {
+      return [{
+        id: "shutdown:1", provider: "fixture", source: "shutdown-fixture", name: "shutdown",
+        status: "idle", capabilities: { prompt: true },
+      }];
+    },
+    async prompt() {
+      actionStarted();
+      return new Promise(() => {});
+    },
+  };
+  const registry = new AgentRegistry([adapter]);
+  const server = createAgentServer(registry, {
+    host: "127.0.0.1",
+    port: 0,
+    refreshMs: 60_000,
+    apiToken: API_TOKEN,
+    maxActionsPerAgent: 1,
+    shutdownGraceMs: 5,
+  });
+  const address = await server.start();
+  await registry.refresh();
+  const url = `http://127.0.0.1:${address.port}/v1/agents/shutdown%3A1/prompt`;
+  const first = fetch(url, {
+    method: "POST",
+    headers: { ...AUTHORIZATION, "content-type": "application/json", "idempotency-key": "shutdown-active-1" },
+    body: JSON.stringify({ text: "private" }),
+  }).catch((error) => error);
+  await started;
+
+  const overflow = await fetch(url, {
+    method: "POST",
+    headers: { ...AUTHORIZATION, "content-type": "application/json", "idempotency-key": "shutdown-active-2" },
+    body: JSON.stringify({ text: "private" }),
+  });
+  assert.equal(overflow.status, 429);
+  assert.equal(overflow.headers.get("retry-after"), "1");
+  assert.equal((await overflow.json()).error.code, "queue_full");
+
+  const began = Date.now();
+  await server.stop();
+  assert.ok(Date.now() - began < 250);
+  await first;
+  assert.equal(registry.closed, true);
 });
 
 test("serves bounded agent summaries, details, filters, and structured errors", async () => {

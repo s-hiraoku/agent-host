@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   API_VERSION,
   ContractError,
@@ -10,10 +10,10 @@ import {
   parseAgentListQuery,
 } from "../core/contracts.js";
 import { createApiSecurity } from "./security.js";
+import { ActionExecutor } from "./action-executor.js";
+import { SseClient } from "./sse-client.js";
 
 const MAX_BODY_BYTES = 1_000_000;
-const IDEMPOTENCY_TTL_MS = 5 * 60_000;
-const MAX_IDEMPOTENCY_ENTRIES = 1_000;
 
 async function jsonBody(req) {
   const chunks = [];
@@ -55,49 +55,13 @@ function actionErrorStatus(code) {
   }
 }
 
-function createActionExecutor(registry, options = {}) {
-  const cache = new Map();
-  const queues = new Map();
-  const ttlMs = options.idempotencyTtlMs ?? IDEMPOTENCY_TTL_MS;
-  const now = options.idempotencyNow ?? Date.now;
-  return async (agentId, action, payload, key) => {
-    if (!/^[A-Za-z0-9._:-]{8,128}$/.test(key ?? "")) {
-      throw new ContractError("invalid_idempotency_key", "Idempotency-Key must be 8-128 safe ASCII characters");
-    }
-    const requestedAt = now();
-    for (const [cachedKey, entry] of cache) {
-      if (entry.settled && entry.expiresAt <= requestedAt) cache.delete(cachedKey);
-    }
-    const signature = createHash("sha256").update(JSON.stringify({ agentId, action, payload })).digest("base64url");
-    const existing = cache.get(key);
-    if (existing) {
-      if (existing.signature !== signature) {
-        throw new ContractError("idempotency_conflict", "Idempotency-Key was already used for a different request", 409);
-      }
-      return { result: await existing.promise, replayed: true };
-    }
-    if (cache.size >= MAX_IDEMPOTENCY_ENTRIES) {
-      throw new ContractError("idempotency_cache_full", "too many idempotent actions are in progress", 503);
-    }
-
-    const previous = queues.get(agentId) ?? Promise.resolve();
-    const entry = { signature, settled: false, expiresAt: Infinity };
-    entry.promise = previous.catch(() => {}).then(() => registry.action(agentId, action, payload));
-    const tail = entry.promise.catch(() => {}).finally(() => {
-      entry.settled = true;
-      entry.expiresAt = now() + ttlMs;
-      if (queues.get(agentId) === tail) queues.delete(agentId);
-    });
-    queues.set(agentId, tail);
-    cache.set(key, entry);
-    return { result: await entry.promise, replayed: false };
-  };
-}
-
 export function createAgentServer(registry, options) {
-  const eventResponses = new Set();
+  const eventClients = new Set();
+  const clientDepths = new Map();
+  const operations = options.operations;
   const security = createApiSecurity(options);
-  const executeAction = createActionExecutor(registry, options);
+  const actionExecutor = new ActionExecutor(registry, options);
+  let stopping = false;
   const server = createServer(async (req, res) => {
     let audit;
     let auditCompleted = false;
@@ -115,6 +79,13 @@ export function createAgentServer(registry, options) {
         replayed,
         snapshotRevision: registry.revision,
         at: new Date().toISOString(),
+      });
+      operations?.logger.log(ok ? "info" : "warn", "action.completed", {
+        component: "http",
+        requestId: audit.requestId,
+        actionKind: audit.action,
+        outcome: ok ? "success" : "failure",
+        code,
       });
     };
     try {
@@ -139,6 +110,9 @@ export function createAgentServer(registry, options) {
           snapshotRevision: registry.revision,
           at: new Date().toISOString(),
         });
+        operations?.logger.log("debug", "action.attempted", {
+          component: "http", requestId: audit.requestId, actionKind: audit.action,
+        });
       }
 
       if (req.method === "GET" && url.pathname === "/health") {
@@ -159,6 +133,18 @@ export function createAgentServer(registry, options) {
           ...registry.readiness(),
         });
       }
+      if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
+        return send(res, 200, {
+          apiVersion: API_VERSION,
+          diagnostics: operations?.snapshot({
+            configuration: options.diagnosticsConfiguration,
+            readiness: registry.readiness(),
+          }) ?? {
+            generatedAt: new Date().toISOString(),
+            readiness: registry.readiness(),
+          },
+        });
+      }
       if (req.method === "GET" && url.pathname === "/v1/agents") {
         const snapshot = await registry.listView(url.searchParams.get("view") ?? "recent");
         const query = parseAgentListQuery(url.searchParams, snapshot.cursorRevision);
@@ -169,7 +155,8 @@ export function createAgentServer(registry, options) {
         });
       }
       if (req.method === "POST" && url.pathname === "/v1/refresh") {
-        const agents = await registry.refresh();
+        if (stopping) throw new ContractError("shutting_down", "agent-host is shutting down", 503);
+        const agents = await registry.refresh({ force: true });
         return send(res, 200, {
           apiVersion: API_VERSION,
           revision: registry.revision,
@@ -178,22 +165,42 @@ export function createAgentServer(registry, options) {
         });
       }
       if (req.method === "GET" && url.pathname === "/v1/events") {
-        eventResponses.add(res);
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-        const unsubscribe = registry.events.subscribe((event) => res.write(
-          `event: ${event.type}\ndata: ${JSON.stringify({ apiVersion: API_VERSION, ...eventView(event) })}\n\n`,
-        ));
-        res.write(`event: ready\ndata: ${JSON.stringify({
+        let unsubscribe = () => {};
+        let heartbeat;
+        let client;
+        const updateDepth = (depth) => {
+          clientDepths.set(client, depth);
+          operations?.metrics.setGauge("sse_queue_depth", [...clientDepths.values()].reduce((sum, value) => sum + value, 0));
+        };
+        const closeClient = () => {
+          clearInterval(heartbeat);
+          eventClients.delete(client);
+          clientDepths.delete(client);
+          unsubscribe();
+          operations?.metrics.setGauge("event_subscribers", eventClients.size);
+          operations?.metrics.setGauge("sse_queue_depth", [...clientDepths.values()].reduce((sum, value) => sum + value, 0));
+        };
+        client = new SseClient(res, { operations, onDepth: updateDepth, onClose: closeClient });
+        eventClients.add(client);
+        clientDepths.set(client, 0);
+        operations?.metrics.increment("sse_connections");
+        if (req.headers["last-event-id"]) operations?.metrics.increment("sse_reconnects", { transport: "dashboard_sse" });
+        operations?.metrics.setGauge("event_subscribers", eventClients.size);
+        unsubscribe = registry.events.subscribe((event) => client.send(formatSse(event.type, {
+          apiVersion: API_VERSION,
+          ...eventView(event),
+        })));
+        client.send(formatSse("ready", {
           ok: true,
           apiVersion: API_VERSION,
           revision: registry.revision,
           sequence: registry.events.sequence,
           initialLoading: registry.initialLoading,
-        })}\n\n`);
-        req.on("close", () => {
-          eventResponses.delete(res);
-          unsubscribe();
-        });
+        }));
+        heartbeat = setInterval(() => client.send(": keepalive\n\n", { heartbeat: true }), 15_000);
+        heartbeat.unref();
+        req.on("close", () => client.close());
         return;
       }
       const agentMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)$/);
@@ -204,10 +211,11 @@ export function createAgentServer(registry, options) {
           : sendError(res, 404, "agent_not_found", "agent not found");
       }
       if (req.method === "POST" && actionMatch) {
+        if (stopping) throw new ContractError("shutting_down", "agent-host is shutting down", 503);
         security.requireJson(req);
         const agentId = audit.agentId;
         const payload = await jsonBody(req);
-        const { result, replayed } = await executeAction(
+        const { result, replayed } = await actionExecutor.execute(
           agentId,
           actionMatch[2],
           payload,
@@ -228,6 +236,7 @@ export function createAgentServer(registry, options) {
     } catch (error) {
       completeAudit(false, error instanceof ContractError ? error.code : "internal_error");
       if (res.headersSent) return res.end();
+      if (error?.code === "queue_full") res.setHeader("retry-after", "1");
       sendError(
         res,
         error instanceof ContractError ? error.status : 500,
@@ -238,6 +247,7 @@ export function createAgentServer(registry, options) {
   });
 
   let timer;
+  let started = false;
   return {
     get apiToken() { return security.apiToken; },
     get generatedToken() { return security.generatedToken; },
@@ -246,20 +256,41 @@ export function createAgentServer(registry, options) {
         server.once("error", reject);
         server.listen(options.port, options.host, resolve);
       });
-      void registry.refresh();
-      timer = setInterval(() => void registry.refresh(), options.refreshMs);
+      started = true;
+      operations?.logger.log("info", "server.started", { component: "http", outcome: "success" });
+      void registry.refresh({ force: false });
+      timer = setInterval(() => void registry.refresh({ force: false }), options.refreshMs);
       timer.unref();
       return server.address();
     },
     async stop() {
+      if (stopping) return;
+      stopping = true;
       if (timer) clearInterval(timer);
-      for (const res of eventResponses) res.end();
+      for (const client of [...eventClients]) client.close();
+      const closed = started
+        ? new Promise((resolve) => server.close(() => resolve()))
+        : Promise.resolve();
+      const actionState = await actionExecutor.shutdown({ graceMs: options.shutdownGraceMs });
       try {
-        await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
-      } finally {
-        eventResponses.clear();
         await registry.close?.();
+        if (actionState.timedOut) server.closeAllConnections?.();
+        let shutdownTimer;
+        await Promise.race([
+          closed,
+          new Promise((resolve) => { shutdownTimer = setTimeout(resolve, options.shutdownGraceMs ?? 5_000); }),
+        ]);
+        clearTimeout(shutdownTimer);
+      } finally {
+        eventClients.clear();
+        clientDepths.clear();
+        operations?.logger.log("info", "server.stopped", { component: "http", outcome: "success" });
+        operations?.close?.();
       }
     },
   };
+}
+
+function formatSse(type, body) {
+  return `event: ${type}\ndata: ${JSON.stringify(body)}\n\n`;
 }

@@ -11,12 +11,16 @@ import { acquireInstanceLock, inspectInstanceLock } from "./instance-lock.js";
 import { createMacosServiceController } from "./macos-service.js";
 import {
   ensurePrivateDirectory,
+  readPrivateFile,
   readOrCreateToken,
   rotateToken,
   writePrivateFileAtomic,
 } from "./secure-state.js";
-import { dirname } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { AGENT_HOST_VERSION, OperationsContext } from "./operations/context.js";
+import { createRedactor } from "./operations/redact.js";
 
 const DEFAULT_CLI_PATH = fileURLToPath(new URL("./cli.js", import.meta.url));
 
@@ -67,6 +71,35 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
     print({ valid: true, configFile, configuration: serializableConfiguration(configuration) });
     return 0;
   }
+  if (parsed.command === "diagnostics") {
+    const outputFile = resolve(parsed.positionals[0] ?? join(paths.stateDirectory, "diagnostics.json"));
+    const token = env.AGENT_HOST_API_TOKEN?.trim()
+      || await readPrivateFile(configuration.tokenFile).then((value) => value.trim()).catch(() => undefined);
+    const redact = createRedactor({
+      homeDirectory: dependencies.homeDirectory ?? homedir(),
+      secrets: token ? [token] : [],
+      paths: privatePaths(configuration),
+    });
+    const remote = token ? await fetchDiagnostics(configuration, token).catch(() => undefined) : undefined;
+    let serviceState = { installed: false, running: false, plistPath: paths.launchAgentFile };
+    if (!remote && (dependencies.platform ?? process.platform) === "darwin") {
+      serviceState = await service.status(paths.launchAgentFile).catch((error) => ({
+        installed: false, running: false, error,
+      }));
+    }
+    const bundle = redact(remote ?? {
+      generatedAt: new Date().toISOString(),
+      versions: { agentHost: AGENT_HOST_VERSION, node: process.version, platform: process.platform, arch: process.arch },
+      configuration: diagnosticConfiguration(configuration),
+      lock: publicLock(await inspectInstanceLock(configuration.lockFile, dependencies.lockOptions)),
+      service: serviceState,
+      recentLogs: await readRecentLogs(configuration.logFile),
+      state: "offline",
+    });
+    await writePrivateFileAtomic(outputFile, `${JSON.stringify(bundle, null, 2)}\n`);
+    print({ created: true, path: outputFile, source: remote ? "running" : "offline" });
+    return 0;
+  }
   if (parsed.command === "serve" || parsed.command === "demo") {
     await runForeground({
       configuration,
@@ -77,6 +110,8 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
       makeRegistry: dependencies.makeRegistry,
       makeServer: dependencies.makeServer,
       acquireLock: dependencies.acquireLock,
+      operations: dependencies.operations,
+      homeDirectory: dependencies.homeDirectory ?? homedir(),
     });
     return 0;
   }
@@ -124,7 +159,7 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
         nodePath: dependencies.nodePath ?? process.execPath,
         cliPath: dependencies.cliPath ?? DEFAULT_CLI_PATH,
         configPath: configFile,
-        logFile: configuration.logFile,
+        logFile: `${configuration.logFile}.console`,
       }));
       return 0;
     }
@@ -165,16 +200,26 @@ async function runForeground(options) {
   const lock = await (options.acquireLock ?? acquireInstanceLock)(options.configuration.lockFile);
   let registry;
   let server;
+  let operations;
   try {
     const token = options.env.AGENT_HOST_API_TOKEN?.trim()
       || await readOrCreateToken(options.configuration.tokenFile);
-    registry = makeRegistry(options.configuration, options.demoMode, options.makeRegistry);
+    operations = options.operations ?? new OperationsContext({
+      logFile: options.configuration.logFile,
+      logLevel: options.configuration.logLevel,
+      homeDirectory: options.homeDirectory,
+      secrets: [token],
+      paths: privatePaths(options.configuration),
+    });
+    registry = makeRegistry(options.configuration, options.demoMode, options.makeRegistry, operations);
     server = (options.makeServer ?? createAgentServer)(registry, {
       host: options.configuration.bind,
       port: options.configuration.port,
       refreshMs: options.configuration.refreshMs,
       apiToken: token,
       allowedOrigins: options.configuration.allowedOrigins,
+      operations,
+      diagnosticsConfiguration: diagnosticConfiguration(options.configuration),
     });
     await server.start();
   } catch (error) {
@@ -182,6 +227,7 @@ async function runForeground(options) {
       if (server) await server.stop();
       else await registry?.close?.();
     } finally {
+      operations?.close?.();
       await lock.release();
     }
     if (error?.code === "EADDRINUSE") {
@@ -207,14 +253,14 @@ async function runForeground(options) {
   finally { await stop(); }
 }
 
-function makeRegistry(configuration, demoMode, factory) {
-  if (factory) return factory(configuration, demoMode);
+function makeRegistry(configuration, demoMode, factory, operations) {
+  if (factory) return factory(configuration, demoMode, operations);
   return new AgentRegistry(createRuntimeAdapters({
     demoMode,
     codexTransport: configuration.codexTransport,
     codexSocket: configuration.codexSocket,
     enabledAdapters: configuration.enabledAdapters,
-  }), { adapterTimeoutMs: configuration.adapterTimeoutMs });
+  }), { adapterTimeoutMs: configuration.adapterTimeoutMs, operations });
 }
 
 function waitForSignal(processLike) {
@@ -247,6 +293,54 @@ function publicConfiguration(configuration) {
     codexTransport: configuration.codexTransport,
     logLevel: configuration.logLevel,
   };
+}
+
+function diagnosticConfiguration(configuration) {
+  return {
+    bind: configuration.bind,
+    port: configuration.port,
+    refreshMs: configuration.refreshMs,
+    adapterTimeoutMs: configuration.adapterTimeoutMs,
+    enabledAdapters: configuration.enabledAdapters,
+    codexTransport: configuration.codexTransport,
+    codexSocket: configuration.codexSocket,
+    tokenFile: configuration.tokenFile,
+    lockFile: configuration.lockFile,
+    logLevel: configuration.logLevel,
+    logFile: configuration.logFile,
+    dashboardUrl: configuration.dashboardUrl,
+    allowedOrigins: configuration.allowedOrigins,
+  };
+}
+
+function privatePaths(configuration) {
+  return [configuration.codexSocket, configuration.tokenFile, configuration.lockFile, configuration.logFile]
+    .filter(Boolean);
+}
+
+async function fetchDiagnostics(configuration, token) {
+  const host = configuration.bind === "::1" ? "[::1]" : configuration.bind;
+  const response = await fetch(`http://${host}:${configuration.port}/v1/diagnostics`, {
+    headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(1_000),
+  });
+  if (!response.ok) throw new Error(`diagnostics endpoint returned ${response.status}`);
+  return (await response.json()).diagnostics;
+}
+
+async function readRecentLogs(logFile) {
+  const records = [];
+  for (const path of [`${logFile}.2`, `${logFile}.1`, logFile]) {
+    let content;
+    try { content = await readPrivateFile(path); }
+    catch (error) { if (error?.code === "ENOENT") continue; else throw error; }
+    for (const line of content.split("\n")) {
+      if (!line) continue;
+      try { records.push(JSON.parse(line)); }
+      catch { records.push({ level: "warn", event: "log.unparseable", details: { file: basename(path) } }); }
+    }
+  }
+  return records.slice(-200);
 }
 
 function publicLock(lock) {

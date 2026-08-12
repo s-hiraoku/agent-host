@@ -589,3 +589,69 @@ test("ignores non-cooperative discovery completion after shutdown", { timeout: 5
   assert.deepEqual(registry.list(), []);
   assert.deepEqual(events, []);
 });
+
+test("adapter circuit backs off, opens, probes once, and recovers with a fake clock", async () => {
+  let clock = 0;
+  let calls = 0;
+  let failing = true;
+  const adapter = {
+    id: "fixture",
+    async discover() {
+      calls += 1;
+      if (failing) throw new Error("fixture failure");
+      return [];
+    },
+  };
+  const registry = new AgentRegistry([adapter], {
+    now: () => clock,
+    circuitBaseMs: 10,
+    circuitMaxMs: 40,
+    circuitThreshold: 3,
+    forcedProbeMinMs: 5,
+  });
+
+  await registry.refresh({ force: false });
+  clock = 10;
+  await registry.refresh({ force: false });
+  clock = 30;
+  await registry.refresh({ force: false });
+  assert.equal(calls, 3);
+  assert.equal(registry.adapterHealth()[0].circuit.phase, "open");
+
+  clock = 31;
+  await registry.refresh({ force: false });
+  assert.equal(calls, 3);
+  await registry.refresh({ force: true });
+  assert.equal(calls, 4);
+  assert.equal(registry.adapterHealth()[0].circuit.phase, "open");
+
+  failing = false;
+  clock += 5;
+  await registry.refresh({ force: true });
+  assert.equal(calls, 5);
+  assert.deepEqual(registry.adapterHealth()[0].circuit, {
+    phase: "closed", consecutiveFailures: 0, nextAttemptAt: null,
+  });
+  await registry.close();
+});
+
+test("explicit refresh queued during a scheduled refresh is not swallowed", async () => {
+  let calls = 0;
+  const gate = deferred();
+  const adapter = {
+    id: "fixture",
+    async discover() {
+      calls += 1;
+      if (calls === 1) await gate.promise;
+      return [];
+    },
+  };
+  const registry = new AgentRegistry([adapter]);
+  const scheduled = registry.refresh({ force: false });
+  const explicit = registry.refresh({ force: true });
+  gate.resolve();
+  await scheduled;
+  await explicit;
+  assert.equal(calls, 2);
+  await registry.close();
+});

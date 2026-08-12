@@ -54,14 +54,14 @@ export class HerdrAdapter {
     }
   }
 
-  async prompt(agent, text) { return this.#runAction(agent, "prompt", ["agent", "prompt", agent.target, text]); }
-  async sendKeys(agent, keys) { return this.#runAction(agent, "send-keys", ["agent", "send-keys", agent.target, ...keys]); }
-  async interrupt(agent) { return this.sendKeys(agent, ["ctrl+c"]); }
-  async focus(agent) { return this.#runAction(agent, "focus", ["agent", "focus", agent.target]); }
-  async read(agent) { return this.#runAction(agent, "read", ["agent", "read", agent.target, "--source", "recent-unwrapped", "--lines", "120"]); }
+  async prompt(agent, text, options = {}) { return this.#runAction(agent, "prompt", ["agent", "prompt", agent.target, text], options); }
+  async sendKeys(agent, keys, options = {}) { return this.#runAction(agent, "send-keys", ["agent", "send-keys", agent.target, ...keys], options); }
+  async interrupt(agent, options = {}) { return this.sendKeys(agent, ["ctrl+c"], options); }
+  async focus(agent, options = {}) { return this.#runAction(agent, "focus", ["agent", "focus", agent.target], options); }
+  async read(agent, options = {}) { return this.#runAction(agent, "read", ["agent", "read", agent.target, "--source", "recent-unwrapped", "--lines", "120"], options); }
 
-  async #runAction(agent, action, args) {
-    try { return { ok: true, agentId: agent.id, action, data: await run(args) }; }
+  async #runAction(agent, action, args, options) {
+    try { return { ok: true, agentId: agent.id, action, data: await run(args, options) }; }
     catch (error) { return { ok: false, agentId: agent.id, action, message: String(error) }; }
   }
 }

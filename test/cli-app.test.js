@@ -116,6 +116,7 @@ test("service lifecycle commands initialize state and delegate without deleting 
   assert.deepEqual(calls.map(([operation]) => operation), ["install", "start", "restart", "stop", "uninstall"]);
   assert.equal(calls[0][1].nodePath, process.execPath);
   assert.match(calls[0][1].configPath, /\.agent-host\/config\.json$/);
+  assert.match(calls[0][1].logFile, /agent-host\.log\.console$/);
 });
 
 test("stop remains available when configuration is malformed", async (t) => {
@@ -128,4 +129,33 @@ test("stop remains available when configuration is malformed", async (t) => {
 
   assert.equal(await runCli(["stop"], { homeDirectory: home, env: {}, output() {}, service }), 0);
   assert.match(stoppedPath, /Library\/LaunchAgents\/dev\.agent-host\.plist$/);
+});
+
+test("offline diagnostics writes an owner-only redacted bounded JSON bundle", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-cli-diagnostics-"));
+  t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));
+  await runCli(["init"], { homeDirectory: home, env: {}, output() {} });
+  const token = (await readFile(join(home, ".agent-host", "token"), "utf8")).trim();
+  await writeFile(join(home, ".agent-host", "agent-host.log"), [
+    JSON.stringify({ level: "info", event: "safe" }),
+    JSON.stringify({ level: "error", event: "unsafe", details: { token, prompt: "private", path: `${home}/project` } }),
+  ].join("\n"), { mode: 0o600 });
+  const outputFile = join(home, "bundle.json");
+  const lines = [];
+
+  assert.equal(await runCli(["diagnostics", outputFile], {
+    homeDirectory: home,
+    env: {},
+    platform: "linux",
+    output: (line) => lines.push(line),
+  }), 0);
+  const contents = await readFile(outputFile, "utf8");
+  const bundle = JSON.parse(contents);
+  assert.equal(bundle.state, "offline");
+  assert.equal(bundle.recentLogs.length, 2);
+  assert.equal((await lstat(outputFile)).mode & 0o777, 0o600);
+  assert.doesNotMatch(contents, new RegExp(token));
+  assert.doesNotMatch(contents, /private/);
+  assert.doesNotMatch(contents, new RegExp(home));
+  assert.match(lines.join("\n"), /"source": "offline"/);
 });

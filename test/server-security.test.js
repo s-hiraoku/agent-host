@@ -113,6 +113,11 @@ test("enforces browser security and emits secret-free action audit events", asyn
     assert.equal("adapters" in publicReady, false);
     assert.equal((await fetch(`${base}/v1/adapters`)).status, 401);
     assert.equal((await fetch(`${base}/v1/adapters`, { headers: authorization })).status, 200);
+    assert.equal((await fetch(`${base}/v1/diagnostics`)).status, 401);
+    const diagnostics = await (await fetch(`${base}/v1/diagnostics`, { headers: authorization })).json();
+    assert.equal(diagnostics.apiVersion, "1");
+    assert.equal(diagnostics.diagnostics.readiness.ready, true);
+    assert.doesNotMatch(JSON.stringify(diagnostics), new RegExp(TOKEN));
 
     const missingDetailToken = await fetch(`${base}/v1/agents/secure%3A1`);
     assert.equal(missingDetailToken.status, 401);
