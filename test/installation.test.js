@@ -129,7 +129,20 @@ test("installer rejects incompatible dashboard releases, links, unsafe roots, an
   await mkdir(stale, { recursive: true });
   await mkdir(join(stale, ".install-lock"));
   await writeFile(join(stale, ".install-lock", "owner.json"), JSON.stringify({ pid: 999_999_999 }));
-  assert.equal((await installRelease({ source: valid, prefix: stale, binDirectory })).current, "0.3.2");
+  let staleQuarantine;
+  assert.equal((await installRelease({
+    source: valid,
+    prefix: stale,
+    binDirectory,
+    async beforeTransactionClear() {
+      const entries = await import("node:fs/promises").then(({ readdir }) => readdir(stale));
+      const quarantine = entries.find((entry) => entry.startsWith(".install-lock.stale-"));
+      assert.ok(quarantine);
+      staleQuarantine = join(stale, quarantine);
+      await lstat(staleQuarantine);
+    },
+  })).current, "0.3.2");
+  await assert.rejects(lstat(staleQuarantine), { code: "ENOENT" });
   const contested = join(home, "contested-lock");
   await mkdir(contested, { recursive: true });
   const contestedLock = join(contested, ".install-lock");
