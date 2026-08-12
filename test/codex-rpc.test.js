@@ -125,7 +125,7 @@ test("Codex RPC cleans up failed startup and can start again", async () => {
   assert.equal(processes[0].killedWith, "SIGTERM");
   await client.start();
   assert.equal(processes.length, 2);
-  assert.equal(initializations[1].version, "0.2.0");
+  assert.equal(initializations[1].version, "0.3.0");
   await client.close();
 });
 

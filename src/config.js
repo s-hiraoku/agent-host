@@ -19,6 +19,7 @@ const CONFIG_KEYS = new Set([
   "logLevel",
   "logFile",
   "dashboardUrl",
+  "dashboardDirectory",
   "allowedOrigins",
 ]);
 
@@ -92,6 +93,7 @@ export function parseCommandLine(argv = []) {
       case "--log-level": options.logLevel = valueFor(); break;
       case "--log-file": options.logFile = valueFor(); break;
       case "--dashboard-url": options.dashboardUrl = valueFor(); break;
+      case "--dashboard-dir": options.dashboardDirectory = valueFor(); break;
       case "--allowed-origin": {
         options.allowedOrigins ??= [];
         options.allowedOrigins.push(valueFor());
@@ -144,6 +146,7 @@ export async function loadConfiguration({
     logLevel: "info",
     logFile: join(baseDirectory, "agent-host.log"),
     dashboardUrl: undefined,
+    dashboardDirectory: undefined,
     allowedOrigins: [],
   };
   const merged = { ...defaults, ...fileConfig, ...environment, ...withoutUndefined(cli) };
@@ -154,6 +157,9 @@ export async function loadConfiguration({
   merged.logFile = resolvePathBySource("logFile", { cli, environment, fileConfig, defaults, baseDirectory });
   if (merged.codexSocket !== undefined) {
     merged.codexSocket = resolvePathBySource("codexSocket", { cli, environment, fileConfig, defaults, baseDirectory });
+  }
+  if (merged.dashboardDirectory !== undefined) {
+    merged.dashboardDirectory = resolvePathBySource("dashboardDirectory", { cli, environment, fileConfig, defaults, baseDirectory });
   }
   const configuration = validateConfiguration(merged);
   return { configuration, configFile, configExists, paths: { ...paths, stateDirectory: dirname(configFile) } };
@@ -174,6 +180,7 @@ export function serializableConfiguration(configuration) {
     logLevel: configuration.logLevel,
     logFile: configuration.logFile,
     dashboardUrl: configuration.dashboardUrl,
+    dashboardDirectory: configuration.dashboardDirectory,
     allowedOrigins: configuration.allowedOrigins,
   }).filter(([, value]) => value !== undefined));
 }
@@ -193,6 +200,7 @@ function environmentConfiguration(env) {
   if (has("AGENT_HOST_LOG_LEVEL")) result.logLevel = env.AGENT_HOST_LOG_LEVEL;
   if (has("AGENT_HOST_LOG_FILE")) result.logFile = env.AGENT_HOST_LOG_FILE;
   if (has("AGENT_HOST_DASHBOARD_URL")) result.dashboardUrl = env.AGENT_HOST_DASHBOARD_URL;
+  if (has("AGENT_HOST_DASHBOARD_DIR")) result.dashboardDirectory = env.AGENT_HOST_DASHBOARD_DIR;
   if (has("AGENT_HOST_ALLOWED_ORIGINS")) result.allowedOrigins = splitList(env.AGENT_HOST_ALLOWED_ORIGINS);
   return result;
 }

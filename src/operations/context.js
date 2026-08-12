@@ -2,6 +2,7 @@ import { createRedactor } from "./redact.js";
 import { StructuredLogger } from "./logger.js";
 import { OperationalMetrics } from "./metrics.js";
 import { readFileSync } from "node:fs";
+import { publicReleaseInfo } from "../release-info.js";
 
 export const AGENT_HOST_VERSION = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
 
@@ -18,10 +19,13 @@ export class OperationsContext {
   }
 
   snapshot(extra = {}) {
+    const release = publicReleaseInfo();
     return this.redact({
       generatedAt: new Date().toISOString(),
       versions: {
         agentHost: AGENT_HOST_VERSION,
+        apiVersions: release.apiVersions,
+        dashboard: release.dashboard,
         node: process.version,
         platform: process.platform,
         arch: process.arch,

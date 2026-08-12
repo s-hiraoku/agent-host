@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { get } from "node:http";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { AgentEventBus } from "../src/core/event-bus.js";
 import { AgentRegistry } from "../src/core/registry.js";
 import { createAgentServer } from "../src/http/server.js";
@@ -8,6 +11,42 @@ import { OperationsContext } from "../src/operations/context.js";
 
 const API_TOKEN = "test-api-token";
 const AUTHORIZATION = { authorization: `Bearer ${API_TOKEN}` };
+
+test("serves the pinned dashboard and same-origin API alias without weakening authentication", async (t) => {
+  const dashboard = await mkdtemp(join(tmpdir(), "agent-host-dashboard-"));
+  t.after(() => rm(dashboard, { recursive: true, force: true }));
+  await mkdir(join(dashboard, "assets"));
+  await writeFile(join(dashboard, "index.html"), "<!doctype html><title>Agent Host</title>");
+  await writeFile(join(dashboard, "assets", "app.12345678.js"), "globalThis.dashboardLoaded=true;");
+  await writeFile(join(dashboard, "private.json"), "private");
+  await symlink(join(dashboard, "private.json"), join(dashboard, "linked.json"));
+  const registry = {
+    revision: 0,
+    events: new AgentEventBus(),
+    readiness: () => ({ ready: true, adapters: [] }),
+    refresh: async () => [],
+    close: async () => {},
+  };
+  const server = createAgentServer(registry, {
+    host: "127.0.0.1", port: 0, refreshMs: 60_000, apiToken: API_TOKEN, dashboardDirectory: dashboard,
+  });
+  const address = await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${address.port}`;
+
+  const page = await fetch(`${base}/nested/client/route`);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /Agent Host/);
+  assert.equal(page.headers.get("content-security-policy")?.includes("default-src 'self'"), true);
+  const asset = await fetch(`${base}/assets/app.12345678.js`);
+  assert.match(asset.headers.get("cache-control"), /immutable/);
+  assert.equal((await fetch(`${base}/linked.json`)).status, 404);
+  assert.equal((await fetch(`${base}/agent-host/v1/adapters`)).status, 401);
+  const api = await (await fetch(`${base}/agent-host/v1/adapters`, { headers: AUTHORIZATION })).json();
+  assert.equal(api.apiVersion, "1");
+  assert.equal(api.serverVersion, "0.3.0");
+  assert.equal((await fetch(`${base}/agent-host/v1/unknown`, { headers: AUTHORIZATION })).status, 404);
+});
 
 test("server shutdown closes active SSE clients before registry cleanup", { timeout: 2000 }, async () => {
   let closeCalls = 0;

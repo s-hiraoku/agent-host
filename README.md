@@ -166,7 +166,28 @@ Example Codex agent waiting for approval:
 
 `approve` and `reject` are deliberately **not** mapped to blind Enter/Escape presses. The Codex adapter only exposes these capabilities after App Server sends a real approval request and resolves that exact server request ID. Approval IDs are opaque; clients must return the value received from the API unchanged.
 
-## Run
+## Install a release
+
+The integrated `0.3.0` release artifact contains agent-host plus dashboard assets built
+from the exact compatible dashboard commit. It installs into immutable version
+directories behind `~/.local/share/agent-host/current`; the LaunchAgent uses the stable
+`~/.local/bin/agent-host` launcher, so update and rollback do not depend on a clone or
+old source path. Verify `checksums.txt`, extract the archive, and run:
+
+```bash
+node agent-host-0.3.0/scripts/manage-installation.js install agent-host-0.3.0
+~/.local/bin/agent-host init
+~/.local/bin/agent-host service install
+~/.local/bin/agent-host start
+```
+
+The packaged dashboard is then available at `http://127.0.0.1:4777/`; its same-origin
+`/agent-host/v1/*` requests use the same authentication as `/v1/*`. Tokens remain in
+memory-only onboarding and are never embedded in assets. Full update, rollback, and
+removal commands are in [docs/install.md](docs/install.md); version/API/config/dashboard
+rules and verified Node/adapter ranges are in [docs/compatibility.md](docs/compatibility.md).
+
+## Run from source
 
 Requires Node.js 22+ and optionally the CLIs for the adapters you want to use. The Codex semantic adapter requires `codex` to be available on `PATH`.
 
@@ -202,6 +223,7 @@ settings are:
 | `logLevel` | `--log-level` / `AGENT_HOST_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` |
 | `logFile` | `--log-file` / `AGENT_HOST_LOG_FILE` | rotating application JSONL log |
 | `dashboardUrl` | `--dashboard-url` / `AGENT_HOST_DASHBOARD_URL` | canonical dashboard origin |
+| `dashboardDirectory` | `--dashboard-dir` / `AGENT_HOST_DASHBOARD_DIR` | optional built dashboard assets served from `/` |
 | `allowedOrigins` | repeatable `--allowed-origin` / `AGENT_HOST_ALLOWED_ORIGINS` | additional canonical browser origins |
 
 Relative paths in the JSON file resolve from the configuration directory. CLI and
