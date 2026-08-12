@@ -7,11 +7,20 @@ export async function ensurePrivateDirectory(path) {
 }
 
 export async function ensureOwnedDirectory(path, { mode = 0o700, tighten = false } = {}) {
+  let existed = true;
+  try { await lstat(path); }
+  catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    existed = false;
+  }
   await mkdir(path, { recursive: true, mode });
   const stat = await lstat(path);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`state directory must be a real directory: ${path}`);
   assertOwned(stat, path);
-  if (tighten) await chmod(path, mode);
+  if (tighten && (stat.mode & 0o077) !== 0) {
+    if (existed) throw new Error(`state directory must not grant group or other access: ${path}`);
+    await chmod(path, mode);
+  }
 }
 
 export async function readPrivateFile(path) {

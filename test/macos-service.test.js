@@ -28,6 +28,7 @@ test("macOS service controller installs, starts, restarts, stops, and preserves 
   await import("node:fs/promises").then(({ mkdir, writeFile }) => mkdir(join(home, ".agent-host"), { recursive: true }).then(() => Promise.all([
     writeFile(configPath, "{}"), writeFile(tokenPath, "secret"),
   ])));
+  await chmod(join(home, ".agent-host"), 0o700);
   let running = false;
   const calls = [];
   const controller = createMacosServiceController({

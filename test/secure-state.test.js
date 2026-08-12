@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readOrCreateToken, rotateToken } from "../src/secure-state.js";
@@ -36,4 +36,14 @@ test("token reader rejects an empty persistent token", async (t) => {
   const tokenFile = join(home, "token");
   await writeFile(tokenFile, "\n", { mode: 0o600 });
   await assert.rejects(readOrCreateToken(tokenFile), /token file is empty/);
+});
+
+test("secure state refuses to change permissions on an existing shared directory", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-shared-state-"));
+  t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));
+  const shared = join(home, "shared");
+  await mkdir(shared, { mode: 0o755 });
+  await chmod(shared, 0o755);
+  await assert.rejects(readOrCreateToken(join(shared, "token")), /must not grant group or other access/);
+  assert.equal((await lstat(shared)).mode & 0o777, 0o755);
 });
