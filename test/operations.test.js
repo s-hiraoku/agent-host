@@ -170,3 +170,23 @@ test("diagnostics redaction preserves the bounded metric schema and values", () 
   assert.equal(histogram.value.sum, 75);
   assert.equal(histogram.value.buckets.find((bucket) => bucket.upperBound === 100).count, 1);
 });
+
+test("diagnostics redaction preserves bounded adapter health details", () => {
+  const redact = createRedactor();
+  const snapshot = redact({
+    readiness: {
+      ready: true,
+      adapters: [{
+        id: "codex", status: "error",
+        error: { code: "transport_failed", message: "connection closed" },
+        circuit: { phase: "open", failures: 3, nextAttemptAt: 1_786_543_210_000 },
+      }],
+    },
+  });
+  assert.deepEqual(snapshot.readiness.adapters[0].error, {
+    code: "transport_failed", message: "connection closed",
+  });
+  assert.deepEqual(snapshot.readiness.adapters[0].circuit, {
+    phase: "open", failures: 3, nextAttemptAt: 1_786_543_210_000,
+  });
+});

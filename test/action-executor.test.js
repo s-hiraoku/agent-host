@@ -69,6 +69,7 @@ test("action executor rejects queued work and aborts active work at shutdown dea
 
 test("action executor times out a hung action and advances its queue", async () => {
   let calls = 0;
+  const observations = [];
   const registry = {
     async action(agentId, action) {
       calls += 1;
@@ -76,7 +77,10 @@ test("action executor times out a hung action and advances its queue", async () 
       return { ok: true, agentId, action };
     },
   };
-  const executor = new ActionExecutor(registry, { actionTimeoutMs: 5 });
+  const executor = new ActionExecutor(registry, {
+    actionTimeoutMs: 5,
+    operations: { metrics: { observe: (...args) => observations.push(args), setGauge() {} } },
+  });
   const hung = executor.execute("agent:1", "prompt", {}, "timeout-action-1");
   const next = executor.execute("agent:1", "prompt", {}, "timeout-action-2");
   await assert.rejects(hung, (error) => error.code === "action_timeout" && error.status === 504);
@@ -84,4 +88,5 @@ test("action executor times out a hung action and advances its queue", async () 
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls, 2);
   assert.equal(executor.queueDepth, 0);
+  assert.equal(observations.find(([, , labels]) => labels.outcome === "timeout")?.[0], "action_latency_ms");
 });
