@@ -28,8 +28,8 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - Branch: `codex/issue-8-service-lifecycle`
 - Issue: https://github.com/s-hiraoku/agent-host/issues/8
 - Base: `main` at merge commit `187773c` (PR #17)
-- PR: pending creation
-- Next: commit and open the ready-for-review Issue #8 PR, complete its review/CI follow-up, then branch Issue #9 without merging absent explicit user authorization.
+- PR: https://github.com/s-hiraoku/agent-host/pull/18
+- Next: complete PR #18 review/CI follow-up, then branch Issue #9 without merging absent explicit user authorization.
 
 ## Progress notes
 
@@ -45,3 +45,4 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - 2026-08-09: Confirmed PR #16 merged into `main`, then implemented Issue #7. Explicit control mode connects through the official Codex Unix control proxy, subscribes loaded threads, propagates live status and approvals, scopes state/actions to connection generations, marks records stale on loss, and keeps unsupported Codex processes raw-only.
 - 2026-08-12: Confirmed PR #17 merged as `187773c`, synchronized `main`, and created `codex/issue-8-service-lifecycle`. Began Issue #8 with a modular plan for configuration, secure state/token storage, instance ownership, testable CLI lifecycle commands, and a macOS LaunchAgent integration.
 - 2026-08-12: Completed Issue #8 implementation: strict versioned configuration, secure token lifecycle, race-aware instance ownership, foreground and LaunchAgent lifecycle commands, selective adapters, documentation, and isolated service smoke coverage. The full 82-test suite and a real macOS launchctl install/start/status/stop/restart/uninstall smoke passed; the test service and temporary state were removed. Adviser completion review found no PR blocker and kept logging/diagnostics in #9 and installed-path stability in #10.
+- 2026-08-12: Opened regular ready-for-review PR #18 for Issue #8. Merge remains gated on explicit user authorization.
