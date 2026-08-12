@@ -2,7 +2,7 @@
 
 Release archives contain agent-host and a dashboard built from the pinned compatible dashboard commit. They require Node 22, 23, or 24 and do not require cloning either repository. Release archives are source distributions; they are not Apple-signed applications.
 
-Download `agent-host-0.3.0.tar.gz` and `checksums.txt` from the same GitHub release, then verify before extraction:
+Download `agent-host-0.3.0.tar.gz`, `agent-host-0.3.0-release-manifest.json`, `agent-host-0.3.0.spdx.json`, and `checksums.txt` from the same GitHub release, then verify before extraction:
 
 ```bash
 shasum -a 256 -c checksums.txt
