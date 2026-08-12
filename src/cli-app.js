@@ -174,6 +174,7 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
         cliPath: dependencies.cliPath ?? DEFAULT_CLI_PATH,
         launcherPath: dependencies.launcherPath ?? env.AGENT_HOST_LAUNCHER_PATH,
         configPath: configFile,
+        dashboardDirectory: configuration.dashboardDirectory,
         logFile: `${configuration.logFile}.console`,
       }));
       return 0;

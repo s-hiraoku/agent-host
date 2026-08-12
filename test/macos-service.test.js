@@ -10,10 +10,13 @@ test("LaunchAgent rendering escapes paths and never embeds tokens", () => {
     nodePath: "/Applications/Node & Tools/node",
     cliPath: "/tmp/<agent>/cli.js",
     configPath: "/tmp/config.json",
+    dashboardDirectory: "/tmp/Dashboard & Assets",
     logFile: "/tmp/agent.log",
   });
   assert.match(plist, /Node &amp; Tools/);
   assert.match(plist, /&lt;agent&gt;/);
+  assert.match(plist, /--dashboard-dir/);
+  assert.match(plist, /Dashboard &amp; Assets/);
   assert.match(plist, /<key>RunAtLoad<\/key><true\/>/);
   assert.match(plist, /<key>KeepAlive<\/key><true\/>/);
   assert.doesNotMatch(plist, /token|Authorization|AGENT_HOST_API_TOKEN/);
@@ -130,4 +133,17 @@ test("service replacement refuses unmanaged files and restores a running plist w
   }), /injected reload failure/);
   assert.equal(await readFile(plistPath, "utf8"), original);
   assert.equal(loaded, true);
+
+  await writeFile(plistPath, original);
+  const bootoutFailure = createMacosServiceController({
+    platform: "darwin",
+    uid: 501,
+    async run(args) {
+      if (args[0] === "bootout") throw new Error("injected bootout failure");
+    },
+  });
+  await assert.rejects(bootoutFailure.install({
+    plistPath, launcherPath: "/newer/agent-host", configPath: "/tmp/config", logFile: join(home, "log"),
+  }), /injected bootout failure/);
+  assert.equal(await readFile(plistPath, "utf8"), original);
 });

@@ -7,10 +7,11 @@ import { ensurePrivateDirectory, ensureOwnedDirectory, writePrivateFileAtomic } 
 const execFileAsync = promisify(execFile);
 export const SERVICE_LABEL = "dev.agent-host";
 
-export function renderLaunchAgent({ nodePath, cliPath, launcherPath, configPath, logFile, errorLogFile = `${logFile}.error` }) {
+export function renderLaunchAgent({ nodePath, cliPath, launcherPath, configPath, dashboardDirectory, logFile, errorLogFile = `${logFile}.error` }) {
   const args = launcherPath
     ? [launcherPath, "serve", "--config", configPath]
     : [nodePath, cliPath, "serve", "--config", configPath];
+  if (dashboardDirectory) args.push("--dashboard-dir", dashboardDirectory);
   return `${xmlHeader()}<plist version="1.0">
 <dict>
   <key>Label</key><string>${escapeXml(SERVICE_LABEL)}</string>
@@ -62,23 +63,25 @@ export function createMacosServiceController(options = {}) {
     return contents;
   };
   return {
-    async install({ plistPath, nodePath, cliPath, launcherPath, configPath, logFile }) {
+    async install({ plistPath, nodePath, cliPath, launcherPath, configPath, dashboardDirectory, logFile }) {
       assertSupported();
       const installed = await isInstalled(plistPath);
       const running = installed && await isRunning();
       const previousContents = installed ? await readManagedPlist(plistPath) : undefined;
       await ensureOwnedDirectory(dirname(plistPath));
       await ensurePrivateDirectory(dirname(logFile));
-      const contents = renderLaunchAgent({ nodePath, cliPath, launcherPath, configPath, logFile });
+      const contents = renderLaunchAgent({ nodePath, cliPath, launcherPath, configPath, dashboardDirectory, logFile });
       await writePrivateFileAtomic(plistPath, contents, { tightenDirectory: false });
       await chmod(plistPath, 0o600);
       if (running) {
-        await run(["bootout", target()]);
-        try { await run(["bootstrap", domain(), plistPath]); }
+        try {
+          await run(["bootout", target()]);
+          await run(["bootstrap", domain(), plistPath]);
+        }
         catch (error) {
           await writePrivateFileAtomic(plistPath, previousContents, { tightenDirectory: false });
           await chmod(plistPath, 0o600);
-          await run(["bootstrap", domain(), plistPath]).catch(() => {});
+          if (!await isRunning()) await run(["bootstrap", domain(), plistPath]).catch(() => {});
           throw error;
         }
       }

@@ -84,5 +84,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: agent-host-release-candidate
-          path: agent-host/dist/*
+          path: |
+            agent-host/dist/checksums.txt
+            agent-host/dist/agent-host-*.tar.gz
+            agent-host/dist/agent-host-*-release-manifest.json
+            agent-host/dist/agent-host-*.spdx.json
           if-no-files-found: error

@@ -129,7 +129,6 @@ export class ActionExecutor {
             item.controller.abort(error);
             reject(error);
           }, this.#actionTimeoutMs);
-          timer.unref?.();
         });
         const result = await Promise.race([
           this.#registry.action(item.agentId, item.action, item.payload, { signal: item.controller.signal }),
