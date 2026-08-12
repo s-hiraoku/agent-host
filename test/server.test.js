@@ -35,6 +35,15 @@ test("project identity preserves significant cwd whitespace", () => {
     }],
   });
   assert.equal(driveRelative.capabilities.approve, false);
+  const unknownKind = agentSummary({
+    ...base,
+    capabilities: { approve: true },
+    pendingApprovals: [{
+      approvalId: "unknown-kind", method: "item/fileChange/requestApproval", actionable: true,
+      context: { kind: "file-change", files: [{ path: "renamed.js", kind: "rename" }] },
+    }],
+  });
+  assert.equal(unknownKind.capabilities.approve, false);
 });
 
 test("serves the pinned dashboard and same-origin API alias without weakening authentication", async (t) => {
@@ -222,6 +231,7 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
           metadata: { secretProviderPayload: "must not leave the host" },
           discoveredAt: now,
           updatedAt: now,
+          lastActivityAt: "2026-08-12T12:00:00Z",
         },
         {
           id: "fixture:beta",
@@ -234,6 +244,7 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
           metadata: { secretProviderPayload: "must not leave the host" },
           discoveredAt: now,
           updatedAt: now,
+          lastActivityAt: "2026-08-12T08:00:00-05:00",
         },
         {
           id: "fixture:gamma",
@@ -246,6 +257,7 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
           metadata: { secretProviderPayload: "must not leave the host" },
           discoveredAt: now,
           updatedAt: now,
+          lastActivityAt: "2026-08-12T11:00:00Z",
         },
       ];
     },
@@ -263,6 +275,8 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
     assert.equal(firstResponse.status, 200);
     assert.equal(first.apiVersion, "1");
     assert.equal(first.revision, 1);
+    const activity = await (await fetch(`${base}/v1/agents?sort=activity&direction=desc`, { headers: AUTHORIZATION })).json();
+    assert.deepEqual(activity.agents.map((agent) => agent.id), ["fixture:beta", "fixture:alpha", "fixture:gamma"]);
     assert.equal(first.agents.length, 1);
     assert.equal(first.page.total, 2);
     assert.equal(first.agents[0].id, "fixture:alpha");

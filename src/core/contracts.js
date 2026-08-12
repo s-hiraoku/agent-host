@@ -46,11 +46,8 @@ function approvalContextView(context) {
   const supplied = Array.isArray(context.files) ? context.files : [];
   const validated = supplied.flatMap((file) => {
     const path = publicApprovalPath(file?.path);
-    if (!path) return [];
-    return [{
-      path,
-      kind: ["add", "delete", "update"].includes(file.kind) ? file.kind : "update",
-    }];
+    if (!path || !["add", "delete", "update"].includes(file.kind)) return [];
+    return [{ path, kind: file.kind }];
   });
   if (validated.length !== supplied.length || validated.length === 0) return undefined;
   const files = validated.slice(0, 20);
@@ -203,7 +200,7 @@ function comparator(filter) {
   return (left, right) => {
     let result;
     if (filter.sort === "activity") {
-      result = compareText(left.lastActivityAt ?? left.updatedAt, right.lastActivityAt ?? right.updatedAt);
+      result = compareTimestamp(left.lastActivityAt ?? left.updatedAt, right.lastActivityAt ?? right.updatedAt);
     } else if (filter.sort === "status") {
       result = compareText(left.status, right.status);
     } else {
@@ -211,6 +208,15 @@ function comparator(filter) {
     }
     return result ? direction * result : compareText(left.id, right.id);
   };
+}
+
+function compareTimestamp(left, right) {
+  const a = Date.parse(left ?? "");
+  const b = Date.parse(right ?? "");
+  if (Number.isFinite(a) && Number.isFinite(b)) return a < b ? -1 : a > b ? 1 : 0;
+  if (Number.isFinite(a)) return 1;
+  if (Number.isFinite(b)) return -1;
+  return compareText(left, right);
 }
 
 function compareText(left, right) {

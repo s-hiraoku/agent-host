@@ -68,9 +68,8 @@ function fileChangeContext(item, cwd) {
   if (item?.type !== "fileChange" || !Array.isArray(item.changes) || item.changes.length === 0) return undefined;
   const validated = item.changes.flatMap((change) => {
     const path = publicFilePath(change?.path, cwd);
-    if (!path) return [];
-    const kind = ["add", "delete", "update"].includes(change?.kind) ? change.kind : "update";
-    return [{ path, kind }];
+    if (!path || !["add", "delete", "update"].includes(change?.kind)) return [];
+    return [{ path, kind: change.kind }];
   });
   if (validated.length !== item.changes.length) return undefined;
   const files = validated.slice(0, MAX_APPROVAL_FILES);
