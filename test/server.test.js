@@ -6,11 +6,24 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEventBus } from "../src/core/event-bus.js";
 import { AgentRegistry } from "../src/core/registry.js";
+import { agentSummary } from "../src/core/contracts.js";
 import { createAgentServer } from "../src/http/server.js";
 import { OperationsContext } from "../src/operations/context.js";
 
 const API_TOKEN = "test-api-token";
 const AUTHORIZATION = { authorization: `Bearer ${API_TOKEN}` };
+
+test("project identity preserves significant cwd whitespace", () => {
+  const base = {
+    id: "fixture:project", provider: "fixture", source: "fixture", name: "Project",
+    status: "idle", capabilities: {}, discoveredAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+  const ordinary = agentSummary({ ...base, cwd: "/work/project" });
+  const trailingSpace = agentSummary({ ...base, cwd: "/work/project " });
+  assert.notEqual(ordinary.project.id, trailingSpace.project.id);
+  assert.equal(trailingSpace.project.name, "project ");
+});
 
 test("serves the pinned dashboard and same-origin API alias without weakening authentication", async (t) => {
   const dashboard = await mkdtemp(join(tmpdir(), "agent-host-dashboard-"));
@@ -334,6 +347,24 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
     assert.equal(unsafeAction.status, 409);
     assert.equal((await unsafeAction.json()).error.code, "capability_not_available");
     assert.equal(unsafeApprovalInvoked, false);
+
+    adapter.discover = async () => [{
+      id: "fixture:disabled", provider: "codex", source: "fixture", name: "Disabled", status: "blocked",
+      capabilities: { approve: true, reject: true }, cwd: "/work/disabled", discoveredAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      pendingApprovals: [{ approvalId: "disabled", method: "item/commandExecution/requestApproval", actionable: false }],
+    }];
+    await registry.refresh();
+    const disabled = await (await fetch(`${base}/v1/agents/${encodeURIComponent("fixture:disabled")}`, { headers: AUTHORIZATION })).json();
+    assert.equal(disabled.agent.pendingApprovals[0].actionable, false);
+    assert.equal(disabled.agent.capabilities.approve, false);
+    const disabledAction = await fetch(`${base}/v1/agents/fixture%3Adisabled/approve`, {
+      method: "POST",
+      headers: { ...AUTHORIZATION, "content-type": "application/json", "idempotency-key": "disabled-approval-0001" },
+      body: JSON.stringify({ approvalId: "disabled" }),
+    });
+    assert.equal(disabledAction.status, 409);
+    assert.equal(unsafeApprovalInvoked, false);
+
     adapter.discover = originalDiscover;
     adapter.approve = originalApprove;
     await registry.refresh();

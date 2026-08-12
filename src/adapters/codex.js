@@ -45,8 +45,8 @@ function pendingApprovalView(entry) {
 }
 
 function publicFilePath(value, cwd) {
-  if (typeof value !== "string" || !value.trim() || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
-  const raw = value.trim();
+  if (typeof value !== "string" || !value || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
+  const raw = value;
   let candidate = raw;
   if (isAbsolute(raw)) {
     if (typeof cwd !== "string" || !isAbsolute(cwd)) return undefined;

@@ -66,10 +66,9 @@ Issue #11 must remain open.
 - The Issue #10 candidate archive was
   `agent-host-0.3.0.tar.gz`, SHA-256
   `aa8bd15f95b7b42eef07573e23f6d9289113ee8d1b61c63667dbade7fae6ceef`.
-  Issue #11 changes supersede it; record the final candidate hash after this branch's
-  CI. The current local Issue #11 candidate has 41 runtime files and SHA-256
-  `bf3aefc7adbe90ae22ebcc80a4659c5504dc97bd9a1732df96ca93ae5d41167c`.
-  Neither archive is a published release asset.
+  Issue #11 changes supersede it; its final candidate hash belongs in the verification
+  ledger or CI artifact metadata rather than this packaged document. Neither archive
+  is a published release asset.
 
 ## Required external close-out
 

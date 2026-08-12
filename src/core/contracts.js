@@ -37,7 +37,7 @@ function approvalView(approval) {
 }
 
 export function isActionableApproval(approval) {
-  if (!approval) return false;
+  if (!approval || approval.actionable === false) return false;
   return approval.method !== "item/fileChange/requestApproval" || approvalView(approval).actionable === true;
 }
 
@@ -75,8 +75,8 @@ function publicApprovalPath(value) {
 }
 
 function projectView(cwd) {
-  if (typeof cwd !== "string" || !isAbsolute(cwd.trim())) return undefined;
-  const canonical = normalize(cwd.trim());
+  if (typeof cwd !== "string" || !isAbsolute(cwd)) return undefined;
+  const canonical = normalize(cwd);
   return {
     id: `local:${createHash("sha256").update(canonical).digest("base64url").slice(0, 22)}`,
     name: basename(canonical) || canonical,
