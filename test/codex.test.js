@@ -236,6 +236,7 @@ test("Codex adapter exposes and resolves semantic approvals", async () => {
         changes: [
           { path: " leading.js", kind: "add", diff: "private" },
           { path: "trailing.js ", kind: "update", diff: "private" },
+          { path: "back\\slash.js", kind: "update", diff: "private" },
         ],
       },
     },
@@ -243,7 +244,7 @@ test("Codex adapter exposes and resolves semantic approvals", async () => {
   client.emitServerRequest({ id: 72, method: "item/fileChange/requestApproval", params: { threadId: "thr_1", turnId: "turn_1", itemId: "item_whitespace" } });
   const whitespace = (await adapter.discover())[0].pendingApprovals[0];
   assert.equal(whitespace.actionable, true);
-  assert.deepEqual(whitespace.context.files.map((file) => file.path), [" leading.js", "trailing.js "]);
+  assert.deepEqual(whitespace.context.files.map((file) => file.path), [" leading.js", "trailing.js ", "back\\slash.js"]);
   client.emitNotification({ method: "serverRequest/resolved", params: { requestId: 72 } });
 
   for (const id of [63, 64]) client.emitServerRequest({

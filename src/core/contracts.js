@@ -1,6 +1,6 @@
 import { compareAgents, matchesView } from "./discovery.js";
 import { createHash } from "node:crypto";
-import { basename, isAbsolute, normalize } from "node:path";
+import { basename, isAbsolute, resolve, sep } from "node:path";
 
 export const API_VERSION = "1";
 export const DEFAULT_PAGE_LIMIT = 50;
@@ -54,19 +54,20 @@ function approvalContextView(context) {
   });
   if (validated.length !== supplied.length || validated.length === 0) return undefined;
   const files = validated.slice(0, 20);
+  const fileCount = Number.isInteger(context.fileCount) && context.fileCount >= files.length
+    ? context.fileCount
+    : files.length;
   return {
     kind: "file-change",
-    fileCount: Number.isInteger(context.fileCount) && context.fileCount >= files.length
-      ? context.fileCount
-      : files.length,
+    fileCount,
     files,
-    truncated: Boolean(context.truncated) || supplied.length > files.length,
+    truncated: Boolean(context.truncated) || supplied.length > files.length || fileCount > files.length,
   };
 }
 
 function publicApprovalPath(value) {
   if (typeof value !== "string" || !value || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
-  const portable = value.replaceAll("\\", "/");
+  const portable = sep === "\\" ? value.replaceAll("\\", "/") : value;
   if (portable.startsWith("/") || /^[A-Za-z]:\//.test(portable)) return undefined;
   const segments = portable.split("/").filter((segment) => segment && segment !== ".");
   if (segments.length === 0 || segments.includes("..")) return undefined;
@@ -76,7 +77,7 @@ function publicApprovalPath(value) {
 
 function projectView(cwd) {
   if (typeof cwd !== "string" || !isAbsolute(cwd)) return undefined;
-  const canonical = normalize(cwd);
+  const canonical = resolve(cwd);
   return {
     id: `local:${createHash("sha256").update(canonical).digest("base64url").slice(0, 22)}`,
     name: basename(canonical) || canonical,

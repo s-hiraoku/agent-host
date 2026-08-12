@@ -20,7 +20,9 @@ test("project identity preserves significant cwd whitespace", () => {
     updatedAt: "2026-01-01T00:00:00.000Z",
   };
   const ordinary = agentSummary({ ...base, cwd: "/work/project" });
+  const terminalSeparator = agentSummary({ ...base, cwd: "/work/project/" });
   const trailingSpace = agentSummary({ ...base, cwd: "/work/project " });
+  assert.equal(ordinary.project.id, terminalSeparator.project.id);
   assert.notEqual(ordinary.project.id, trailingSpace.project.id);
   assert.equal(trailingSpace.project.name, "project ");
 });
@@ -366,6 +368,20 @@ test("serves bounded agent summaries, details, filters, and structured errors", 
     });
     assert.equal(disabledAction.status, 409);
     assert.equal(unsafeApprovalInvoked, false);
+
+    adapter.discover = async () => [{
+      id: "fixture:truncated", provider: "codex", source: "fixture", name: "Truncated", status: "blocked",
+      capabilities: { approve: true }, cwd: "/work/truncated", discoveredAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      pendingApprovals: [{
+        approvalId: "truncated", method: "item/fileChange/requestApproval", actionable: true,
+        context: { kind: "file-change", fileCount: 21, truncated: false, files: Array.from({ length: 20 }, (_, index) => ({ path: `safe-${index}.js`, kind: "update" })) },
+      }],
+    }];
+    await registry.refresh();
+    const truncated = await (await fetch(`${base}/v1/agents/${encodeURIComponent("fixture:truncated")}`, { headers: AUTHORIZATION })).json();
+    assert.equal(truncated.agent.pendingApprovals[0].actionable, true);
+    assert.equal(truncated.agent.pendingApprovals[0].context.fileCount, 21);
+    assert.equal(truncated.agent.pendingApprovals[0].context.truncated, true);
 
     adapter.discover = originalDiscover;
     adapter.approve = originalApprove;
