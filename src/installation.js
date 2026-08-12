@@ -5,6 +5,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 const STATE_FILE = "install-state.json";
+const INCOMPLETE_LOCK_GRACE_MS = 5_000;
 
 export async function installRelease({ source, prefix, binDirectory, nodePath = process.execPath, beforeTransactionClear }) {
   assertSupportedNode();
@@ -318,11 +319,22 @@ async function acquireInstallLock(path) {
     let record;
     let staleStat;
     try { record = JSON.parse(await readFile(join(path, "owner.json"), "utf8")); }
-    catch { throw new Error("another agent-host install, update, or rollback is in progress"); }
-    if (!Number.isInteger(record?.pid) || processAlive(record.pid)) {
+    catch {
+      staleStat = await lstat(path);
+      if (Date.now() - staleStat.mtimeMs < INCOMPLETE_LOCK_GRACE_MS) {
+        throw new Error("another agent-host install, update, or rollback is in progress");
+      }
+    }
+    if (Number.isInteger(record?.pid) && processAlive(record.pid)) {
       throw new Error("another agent-host install, update, or rollback is in progress");
     }
-    staleStat = await lstat(path);
+    if (!Number.isInteger(record?.pid) && !staleStat) {
+      staleStat = await lstat(path);
+      if (Date.now() - staleStat.mtimeMs < INCOMPLETE_LOCK_GRACE_MS) {
+        throw new Error("another agent-host install, update, or rollback is in progress");
+      }
+    }
+    staleStat ??= await lstat(path);
     const quarantine = `${path}.stale-${staleStat.dev}-${staleStat.ino}`;
     try { await rename(path, quarantine); }
     catch (takeoverError) {

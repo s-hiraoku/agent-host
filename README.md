@@ -205,6 +205,12 @@ rules and verified Node/adapter ranges are in [docs/compatibility.md](docs/compa
 The current integrated MVP decision, evidence, and remaining real-environment gates
 are tracked in [docs/release-gate.md](docs/release-gate.md).
 
+Release builds require the already-built pinned dashboard as an explicit input:
+
+```bash
+npm run release:build -- --dashboard-dir=/path/to/pinned-dashboard/dist
+```
+
 ## Run from source
 
 Requires Node.js 22+ and optionally the CLIs for the adapters you want to use. The Codex semantic adapter requires `codex` to be available on `PATH`.
