@@ -220,9 +220,17 @@ export class AgentRegistry {
     const force = options.force ?? true;
     if (this.#refreshPromise) {
       if (force && !this.#currentRefreshForced) {
-        this.#forcedFollowupPromise ??= this.#refreshPromise.then(() => this.#closed
-          ? this.list()
-          : this.refresh({ force: true })).finally(() => { this.#forcedFollowupPromise = undefined; });
+        if (!this.#forcedFollowupPromise) {
+          let followup;
+          followup = this.#refreshPromise.then(() => {
+            if (this.#closed) return this.list();
+            if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
+            return this.refresh({ force: true });
+          }).finally(() => {
+            if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
+          });
+          this.#forcedFollowupPromise = followup;
+        }
         return this.#forcedFollowupPromise;
       }
       return this.#refreshPromise;
