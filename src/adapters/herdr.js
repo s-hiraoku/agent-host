@@ -62,6 +62,6 @@ export class HerdrAdapter {
 
   async #runAction(agent, action, args, options) {
     try { return { ok: true, agentId: agent.id, action, data: await run(args, options) }; }
-    catch (error) { return { ok: false, agentId: agent.id, action, message: String(error) }; }
+    catch { return { ok: false, code: "herdr_action_failed", agentId: agent.id, action, message: "Herdr action failed" }; }
   }
 }

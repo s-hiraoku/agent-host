@@ -1,4 +1,4 @@
-const SENSITIVE_KEY = /(?:authorization|cookie|token|secret|password|prompt|text|command|metadata|environment|headers?)/i;
+const SENSITIVE_KEY = /(?:^|[._-])(?:authorization|cookie|token|secret|password|prompt|text|command|metadata|environment|headers?)(?:[._-]|$)/i;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi;
 
 export function createRedactor(options = {}) {

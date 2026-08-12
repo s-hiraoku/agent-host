@@ -143,7 +143,9 @@ export class AgentRegistry {
             markStale: true,
             error: event.error ?? new Error("adapter transport disconnected"),
           };
-          this.#recordCircuitOutcome(adapter.id, outcome, false);
+          if (!this.#adapterFlights.has(adapter.id)) {
+            this.#recordCircuitOutcome(adapter.id, outcome, false);
+          }
           this.#applyOutcome(outcome);
         }
         if (this.#refreshPromise) this.#adapterRefreshQueued = true;
@@ -326,10 +328,11 @@ export class AgentRegistry {
       });
     }
     const level = outcome.status === "success" ? "debug" : "warn";
+    const loggedOutcome = outcome.status === "error" ? "failure" : outcome.status;
     this.#operations?.logger.log(level, "adapter.refresh", {
       component: "registry",
       adapter: outcome.adapterId,
-      outcome: outcome.status === "success" ? "success" : outcome.status,
+      outcome: loggedOutcome,
       code: health.error?.code,
       durationMs: outcome.durationMs,
     });
@@ -597,7 +600,15 @@ export class AgentRegistry {
               ?? result.message
               ?? "action failed",
           }
-        : { ...result, ok: false, code: "action_failed", agentId: id, action, message: result?.message ?? "action failed" };
+        : {
+            ...result,
+            ok: false,
+            code: "action_failed",
+            agentId: id,
+            action,
+            message: this.#operations?.redact?.({ message: result?.message ?? "action failed" }).message
+              ?? "action failed",
+          };
     this.events.emit({
       type: "agent.action",
       agentId: id,

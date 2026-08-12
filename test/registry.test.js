@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentRegistry } from "../src/core/registry.js";
+import { OperationsContext } from "../src/operations/context.js";
 
 function deferred() {
   let resolve;
@@ -269,9 +270,9 @@ test("returns stable action error codes", async () => {
         capabilities: { prompt: true },
       }];
     },
-    async prompt() { throw new Error("backend unavailable"); },
+    async prompt() { return { ok: false, message: "backend top-secret" }; },
   };
-  const registry = new AgentRegistry([throwing]);
+  const registry = new AgentRegistry([throwing], { operations: new OperationsContext({ secrets: ["top-secret"] }) });
   const events = [];
   registry.events.subscribe((event) => events.push(event));
   await registry.refresh();
@@ -280,7 +281,7 @@ test("returns stable action error codes", async () => {
   assert.equal((await registry.action("throwing:1", "missing")).code, "unknown_action");
   const failed = await registry.action("throwing:1", "prompt", { text: "x" });
   assert.equal(failed.code, "action_failed");
-  assert.equal(failed.message, "backend unavailable");
+  assert.equal(failed.message, "backend [REDACTED]");
   assert.equal(events.at(-1).type, "agent.action");
   assert.equal(events.at(-1).action, "prompt");
   assert.equal(events.at(-1).ok, false);

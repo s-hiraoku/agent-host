@@ -87,7 +87,8 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
       secrets: token ? [token] : [],
       paths: privatePaths(configuration),
     });
-    const remote = token ? await fetchDiagnostics(configuration, token).catch(() => undefined) : undefined;
+    const diagnosticsFetcher = dependencies.fetchDiagnostics ?? fetchDiagnostics;
+    const remote = token ? await diagnosticsFetcher(configuration, token).catch(() => undefined) : undefined;
     let serviceState = { installed: false, running: false, plistPath: paths.launchAgentFile };
     if (!remote && (dependencies.platform ?? process.platform) === "darwin") {
       serviceState = await service.status(paths.launchAgentFile).catch((error) => ({

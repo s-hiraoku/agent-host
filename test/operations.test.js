@@ -18,6 +18,9 @@ test("central redaction bounds nested values and removes secrets, auth, paths, p
   circular.self = circular;
   const result = redact({
     authorization: "Bearer top-secret-token",
+    context: "kept",
+    commandCount: 2,
+    environmentReady: true,
     nested: {
       message: "failed at /Users/example/project with Bearer abc.def and top-secret-token",
       prompt: "private request",
@@ -38,6 +41,9 @@ test("central redaction bounds nested values and removes secrets, auth, paths, p
   assert.equal(result.nested.circular.self, "[CIRCULAR]");
   assert.equal(result.huge.length, 512);
   assert.doesNotMatch(serialized, /top-secret-token|private request|user:pass|token=hidden|Users\/example/);
+  assert.equal(result.context, "kept");
+  assert.equal(result.commandCount, 2);
+  assert.equal(result.environmentReady, true);
 });
 
 test("structured logger writes parseable owner-only JSONL with bounded ring and rotation", async (t) => {
@@ -150,6 +156,8 @@ test("operational metrics use bounded fixed label series and cumulative histogra
   assert.equal(snapshot.histograms[0].value.buckets.at(-1).upperBound, "+Inf");
   assert.equal(snapshot.gauges[0].value, 3);
   assert.doesNotMatch(JSON.stringify(snapshot), /requestId|agentId|secret|different/);
+  assert.throws(() => metrics.setGauge("event_subscribers", NaN), /finite value/);
+  assert.throws(() => metrics.observe("action_latency_ms", Infinity), /finite value/);
 });
 
 test("diagnostics redaction preserves the bounded metric schema and values", () => {

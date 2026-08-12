@@ -4,6 +4,7 @@ import { request } from "node:http";
 import { AgentRegistry } from "../src/core/registry.js";
 import { createAgentServer } from "../src/http/server.js";
 import { createApiSecurity } from "../src/http/security.js";
+import { OperationsContext } from "../src/operations/context.js";
 
 const TOKEN = "configured-test-token";
 const authorization = { authorization: `Bearer ${TOKEN}` };
@@ -88,12 +89,15 @@ test("enforces browser security and emits secret-free action audit events", asyn
   registry.events.subscribe((event) => {
     if (event.type === "audit.action") audits.push(event);
   });
+  const operations = new OperationsContext({ secrets: [TOKEN] });
+  operations.logger.log("error", "fixture.secret", { details: { token: TOKEN } });
   const server = createAgentServer(registry, {
     host: "127.0.0.1",
     port: 0,
     refreshMs: 60_000,
     apiToken: TOKEN,
     allowedOrigins: ["http://dashboard.test"],
+    operations,
   });
   const address = await server.start();
   await registry.refresh();
@@ -117,7 +121,8 @@ test("enforces browser security and emits secret-free action audit events", asyn
     const diagnostics = await (await fetch(`${base}/v1/diagnostics`, { headers: authorization })).json();
     assert.equal(diagnostics.apiVersion, "1");
     assert.equal(diagnostics.diagnostics.readiness.ready, true);
-    assert.doesNotMatch(JSON.stringify(diagnostics), new RegExp(TOKEN));
+    assert.ok(!JSON.stringify(diagnostics).includes(TOKEN));
+    assert.ok(diagnostics.diagnostics.recentLogs.some((record) => record.event === "fixture.secret"));
 
     const missingDetailToken = await fetch(`${base}/v1/agents/secure%3A1`);
     assert.equal(missingDetailToken.status, 401);
