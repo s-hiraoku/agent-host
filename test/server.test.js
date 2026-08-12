@@ -43,6 +43,7 @@ test("server shutdown closes active SSE clients before registry cleanup", { time
     });
   });
   assert.match(ready, /event: ready/);
+  assert.match(ready, /id: 0/);
   assert.match(ready, /"apiVersion":"1"/);
   assert.match(ready, /"revision":0/);
   assert.match(ready, /"sequence":0/);
@@ -58,6 +59,7 @@ test("server shutdown closes active SSE clients before registry cleanup", { time
   });
   const event = await eventData;
   assert.match(event, /event: agent.updated/);
+  assert.match(event, /id: 1/);
   assert.match(event, /"apiVersion":"1"/);
   assert.match(event, /"snapshotRevision":1/);
   assert.match(event, /"sequence":1/);
