@@ -4,7 +4,7 @@ A local control plane for AI coding agents.
 
 `agent-host` discovers agents running on your machine, normalizes their state/capabilities, and exposes one local API that thin clients can use. A watch, Stream Deck, menu bar app, web UI, phone app, or another agent should not need to know whether the target is Codex, Claude Code, Herdr, or something else.
 
-> Status: early MVP. Herdr control and a host-owned Codex App Server integration are implemented. Direct control of arbitrary external desktop/CLI agent processes remains capability-gated until a reliable adapter exists.
+> Status: early MVP. Herdr control, a host-owned Codex App Server integration, and opt-in attachment to an explicitly configured Codex App Server control socket are implemented. Other external desktop/CLI processes remain detection-only until a reliable transport exists.
 
 ## Why
 
@@ -33,6 +33,7 @@ Clients only consume a stable agent model and invoke capabilities exposed by the
 - Send prompts to Codex threads with `thread/resume` + `turn/start`, or `turn/steer` for a turn owned by this host.
 - Track Codex thread status notifications and interrupt turns owned by this host.
 - Surface real Codex command/file approval requests and answer them semantically with `accept` / `decline`.
+- Optionally subscribe to live threads already loaded on a shared Codex App Server Unix control socket.
 - Normalize status to `unknown | idle | working | blocked | done | error`.
 - Advertise per-agent capabilities instead of pretending every backend supports every action.
 - Control Herdr agents with prompt, key input, interrupt, focus, and read operations.
@@ -148,7 +149,7 @@ Example Codex agent waiting for approval:
   },
   "pendingApprovals": [
     {
-      "approvalId": "61",
+      "approvalId": "1:thr_123:61",
       "method": "item/commandExecution/requestApproval",
       "command": "npm test",
       "reason": "Run tests"
@@ -157,7 +158,7 @@ Example Codex agent waiting for approval:
 }
 ```
 
-`approve` and `reject` are deliberately **not** mapped to blind Enter/Escape presses. The Codex adapter only exposes these capabilities after App Server sends a real approval request and resolves that exact server request ID.
+`approve` and `reject` are deliberately **not** mapped to blind Enter/Escape presses. The Codex adapter only exposes these capabilities after App Server sends a real approval request and resolves that exact server request ID. Approval IDs are opaque; clients must return the value received from the API unchanged.
 
 ## Run
 
@@ -167,6 +168,21 @@ Requires Node.js 22+ and optionally the CLIs for the adapters you want to use. T
 npm install
 npm start
 ```
+
+By default, `agent-host` starts and owns a separate Codex App Server over stdio. To
+observe the same loaded threads as clients attached to an existing local App Server,
+opt in to its Unix control socket with an explicit absolute path:
+
+```bash
+AGENT_HOST_CODEX_TRANSPORT=control \
+AGENT_HOST_CODEX_SOCKET=/absolute/path/to/app-server.sock \
+npm start
+```
+
+Both variables are required for shared control. `agent-host` does not discover socket
+paths, start or stop the daemon, change socket permissions, or support TCP/WebSocket
+URLs. If the connection is lost, Codex records immediately become `unknown` with no
+actions until reconnect and subscription succeed.
 
 Discovery runs concurrently, is coalesced when refreshes overlap, and defaults to a
 20-second timeout per adapter. Override it with a positive integer in
@@ -245,19 +261,35 @@ The host separates **detection** from **control**.
 | OS process | yes | unknown | no | no | no |
 | Herdr | yes | rich | yes | yes | not yet |
 | Codex app-server (host-owned) | yes | rich for host-owned activity | yes | n/a | yes |
+| Codex app-server (shared control socket) | opt-in | rich for loaded threads | yes* | n/a | yes* |
 | Claude Code hooks | planned | rich | planned* | planned* | planned |
 | Desktop app adapters | planned | app-specific | app-specific | app-specific | app-specific |
 
-`*` Hooks are good for identity/state; actual input/control still needs a supported control path (for example Herdr, a native protocol, or an app-specific bridge).
+`*` Shared Codex actions require a successfully subscribed loaded thread. Threads that
+are only persisted remain visible but expose no actions; a parent-owned child thread
+may also reject direct prompt input. Shared prompt is fail-closed and appears only
+when experimental `canAcceptDirectInput` is explicitly `true`. Multiple App Server
+subscribers can see the same
+approval, so the first valid response wins and all clients must converge on
+`serverRequest/resolved`.
+
+For planned hook-based adapters, hooks provide identity/state but input still requires
+a supported control path such as Herdr, a native protocol, or an app-specific bridge.
 
 ## Codex adapter
 
-`agent-host` launches its own `codex app-server --listen stdio://` process and performs the required `initialize` / `initialized` handshake. It uses the official App Server protocol rather than terminal keystroke automation.
+In the default `owned` mode, `agent-host` launches its own
+`codex app-server --listen stdio://`. In opt-in `control` mode, it runs
+`codex app-server proxy --sock <absolute-path>` and performs a WebSocket upgrade over
+that child process's stdio. Both modes perform the required `initialize` /
+`initialized` handshake and use the official App Server protocol rather than terminal
+keystroke automation.
 
 Implemented protocol paths:
 
 ```text
 thread/list
+thread/loaded/list
 thread/resume
 thread/read
 turn/start
@@ -266,20 +298,33 @@ turn/interrupt
 thread/status/changed
 turn/started
 turn/completed
+turn/failed
+turn/aborted
 item/commandExecution/requestApproval
 item/fileChange/requestApproval
 serverRequest/resolved
 ```
 
-Command and file-change approvals expire after five minutes by default and are cancelled so unattended requests do not leave a thread blocked indefinitely. Other server-initiated request types receive an explicit unsupported-method response instead of stalling the App Server connection.
+Command and file-change approvals expire from the local view after five minutes by
+default. In owned mode they are also cancelled so unattended requests do not leave a
+thread blocked. Shared mode never cancels an expired approval or answers unsupported
+server requests because another subscriber may still own that interaction. Owned mode
+returns an explicit unsupported-method response for other server-initiated requests.
 
-### Important limitation
+### Ownership and subscription boundary
 
-The current adapter owns its App Server connection. It can list persisted Codex threads that are visible from the same Codex home and it can resume/control work through the host-owned App Server.
+API records expose `discovery.provenance` as either `owned-app-server` or
+`shared-control-socket`. Shared control means `agent-host` is another subscriber, not
+the owner of a desktop client, thread, turn, or approval. It subscribes only to threads
+returned by `thread/loaded/list`, using `thread/resume` with turn history excluded.
+Persisted-only threads remain detection-only. A failed per-thread subscription is
+isolated to that thread.
 
-It does **not** yet claim to attach to an arbitrary already-running Codex Desktop App Server process. Therefore, a turn that is actively running inside a separate Codex Desktop process may not appear as `working` in this host-owned server, and its in-flight approval request cannot be answered by this connection unless that request originated from the host-owned App Server.
-
-A future transport adapter should attach to an explicitly reachable existing App Server endpoint/control socket. That is the path to true cross-client live control of Codex Desktop.
+Connection, subscription, and approval identities are scoped to one transport
+generation. On reconnect, old approval IDs cannot be reused and actions remain gated
+until each thread is subscribed again. Codex processes unrelated to the configured
+socket remain available only in the `raw` view, avoiding a duplicate controllable
+record.
 
 ## Architecture
 
@@ -295,6 +340,7 @@ src/
     demo.js        deterministic opt-in dashboard states and transitions
     process.js     OS process discovery
     herdr.js       Herdr adapter
+    codex-websocket-wire.js  control-proxy WebSocket framing
     codex-rpc.js   Codex App Server JSON-RPC transport
     codex.js       Codex thread/status/action adapter
   http/
@@ -312,8 +358,10 @@ fixtures/
 ```ts
 interface AgentAdapter {
   id: string
+  onChange?(handler): () => void
   discover(options?: { signal?: AbortSignal }): Promise<AgentRecord[]>
   discoverHistory?(options?: { signal?: AbortSignal }): Promise<AgentRecord[]>
+  markStale?(agent): AgentRecord
   prompt?(agent, text): Promise<AgentActionResult>
   sendKeys?(agent, keys): Promise<AgentActionResult>
   approve?(agent, payload?): Promise<AgentActionResult>
@@ -334,10 +382,6 @@ same-provider adapter reports the exact same PID; matching working directories a
 never merges agents.
 
 ## Next adapters
-
-### Codex existing-process transport
-
-Attach to an explicitly exposed App Server endpoint/control socket so `agent-host` can observe and control the same live threads as another Codex client instead of owning a separate App Server process.
 
 ### Claude Code
 
@@ -366,6 +410,9 @@ Use native/local protocols where available. Accessibility automation should be a
   Origins must be canonical (no path or trailing slash); invalid configuration stops startup.
 - Never exposes an action unless the adapter declares it.
 - Codex semantic approvals require a real pending server request ID/context.
+- Treat `AGENT_HOST_CODEX_SOCKET` as a local security boundary. Configure only a
+  socket owned by the intended user; `agent-host` passes the path as an argument and
+  never creates, deletes, changes permissions on, or discovers control sockets.
 - Attempted and completed authenticated actions emit `audit.action` events containing
   identifiers and outcome codes, never request bodies, headers, or tokens.
 

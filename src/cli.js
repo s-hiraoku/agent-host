@@ -10,7 +10,11 @@ import { randomUUID } from "node:crypto";
 const [command = "serve", ...args] = process.argv.slice(2);
 const demoMode = command === "demo" || process.env.AGENT_HOST_DEMO === "1";
 const makeRegistry = () => new AgentRegistry(
-  createRuntimeAdapters({ demoMode }),
+  createRuntimeAdapters({
+    demoMode,
+    codexTransport: process.env.AGENT_HOST_CODEX_TRANSPORT,
+    codexSocket: process.env.AGENT_HOST_CODEX_SOCKET,
+  }),
   { adapterTimeoutMs: Number(process.env.AGENT_HOST_ADAPTER_TIMEOUT_MS ?? "20000") },
 );
 const host = process.env.AGENT_HOST_BIND ?? "127.0.0.1";

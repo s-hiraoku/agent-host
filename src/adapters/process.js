@@ -58,9 +58,18 @@ async function cwdFor(pid, signal) {
 
 export class ProcessAdapter {
   id = "process";
+  #rawOnlyProviders;
+  #execFile;
+  #cwdFor;
+
+  constructor(options = {}) {
+    this.#rawOnlyProviders = new Set(options.rawOnlyProviders ?? []);
+    this.#execFile = options.execFile ?? execFileAsync;
+    this.#cwdFor = options.cwdFor ?? cwdFor;
+  }
 
   async discover(options = {}) {
-    const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,tty=,command="], {
+    const { stdout } = await this.#execFile("ps", ["-axo", "pid=,ppid=,tty=,command="], {
       maxBuffer: 10 * 1024 * 1024,
       signal: options.signal,
     });
@@ -78,7 +87,7 @@ export class ProcessAdapter {
       if (!classification || pid === process.pid) continue;
       const { provider, confidence } = classification;
       options.signal?.throwIfAborted();
-      const cwd = await cwdFor(pid, options.signal);
+      const cwd = await this.#cwdFor(pid, options.signal);
       options.signal?.throwIfAborted();
       agents.push({
         id: `process:${provider}:${pid}`,
@@ -90,7 +99,11 @@ export class ProcessAdapter {
         pid,
         cwd,
         tty,
-        discovery: { kind: "process", confidence, visibility: confidence === "high" ? "active" : "raw" },
+        discovery: {
+          kind: "process",
+          confidence,
+          visibility: confidence === "high" && !this.#rawOnlyProviders.has(provider) ? "active" : "raw",
+        },
         metadata: { command, ppid: Number(match[2]) },
         discoveredAt: now,
         updatedAt: now,

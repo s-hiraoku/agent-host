@@ -37,3 +37,23 @@
 - Client fixtures use fictional `demo:*` identifiers, fixed timestamps, and no cwd,
   session payload, metadata, credentials, or personal data. The large fixture is
   generated deterministically and checked in so non-Node clients can consume it.
+
+# Issue #7 decisions
+
+- Define the supported external Codex boundary as clients sharing one explicitly
+  configured App Server Unix control socket. Require `AGENT_HOST_CODEX_TRANSPORT=control`
+  plus an absolute `AGENT_HOST_CODEX_SOCKET`; do not discover sockets, support network
+  URLs, or manage the external daemon lifecycle.
+- Subscribe only to IDs returned by `thread/loaded/list`. Persisted-only records remain
+  visible without actions, and per-thread resume failures do not degrade unrelated
+  loaded threads.
+- Model provenance as `owned-app-server` or `shared-control-socket`, not session or
+  approval ownership. Shared approvals are generation-scoped, first-response-wins
+  interactions; agent-host never auto-cancels expired shared approvals or answers
+  unsupported shared server requests.
+- Treat the connection generation as the validity boundary for RPC responses,
+  notifications, subscriptions, discovery results, and approval IDs. Disconnects
+  preserve identity but atomically set status to unknown and disable every action.
+- In control mode, keep process-detected Codex records raw-only. This prevents a second
+  canonical record for the configured live transport while retaining unsupported
+  process evidence in the explicit raw view.

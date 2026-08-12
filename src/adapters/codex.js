@@ -1,4 +1,6 @@
 import { CodexRpcClient } from "./codex-rpc.js";
+import { noCapabilities } from "../core/types.js";
+import { isDeepStrictEqual } from "node:util";
 
 const APPROVAL_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -46,14 +48,27 @@ export class CodexAdapter {
   #approvalTimeoutMs;
   #now;
   #recentMs;
+  #mode;
+  #connectionGeneration = 0;
+  #subscriptions = new Map();
+  #directInput = new Map();
+  #loadedThreads = new Map();
+  #changeHandlers = new Set();
 
   constructor(options = {}) {
+    this.#mode = options.mode ?? "owned";
     this.#client = options.client ?? new CodexRpcClient(options.rpc);
     this.#approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
     this.#now = options.now ?? Date.now;
     this.#recentMs = options.recentMs ?? DEFAULT_RECENT_MS;
     this.#client.onServerRequest?.((message) => this.#onServerRequest(message));
     this.#client.onNotification?.((message) => this.#onNotification(message));
+    this.#client.onStateChange?.((event) => this.#onStateChange(event));
+  }
+
+  onChange(handler) {
+    this.#changeHandlers.add(handler);
+    return () => this.#changeHandlers.delete(handler);
   }
 
   async discover(options = {}) {
@@ -61,7 +76,18 @@ export class CodexAdapter {
       options.signal?.throwIfAborted();
       await this.#ensureStarted();
       options.signal?.throwIfAborted();
+      const generation = this.#connectionGeneration;
+      if (this.#mode === "control") await this.#syncLoadedThreads(options.signal);
       const threads = await this.#listThreads(DEFAULT_RECENT_LIMIT, options.signal);
+      if (this.#mode === "control" && generation !== this.#connectionGeneration) {
+        throw new Error("Codex control connection changed during discovery");
+      }
+      if (this.#mode === "control") {
+        const known = new Set(threads.map((thread) => thread.id));
+        for (const thread of this.#subscribedThreadRecords()) {
+          if (!known.has(thread.id)) threads.push(thread);
+        }
+      }
       const now = new Date().toISOString();
       return threads.map((thread) => this.#mapThread(thread, now));
     } catch (error) {
@@ -84,6 +110,9 @@ export class CodexAdapter {
     const title = thread.name ?? thread.preview ?? thread.agentNickname ?? thread.id;
     const lastActivityAt = codexTimestamp(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt);
     const mappedStatus = mapStatus(status, approvals.length > 0);
+    const controllable = this.#mode === "owned"
+      || this.#subscriptions.get(thread.id) === this.#connectionGeneration;
+    const canPrompt = this.#mode === "owned" || (controllable && this.#directInput.get(thread.id) === true);
     return {
       id: `codex:${thread.id}`,
       provider: "codex",
@@ -91,13 +120,13 @@ export class CodexAdapter {
       name: String(title),
       status: mappedStatus,
       capabilities: {
-        prompt: true,
+        prompt: canPrompt,
         sendKeys: false,
-        approve: approvals.length > 0,
-        reject: approvals.length > 0,
-        interrupt: status?.type === "active" || this.#activeTurns.has(thread.id),
+        approve: controllable && approvals.length > 0,
+        reject: controllable && approvals.length > 0,
+        interrupt: controllable && (status?.type === "active" || this.#activeTurns.has(thread.id)),
         focus: false,
-        read: true,
+        read: controllable,
       },
       cwd: thread.cwd,
       sessionId: thread.id,
@@ -108,13 +137,17 @@ export class CodexAdapter {
       discovery: {
         kind: "native",
         confidence: "high",
+        provenance: this.#mode === "control" ? "shared-control-socket" : "owned-app-server",
         visibility: mappedStatus === "working" || mappedStatus === "blocked"
           ? "active"
           : !lastActivityAt || this.#now() - Date.parse(lastActivityAt) <= this.#recentMs
             ? "recent"
             : "historical",
       },
-      metadata: { codex: thread },
+      metadata: {
+        codex: thread,
+        ...(this.#mode === "control" ? { transportGeneration: this.#connectionGeneration } : {}),
+      },
       discoveredAt: now,
       updatedAt: now,
     };
@@ -125,8 +158,9 @@ export class CodexAdapter {
     try {
       await this.#ensureStarted();
       const threadId = agent.sessionId ?? agent.target;
-      await this.#client.request("thread/resume", { threadId });
-      const activeTurnId = this.#activeTurns.get(threadId);
+      const generation = this.#assertControllable(threadId, "prompt");
+      if (this.#mode === "owned") await this.#client.request("thread/resume", { threadId });
+      const activeTurnId = this.#activeTurns.get(threadId) ?? await this.#findActiveTurn(threadId, generation);
       let result;
       if (activeTurnId) {
         try {
@@ -134,19 +168,20 @@ export class CodexAdapter {
             threadId,
             expectedTurnId: activeTurnId,
             input: [{ type: "text", text }],
-          });
-        } catch {
+          }, this.#actionOptions(generation));
+        } catch (error) {
           this.#activeTurns.delete(threadId);
+          if (this.#mode === "control") throw error;
           result = await this.#client.request("turn/start", {
             threadId,
             input: [{ type: "text", text }],
-          });
+          }, this.#actionOptions(generation));
         }
       } else {
         result = await this.#client.request("turn/start", {
           threadId,
           input: [{ type: "text", text }],
-        });
+        }, this.#actionOptions(generation));
       }
       const turnId = result?.turn?.id ?? result?.turnId;
       if (turnId) this.#activeTurns.set(threadId, turnId);
@@ -168,9 +203,14 @@ export class CodexAdapter {
     try {
       await this.#ensureStarted();
       const threadId = agent.sessionId ?? agent.target;
-      const turnId = this.#activeTurns.get(threadId) ?? await this.#findActiveTurn(threadId);
+      const generation = this.#assertControllable(threadId, "interrupt");
+      const turnId = this.#activeTurns.get(threadId) ?? await this.#findActiveTurn(threadId, generation);
       if (!turnId) return this.#fail(agent, "interrupt", "no active turn found");
-      const result = await this.#client.request("turn/interrupt", { threadId, turnId });
+      const result = await this.#client.request(
+        "turn/interrupt",
+        { threadId, turnId },
+        this.#actionOptions(generation),
+      );
       this.#activeTurns.delete(threadId);
       return { ok: true, agentId: agent.id, action: "interrupt", data: result };
     } catch (error) {
@@ -182,7 +222,12 @@ export class CodexAdapter {
     try {
       await this.#ensureStarted();
       const threadId = agent.sessionId ?? agent.target;
-      const result = await this.#client.request("thread/read", { threadId, includeTurns: true });
+      const generation = this.#assertControllable(threadId, "read");
+      const result = await this.#client.request(
+        "thread/read",
+        { threadId, includeTurns: true },
+        this.#actionOptions(generation),
+      );
       return { ok: true, agentId: agent.id, action: "read", data: result };
     } catch (error) {
       return this.#fail(agent, "read", error);
@@ -196,6 +241,10 @@ export class CodexAdapter {
       for (const entry of this.#pendingApprovals.values()) clearTimeout(entry.timer);
       this.#pendingApprovals.clear();
       this.#activeTurns.clear();
+      this.#status.clear();
+      this.#subscriptions.clear();
+      this.#directInput.clear();
+      this.#loadedThreads.clear();
     }
   }
 
@@ -203,6 +252,88 @@ export class CodexAdapter {
     if (this.#started) return;
     await this.#client.start();
     this.#started = true;
+    this.#connectionGeneration = this.#client.generation ?? (this.#connectionGeneration || 1);
+  }
+
+  async #syncLoadedThreads(signal) {
+    const generation = this.#connectionGeneration;
+    const loaded = [];
+    let cursor = null;
+    let complete = false;
+    for (let page = 0; page < 10; page += 1) {
+      const result = await this.#client.request(
+        "thread/loaded/list",
+        cursor ? { cursor } : {},
+        { signal },
+      );
+      loaded.push(...(result?.data ?? result?.threads ?? []));
+      cursor = result?.nextCursor ?? null;
+      if (!cursor) {
+        complete = true;
+        break;
+      }
+    }
+    const loadedIds = new Set(loaded.map(loadedThreadId).filter(Boolean));
+    for (const threadId of complete ? [...this.#subscriptions.keys()] : []) {
+      if (!loadedIds.has(threadId)) {
+        this.#subscriptions.delete(threadId);
+        this.#directInput.delete(threadId);
+        this.#loadedThreads.delete(threadId);
+        this.#clearApprovalsForThread(threadId);
+        this.#status.delete(threadId);
+        this.#activeTurns.delete(threadId);
+      }
+    }
+    for (const summary of loaded) {
+      const threadId = loadedThreadId(summary);
+      if (!threadId) continue;
+      if (this.#subscriptions.get(threadId) === generation) {
+        if (typeof summary === "object") this.#rememberThread(summary.thread ?? summary, false);
+        continue;
+      }
+      this.#subscriptions.set(threadId, generation);
+      try {
+        const resumed = await this.#client.request("thread/resume", {
+          threadId,
+          excludeTurns: true,
+        }, { signal });
+        if (generation !== this.#connectionGeneration) return;
+        this.#rememberThread(resumed?.thread ?? (typeof summary === "object" ? summary.thread ?? summary : undefined));
+      } catch (error) {
+        this.#subscriptions.delete(threadId);
+        this.#directInput.delete(threadId);
+        this.#loadedThreads.delete(threadId);
+        this.#clearApprovalsForThread(threadId);
+        this.#status.delete(threadId);
+        this.#activeTurns.delete(threadId);
+        signal?.throwIfAborted();
+        if (generation !== this.#connectionGeneration) throw error;
+      }
+    }
+  }
+
+  #subscribedThreadRecords() {
+    const records = [];
+    for (const [threadId, generation] of this.#subscriptions) {
+      if (generation !== this.#connectionGeneration) continue;
+      records.push({
+        ...this.#loadedThreads.get(threadId),
+        id: threadId,
+        status: this.#status.get(threadId) ?? this.#loadedThreads.get(threadId)?.status ?? { type: "idle" },
+      });
+    }
+    return records;
+  }
+
+  #rememberThread(thread, rememberStatus = true) {
+    const threadId = loadedThreadId(thread);
+    if (!threadId) return;
+    const normalized = { ...thread, id: threadId };
+    this.#loadedThreads.set(threadId, { ...this.#loadedThreads.get(threadId), ...normalized });
+    if (rememberStatus && thread.status) this.#status.set(threadId, thread.status);
+    if (thread.canAcceptDirectInput !== undefined) {
+      this.#directInput.set(threadId, Boolean(thread.canAcceptDirectInput));
+    }
   }
 
   async #listThreads(maxThreads, signal) {
@@ -223,8 +354,13 @@ export class CodexAdapter {
     return all.slice(0, maxThreads);
   }
 
-  async #findActiveTurn(threadId) {
-    const result = await this.#client.request("thread/read", { threadId, includeTurns: true });
+  async #findActiveTurn(threadId, generation) {
+    const result = await this.#client.request(
+      "thread/read",
+      { threadId, includeTurns: true },
+      this.#actionOptions(generation),
+    );
+    this.#rememberThread(result?.thread);
     const turns = result?.thread?.turns ?? [];
     const active = turns.findLast((turn) => turn?.status === "inProgress" || turn?.status?.type === "inProgress");
     if (active?.id) this.#activeTurns.set(threadId, active.id);
@@ -232,49 +368,121 @@ export class CodexAdapter {
   }
 
   #onServerRequest(message) {
+    const generation = message.connectionGeneration ?? this.#connectionGeneration;
+    if (generation !== this.#connectionGeneration) return;
     if (!APPROVAL_METHODS.has(message.method)) {
-      this.#client.respondError?.(message.id, -32601, `Unsupported server request: ${message.method}`);
+      if (this.#mode === "owned") {
+        this.#client.respondError?.(message.id, -32601, `Unsupported server request: ${message.method}`);
+      }
       return;
     }
     const threadId = message.params?.threadId;
     if (!threadId) {
-      this.#client.respondError?.(message.id, -32602, "Approval request is missing threadId");
+      if (this.#mode === "owned") {
+        this.#client.respondError?.(message.id, -32602, "Approval request is missing threadId");
+      }
       return;
     }
-    const approvalId = String(message.id);
+    if (this.#mode === "control" && this.#subscriptions.get(threadId) !== generation) {
+      return;
+    }
+    const approvalId = this.#mode === "control"
+      ? `${generation}:${threadId}:${message.id}`
+      : String(message.id);
     this.#deleteApproval(approvalId);
-    const entry = { approvalId, rawId: message.id, message, receivedAt: Date.now() };
+    const entry = { approvalId, rawId: message.id, generation, message, receivedAt: Date.now() };
     entry.timer = setTimeout(() => {
       if (this.#pendingApprovals.get(approvalId) !== entry) return;
-      try { this.#client.respond(entry.rawId, { decision: "cancel" }); }
+      try {
+        if (this.#mode === "owned" && entry.generation === this.#connectionGeneration) {
+          this.#client.respond(entry.rawId, { decision: "cancel" });
+        }
+      }
       catch {}
-      finally { this.#pendingApprovals.delete(approvalId); }
+      finally {
+        this.#pendingApprovals.delete(approvalId);
+        this.#emitChange();
+      }
     }, this.#approvalTimeoutMs);
     entry.timer.unref?.();
     this.#pendingApprovals.set(approvalId, entry);
+    this.#emitChange();
   }
 
   #onNotification(message) {
+    const generation = message.connectionGeneration ?? this.#connectionGeneration;
+    if (generation !== this.#connectionGeneration) return;
     const params = message.params ?? {};
+    const threadId = params.threadId ?? params.thread?.id;
+    let changed = false;
+    if (this.#mode === "control" && threadId
+      && this.#subscriptions.get(threadId) !== generation) return;
     if (message.method === "thread/status/changed" && params.threadId) {
+      changed = !isDeepStrictEqual(this.#status.get(params.threadId), params.status);
       this.#status.set(params.threadId, params.status);
     }
     if (message.method === "thread/started" && params.thread?.id) {
-      this.#status.set(params.thread.id, params.thread.status);
+      const previousThread = this.#loadedThreads.get(params.thread.id);
+      const previousStatus = this.#status.get(params.thread.id);
+      const previousDirectInput = this.#directInput.get(params.thread.id);
+      this.#rememberThread(params.thread);
+      changed = changed
+        || !isDeepStrictEqual(previousThread, this.#loadedThreads.get(params.thread.id))
+        || !isDeepStrictEqual(previousStatus, this.#status.get(params.thread.id))
+        || previousDirectInput !== this.#directInput.get(params.thread.id);
     }
     if (message.method === "turn/started" && params.threadId && params.turn?.id) {
+      const activeStatus = { type: "active", activeFlags: [] };
+      changed = changed
+        || this.#activeTurns.get(params.threadId) !== params.turn.id
+        || !isDeepStrictEqual(this.#status.get(params.threadId), activeStatus);
       this.#activeTurns.set(params.threadId, params.turn.id);
-      this.#status.set(params.threadId, { type: "active", activeFlags: [] });
+      this.#status.set(params.threadId, activeStatus);
     }
     if (TERMINAL_TURN_METHODS.has(message.method) && params.threadId) {
+      const nextStatus = {
+        type: params.turn?.status === "failed" || message.method === "turn/failed" ? "systemError" : "idle",
+      };
+      const approvalCount = this.#pendingApprovals.size;
+      changed = changed
+        || this.#activeTurns.has(params.threadId)
+        || !isDeepStrictEqual(this.#status.get(params.threadId), nextStatus);
       this.#activeTurns.delete(params.threadId);
-      const failed = params.turn?.status === "failed" || message.method === "turn/failed";
-      this.#status.set(params.threadId, { type: failed ? "systemError" : "idle" });
+      this.#status.set(params.threadId, nextStatus);
       this.#clearApprovalsForThread(params.threadId);
+      changed = changed || approvalCount !== this.#pendingApprovals.size;
     }
     if (message.method === "serverRequest/resolved" && params.requestId !== undefined) {
-      this.#deleteApproval(String(params.requestId));
+      for (const [approvalId, entry] of this.#pendingApprovals) {
+        if (entry.generation === generation && String(entry.rawId) === String(params.requestId)) {
+          changed = this.#deleteApproval(approvalId) || changed;
+        }
+      }
     }
+    if (changed) this.#emitChange();
+  }
+
+  #onStateChange(event) {
+    if (event.state === "connected") {
+      if (event.generation !== this.#connectionGeneration) this.#clearConnectionState();
+      this.#connectionGeneration = event.generation;
+      this.#started = true;
+      return;
+    }
+    if (event.state !== "disconnected" || event.generation !== this.#connectionGeneration) return;
+    this.#started = false;
+    this.#clearConnectionState();
+    this.#emitChange({ type: "disconnected", error: event.error });
+  }
+
+  #clearConnectionState() {
+    for (const entry of this.#pendingApprovals.values()) clearTimeout(entry.timer);
+    this.#pendingApprovals.clear();
+    this.#subscriptions.clear();
+    this.#directInput.clear();
+    this.#loadedThreads.clear();
+    this.#activeTurns.clear();
+    this.#status.clear();
   }
 
   #approvalsForThread(threadId) {
@@ -290,13 +498,14 @@ export class CodexAdapter {
   #deleteApproval(id) {
     const entry = this.#pendingApprovals.get(id);
     if (entry) clearTimeout(entry.timer);
-    this.#pendingApprovals.delete(id);
+    return this.#pendingApprovals.delete(id);
   }
 
   async #resolveApproval(agent, payload, decision, action) {
     try {
       await this.#ensureStarted();
       const threadId = agent.sessionId ?? agent.target;
+      this.#assertControllable(threadId, action);
       const approvals = this.#approvalsForThread(threadId);
       const requestedId = payload?.approvalId !== undefined ? String(payload.approvalId) : undefined;
       const entry = requestedId
@@ -308,8 +517,13 @@ export class CodexAdapter {
           : "no matching approval is pending";
         return this.#fail(agent, action, message);
       }
+      if (entry.generation !== this.#connectionGeneration) {
+        this.#deleteApproval(entry.approvalId);
+        return this.#fail(agent, action, "approval belongs to a stale connection");
+      }
       this.#client.respond(entry.rawId, { decision });
       this.#deleteApproval(entry.approvalId);
+      this.#emitChange();
       return { ok: true, agentId: agent.id, action, data: { approvalId: entry.approvalId, decision } };
     } catch (error) {
       return this.#fail(agent, action, error);
@@ -319,9 +533,60 @@ export class CodexAdapter {
   #fail(agent, action, error) {
     return { ok: false, agentId: agent.id, action, message: String(error?.message ?? error) };
   }
+
+  #assertControllable(threadId, action, expectedGeneration = this.#connectionGeneration) {
+    if (this.#mode !== "control") return undefined;
+    if (!this.#started || expectedGeneration !== this.#connectionGeneration) {
+      throw new Error(`${action} is unavailable because the Codex connection changed`);
+    }
+    if (this.#subscriptions.get(threadId) !== this.#connectionGeneration) {
+      throw new Error(`${action} is unavailable because the thread is not subscribed on the current connection`);
+    }
+    if (action === "prompt" && this.#directInput.get(threadId) !== true) {
+      throw new Error("prompt is unavailable because the thread cannot accept direct input");
+    }
+    return this.#connectionGeneration;
+  }
+
+  #actionOptions(generation) {
+    return this.#mode === "control" ? { expectedGeneration: generation } : undefined;
+  }
+
+  markStale(agent) {
+    return {
+      ...agent,
+      status: "unknown",
+      capabilities: noCapabilities(),
+      activeTurnId: undefined,
+      pendingApprovals: [],
+      discovery: {
+        ...agent.discovery,
+        confidence: "low",
+        visibility: agent.discovery?.visibility === "active" ? "recent" : agent.discovery?.visibility,
+      },
+    };
+  }
+
+  isDiscoveryCurrent(agents) {
+    if (this.#mode !== "control") return true;
+    return this.#started && agents.every(
+      (agent) => agent.metadata?.transportGeneration === this.#connectionGeneration,
+    );
+  }
+
+  #emitChange(event = { type: "changed" }) {
+    for (const handler of this.#changeHandlers) {
+      try { handler(event); }
+      catch {}
+    }
+  }
 }
 
 function codexTimestamp(value) {
   if (!Number.isFinite(value)) return undefined;
   return new Date(value * 1_000).toISOString();
+}
+
+function loadedThreadId(thread) {
+  return typeof thread === "string" ? thread : thread?.id ?? thread?.threadId;
 }

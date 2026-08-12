@@ -44,6 +44,7 @@ export function agentSummary(agent) {
       kind: agent.discovery.kind,
       confidence: agent.discovery.confidence,
       visibility: agent.discovery.visibility,
+      provenance: agent.discovery.provenance,
       duplicateOf: agent.discovery.duplicateOf,
     }) : undefined,
   });
