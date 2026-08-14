@@ -12,6 +12,7 @@ import { createMacosServiceController } from "./macos-service.js";
 import {
   ensurePrivateDirectory,
   readPrivateFile,
+  readPrivateFileTail,
   readOrCreateToken,
   rotateToken,
   writePrivateFileAtomic,
@@ -26,6 +27,7 @@ import { publicReleaseInfo } from "./release-info.js";
 
 const DEFAULT_CLI_PATH = fileURLToPath(new URL("./cli.js", import.meta.url));
 const PACKAGED_DASHBOARD_PATH = fileURLToPath(new URL("../dashboard", import.meta.url));
+const OFFLINE_LOG_TAIL_BYTES = 4 * 1024 * 1024;
 
 export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
   const env = dependencies.env ?? process.env;
@@ -357,7 +359,7 @@ async function readRecentLogs(logFile) {
   const records = [];
   for (const path of [`${logFile}.2`, `${logFile}.1`, logFile]) {
     let content;
-    try { content = await readPrivateFile(path); }
+    try { content = await readPrivateFileTail(path, OFFLINE_LOG_TAIL_BYTES); }
     catch (error) { if (error?.code === "ENOENT") continue; else throw error; }
     for (const line of content.split("\n")) {
       if (!line) continue;
