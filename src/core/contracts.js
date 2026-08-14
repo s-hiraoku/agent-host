@@ -63,7 +63,8 @@ function approvalContextView(context) {
 }
 
 function publicApprovalPath(value) {
-  if (typeof value !== "string" || !value || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
+  if (typeof value !== "string" || !value
+    || /[\u0000-\u001f\u007f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/u.test(value)) return undefined;
   const portable = sep === "\\" ? value.replaceAll("\\", "/") : value;
   if (portable.startsWith("/") || /^[A-Za-z]:/.test(portable)) return undefined;
   const segments = portable.split("/").filter((segment) => segment && segment !== ".");

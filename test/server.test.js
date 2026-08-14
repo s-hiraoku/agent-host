@@ -44,6 +44,15 @@ test("project identity preserves significant cwd whitespace", () => {
     }],
   });
   assert.equal(unknownKind.capabilities.approve, false);
+  const bidiPath = agentSummary({
+    ...base,
+    capabilities: { approve: true },
+    pendingApprovals: [{
+      approvalId: "bidi-path", method: "item/fileChange/requestApproval", actionable: true,
+      context: { kind: "file-change", files: [{ path: "invoice\u202efdp.exe", kind: "update" }] },
+    }],
+  });
+  assert.equal(bidiPath.capabilities.approve, false);
 });
 
 test("serves the pinned dashboard and same-origin API alias without weakening authentication", async (t) => {

@@ -45,7 +45,8 @@ function pendingApprovalView(entry) {
 }
 
 function publicFilePath(value, cwd) {
-  if (typeof value !== "string" || !value || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
+  if (typeof value !== "string" || !value
+    || /[\u0000-\u001f\u007f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/u.test(value)) return undefined;
   const raw = value;
   if (/^[A-Za-z]:/.test(raw)) return undefined;
   const rawSegments = sep === "\\" ? raw.split(/[\\/]/) : raw.split("/");
