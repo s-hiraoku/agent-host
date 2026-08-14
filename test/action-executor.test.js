@@ -8,6 +8,14 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("action executor rejects invalid queue limits", () => {
+  const registry = { async action() { return { ok: true }; } };
+  for (const value of [Infinity, NaN, "2", 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => new ActionExecutor(registry, { maxActionsPerAgent: value }), /positive safe integer/);
+    assert.throws(() => new ActionExecutor(registry, { maxActionsGlobal: value }), /positive safe integer/);
+  }
+});
+
 test("action executor bounds per-agent and global queues while coalescing idempotent retries", async () => {
   const gate = deferred();
   let calls = 0;
