@@ -30,6 +30,7 @@ function semanticHealth(health) {
     status: health.status,
     agentCount: health.agentCount,
     error: health.error,
+    circuit: health.circuit,
   };
 }
 
@@ -68,6 +69,15 @@ export class AgentRegistry {
   #revision = 0;
   #adapterUnsubscribers = [];
   #adapterRefreshQueued = false;
+  #operations;
+  #now;
+  #circuitBaseMs;
+  #circuitMaxMs;
+  #circuitThreshold;
+  #forcedProbeMinMs;
+  #circuits = new Map();
+  #currentRefreshForced = false;
+  #forcedFollowupPromise;
   events = new AgentEventBus();
 
   constructor(adapters, options = {}) {
@@ -81,6 +91,23 @@ export class AgentRegistry {
       throw new RangeError("historyTtlMs must be a positive integer");
     }
     this.#historyTtlMs = historyTtlMs;
+    this.#operations = options.operations;
+    this.#now = options.now ?? Date.now;
+    this.#circuitBaseMs = options.circuitBaseMs ?? 1_000;
+    this.#circuitMaxMs = options.circuitMaxMs ?? 60_000;
+    this.#circuitThreshold = options.circuitThreshold ?? 3;
+    this.#forcedProbeMinMs = options.forcedProbeMinMs ?? 1_000;
+    for (const [name, value] of Object.entries({
+      circuitBaseMs: this.#circuitBaseMs,
+      circuitMaxMs: this.#circuitMaxMs,
+      circuitThreshold: this.#circuitThreshold,
+      forcedProbeMinMs: this.#forcedProbeMinMs,
+    })) {
+      if (!Number.isInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive integer`);
+    }
+    if (this.#circuitMaxMs < this.#circuitBaseMs) {
+      throw new RangeError("circuitMaxMs must be greater than or equal to circuitBaseMs");
+    }
     this.#closedOutcome = new Promise((resolve) => this.#closeController.signal.addEventListener(
       "abort",
       () => resolve({ status: "closed" }),
@@ -96,21 +123,32 @@ export class AgentRegistry {
         durationMs: null,
         agentCount: 0,
         error: null,
+        circuit: { phase: "closed", consecutiveFailures: 0, nextAttemptAt: null },
+      });
+      this.#circuits.set(adapter.id, {
+        phase: "closed", consecutiveFailures: 0, nextAttemptAt: 0, probeInFlight: false, lastForcedProbeAt: -Infinity,
       });
       const unsubscribe = adapter.onChange?.((event) => {
         if (this.#closed) return;
         if (event?.type === "disconnected") {
-          this.#applyOutcome({
+          this.#operations?.logger.log("warn", "adapter.disconnected", {
+            component: "registry", adapter: adapter.id, outcome: "failure", code: event.error?.code,
+          });
+          const outcome = {
             adapterId: adapter.id,
             attemptedAt: new Date().toISOString(),
             durationMs: 0,
             status: "error",
             markStale: true,
             error: event.error ?? new Error("adapter transport disconnected"),
-          });
+          };
+          if (!this.#adapterFlights.has(adapter.id)) {
+            this.#recordCircuitOutcome(adapter.id, outcome, false);
+          }
+          this.#applyOutcome(outcome);
         }
         if (this.#refreshPromise) this.#adapterRefreshQueued = true;
-        else void this.refresh();
+        else void this.refresh({ force: false });
       });
       if (typeof unsubscribe === "function") this.#adapterUnsubscribers.push(unsubscribe);
     }
@@ -163,6 +201,7 @@ export class AgentRegistry {
     return [...this.#adapterHealth.values()].map((health) => ({
       ...health,
       error: health.error ? { ...health.error } : null,
+      circuit: { ...health.circuit },
     }));
   }
   readiness() {
@@ -176,25 +215,54 @@ export class AgentRegistry {
     };
   }
 
-  refresh() {
+  refresh(options = {}) {
     if (this.#closed) return Promise.resolve(this.list());
-    if (this.#refreshPromise) return this.#refreshPromise;
-    this.#refreshPromise = this.#runRefresh().finally(() => {
+    const force = options.force ?? true;
+    if (this.#refreshPromise) {
+      if (force && !this.#currentRefreshForced) {
+        if (!this.#forcedFollowupPromise) {
+          let followup;
+          followup = this.#refreshPromise.then(() => {
+            if (this.#closed) return this.list();
+            if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
+            return this.refresh({ force: true });
+          }).finally(() => {
+            if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
+          });
+          this.#forcedFollowupPromise = followup;
+        }
+        return this.#forcedFollowupPromise;
+      }
+      return this.#refreshPromise;
+    }
+    this.#currentRefreshForced = force;
+    const startedAt = this.#now();
+    this.#refreshPromise = this.#runRefresh(force).finally(() => {
+      this.#operations?.metrics.observe("refresh_duration_ms", Math.max(0, this.#now() - startedAt));
       this.#initialLoading = false;
       this.#refreshPromise = undefined;
+      this.#currentRefreshForced = false;
       if (this.#adapterRefreshQueued && !this.#closed) {
         this.#adapterRefreshQueued = false;
-        queueMicrotask(() => { void this.refresh(); });
+        queueMicrotask(() => { void this.refresh({ force: false }); });
       }
     });
     return this.#refreshPromise;
   }
 
-  async #runRefresh() {
+  async #runRefresh(force) {
     await Promise.all(
       [...this.#adapters.values()].map(async (adapter) => {
-        const outcome = await this.#discoverAdapter(adapter);
-        if (!this.#closed) this.#applyOutcome(outcome);
+        const admission = this.#admitAdapter(adapter.id, force);
+        if (!admission.allowed) {
+          this.#operations?.metrics.increment("circuit_skips", { adapter: adapter.id });
+          return;
+        }
+        const outcome = this.#normalizeOutcome(adapter, await this.#discoverAdapter(adapter));
+        if (!this.#closed) {
+          this.#recordCircuitOutcome(adapter.id, outcome, admission.probe);
+          this.#applyOutcome(outcome);
+        }
       }),
     );
     return this.list();
@@ -202,15 +270,6 @@ export class AgentRegistry {
 
   #applyOutcome(outcome) {
     const adapter = this.#adapters.get(outcome.adapterId);
-    if (outcome.status === "success" && adapter?.isDiscoveryCurrent
-      && !adapter.isDiscoveryCurrent(outcome.agents)) {
-      outcome = {
-        ...outcome,
-        status: "error",
-        markStale: true,
-        error: new Error("adapter discovery used a stale transport"),
-      };
-    }
     const previousCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
     const previousRaw = this.listRaw().map(semanticAgent);
     const previousOverlay = historyOverlay(previousRaw, this.#historyAgents);
@@ -275,6 +334,82 @@ export class AgentRegistry {
         snapshotRevision: this.#revision,
       });
     }
+    const level = outcome.status === "success" ? "debug" : "warn";
+    const loggedOutcome = outcome.status === "error" ? "failure" : outcome.status;
+    this.#operations?.logger.log(level, "adapter.refresh", {
+      component: "registry",
+      adapter: outcome.adapterId,
+      outcome: loggedOutcome,
+      code: health.error?.code,
+      durationMs: outcome.durationMs,
+    });
+  }
+
+  #normalizeOutcome(adapter, outcome) {
+    if (outcome.status !== "success" || !adapter?.isDiscoveryCurrent
+      || adapter.isDiscoveryCurrent(outcome.agents)) return outcome;
+    return {
+      ...outcome,
+      status: "error",
+      markStale: true,
+      error: new Error("adapter discovery used a stale transport"),
+    };
+  }
+
+  #admitAdapter(adapterId, force) {
+    const circuit = this.#circuits.get(adapterId);
+    const now = this.#now();
+    if (circuit.probeInFlight) return { allowed: false, probe: false };
+    if (force) {
+      if (circuit.consecutiveFailures > 0 && now - circuit.lastForcedProbeAt < this.#forcedProbeMinMs) {
+        return { allowed: false, probe: false };
+      }
+      const probe = circuit.phase !== "closed" || circuit.consecutiveFailures > 0;
+      if (probe) {
+        circuit.phase = "half_open";
+        circuit.probeInFlight = true;
+        circuit.lastForcedProbeAt = now;
+      }
+      return { allowed: true, probe };
+    }
+    if (now < circuit.nextAttemptAt) return { allowed: false, probe: false };
+    if (circuit.phase === "open") {
+      circuit.phase = "half_open";
+      circuit.probeInFlight = true;
+      return { allowed: true, probe: true };
+    }
+    return { allowed: true, probe: false };
+  }
+
+  #recordCircuitOutcome(adapterId, outcome, probe) {
+    const circuit = this.#circuits.get(adapterId);
+    if (outcome.status === "success") {
+      if (circuit.consecutiveFailures > 0) {
+        this.#operations?.metrics.increment("adapter_reconnects", { adapter: adapterId });
+      }
+      circuit.phase = "closed";
+      circuit.consecutiveFailures = 0;
+      circuit.nextAttemptAt = 0;
+      circuit.probeInFlight = false;
+      if (probe) this.#operations?.metrics.increment("circuit_probes", { adapter: adapterId, outcome: "success" });
+      return;
+    }
+    if (outcome.reusedTimedOutFlight) {
+      circuit.phase = circuit.consecutiveFailures >= this.#circuitThreshold ? "open" : "closed";
+      circuit.probeInFlight = false;
+      circuit.lastForcedProbeAt = -Infinity;
+      return;
+    }
+    circuit.consecutiveFailures += 1;
+    const delay = Math.min(this.#circuitMaxMs, this.#circuitBaseMs * (2 ** (circuit.consecutiveFailures - 1)));
+    circuit.nextAttemptAt = this.#now() + delay;
+    circuit.phase = circuit.consecutiveFailures >= this.#circuitThreshold ? "open" : "closed";
+    circuit.probeInFlight = false;
+    this.#operations?.metrics.increment("adapter_failures", { adapter: adapterId });
+    if (probe) this.#operations?.metrics.increment("circuit_probes", {
+      adapter: adapterId,
+      outcome: outcome.status === "timeout" ? "timeout" : "failure",
+    });
   }
 
   async #loadHistory() {
@@ -334,6 +469,7 @@ export class AgentRegistry {
         attemptedAt: flight.startedAtIso,
         durationMs: Date.now() - flight.startedAt,
         status: "timeout",
+        reusedTimedOutFlight: true,
       };
     }
     if (!flight) {
@@ -378,6 +514,12 @@ export class AgentRegistry {
   }
 
   #healthForOutcome(previous, outcome) {
+    const circuit = this.#circuits.get(outcome.adapterId);
+    const circuitView = {
+      phase: circuit.phase,
+      consecutiveFailures: circuit.consecutiveFailures,
+      nextAttemptAt: circuit.nextAttemptAt ? new Date(circuit.nextAttemptAt).toISOString() : null,
+    };
     if (outcome.status === "success") {
       return {
         id: outcome.adapterId,
@@ -387,17 +529,20 @@ export class AgentRegistry {
         durationMs: outcome.durationMs,
         agentCount: outcome.agents.length,
         error: null,
+        circuit: circuitView,
       };
     }
     const error = outcome.status === "timeout"
       ? { code: "discovery_timeout", message: `discovery exceeded ${this.#adapterTimeoutMs}ms` }
       : sanitizeError(outcome.error);
+    const safeError = this.#operations?.redact?.(error) ?? error;
     return {
       ...previous,
       status: outcome.status,
       lastAttemptAt: outcome.attemptedAt,
       durationMs: outcome.durationMs,
-      error,
+      error: safeError,
+      circuit: circuitView,
     };
   }
 
@@ -414,7 +559,7 @@ export class AgentRegistry {
     this.#historyControllers.clear();
   }
 
-  async action(id, action, payload) {
+  async action(id, action, payload, options = {}) {
     const agent = this.get(id);
     if (!agent) return { ok: false, code: "agent_not_found", agentId: id, action, message: "agent not found" };
     const adapter = this.#adapters.get(agent.source);
@@ -428,23 +573,46 @@ export class AgentRegistry {
 
     let result;
     try {
+      options.signal?.throwIfAborted();
+      const invoke = (() => {
       switch (action) {
-        case "prompt": result = await adapter.prompt(agent, String(payload?.text ?? "")); break;
-        case "send-keys": result = await adapter.sendKeys(agent, payload?.keys ?? []); break;
-        case "approve": result = await adapter.approve(agent, payload); break;
-        case "reject": result = await adapter.reject(agent, payload); break;
-        case "interrupt": result = await adapter.interrupt(agent); break;
-        case "focus": result = await adapter.focus(agent); break;
-        case "read": result = await adapter.read(agent); break;
+        case "prompt": return adapter.prompt(agent, String(payload?.text ?? ""), options);
+        case "send-keys": return adapter.sendKeys(agent, payload?.keys ?? [], options);
+        case "approve": return adapter.approve(agent, payload, options);
+        case "reject": return adapter.reject(agent, payload, options);
+        case "interrupt": return adapter.interrupt(agent, options);
+        case "focus": return adapter.focus(agent, options);
+        case "read": return adapter.read(agent, options);
       }
+      })();
+      if (!options.signal) result = await invoke;
+      else result = await Promise.race([
+        invoke,
+        new Promise((_, reject) => options.signal.addEventListener(
+          "abort", () => reject(options.signal.reason), { once: true },
+        )),
+      ]);
     } catch (error) {
       result = { ok: false, code: "action_failed", agentId: id, action, message: String(error?.message ?? error) };
     }
     const normalizedResult = result?.ok
       ? { ...result, ok: true, agentId: result.agentId ?? id, action: result.action ?? action }
       : result?.code
-        ? result
-        : { ...result, ok: false, code: "action_failed", agentId: id, action, message: result?.message ?? "action failed" };
+        ? {
+            ...result,
+            message: this.#operations?.redact?.({ message: result.message ?? "action failed" }).message
+              ?? result.message
+              ?? "action failed",
+          }
+        : {
+            ...result,
+            ok: false,
+            code: "action_failed",
+            agentId: id,
+            action,
+            message: this.#operations?.redact?.({ message: result?.message ?? "action failed" }).message
+              ?? "action failed",
+          };
     this.events.emit({
       type: "agent.action",
       agentId: id,

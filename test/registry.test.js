@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentRegistry } from "../src/core/registry.js";
+import { OperationsContext } from "../src/operations/context.js";
 
 function deferred() {
   let resolve;
@@ -251,6 +252,8 @@ test("rejects discovery results from an obsolete adapter transport", async () =>
   assert.equal(registry.get("generation:1").status, "unknown");
   assert.equal(registry.get("generation:1").capabilities.prompt, false);
   assert.equal(registry.adapterHealth()[0].status, "error");
+  assert.equal(registry.adapterHealth()[0].circuit.consecutiveFailures, 1);
+  assert.notEqual(registry.adapterHealth()[0].circuit.nextAttemptAt, null);
   await registry.close();
 });
 
@@ -267,9 +270,9 @@ test("returns stable action error codes", async () => {
         capabilities: { prompt: true },
       }];
     },
-    async prompt() { throw new Error("backend unavailable"); },
+    async prompt() { return { ok: false, message: "backend top-secret" }; },
   };
-  const registry = new AgentRegistry([throwing]);
+  const registry = new AgentRegistry([throwing], { operations: new OperationsContext({ secrets: ["top-secret"] }) });
   const events = [];
   registry.events.subscribe((event) => events.push(event));
   await registry.refresh();
@@ -278,7 +281,7 @@ test("returns stable action error codes", async () => {
   assert.equal((await registry.action("throwing:1", "missing")).code, "unknown_action");
   const failed = await registry.action("throwing:1", "prompt", { text: "x" });
   assert.equal(failed.code, "action_failed");
-  assert.equal(failed.message, "backend unavailable");
+  assert.equal(failed.message, "backend [REDACTED]");
   assert.equal(events.at(-1).type, "agent.action");
   assert.equal(events.at(-1).action, "prompt");
   assert.equal(events.at(-1).ok, false);
@@ -588,4 +591,102 @@ test("ignores non-cooperative discovery completion after shutdown", { timeout: 5
   await nextTurn();
   assert.deepEqual(registry.list(), []);
   assert.deepEqual(events, []);
+});
+
+test("adapter circuit backs off, opens, probes once, and recovers with a fake clock", async () => {
+  let clock = 0;
+  let calls = 0;
+  let failing = true;
+  const adapter = {
+    id: "fixture",
+    async discover() {
+      calls += 1;
+      if (failing) throw new Error("fixture failure");
+      return [];
+    },
+  };
+  const registry = new AgentRegistry([adapter], {
+    now: () => clock,
+    circuitBaseMs: 10,
+    circuitMaxMs: 40,
+    circuitThreshold: 3,
+    forcedProbeMinMs: 5,
+  });
+
+  await registry.refresh({ force: false });
+  clock = 10;
+  await registry.refresh({ force: false });
+  clock = 30;
+  await registry.refresh({ force: false });
+  assert.equal(calls, 3);
+  assert.equal(registry.adapterHealth()[0].circuit.phase, "open");
+
+  clock = 31;
+  await registry.refresh({ force: false });
+  assert.equal(calls, 3);
+  await registry.refresh({ force: true });
+  assert.equal(calls, 4);
+  assert.equal(registry.adapterHealth()[0].circuit.phase, "open");
+
+  failing = false;
+  clock += 5;
+  await registry.refresh({ force: true });
+  assert.equal(calls, 5);
+  assert.deepEqual(registry.adapterHealth()[0].circuit, {
+    phase: "closed", consecutiveFailures: 0, nextAttemptAt: null,
+  });
+  await registry.close();
+});
+
+test("explicit refresh queued during a scheduled refresh is not swallowed", async () => {
+  let calls = 0;
+  const gate = deferred();
+  const adapter = {
+    id: "fixture",
+    async discover() {
+      calls += 1;
+      if (calls === 1) await gate.promise;
+      return [];
+    },
+  };
+  const registry = new AgentRegistry([adapter]);
+  const scheduled = registry.refresh({ force: false });
+  const explicit = registry.refresh({ force: true });
+  gate.resolve();
+  await scheduled;
+  await explicit;
+  assert.equal(calls, 2);
+  await registry.close();
+});
+
+test("forced follow-up does not adopt itself when adapter change queues another refresh", async () => {
+  let calls = 0;
+  let onChange;
+  const firstGate = deferred();
+  const secondGate = deferred();
+  const adapter = {
+    id: "fixture",
+    onChange(handler) { onChange = handler; },
+    async discover() {
+      calls += 1;
+      if (calls === 1) await firstGate.promise;
+      if (calls === 2) await secondGate.promise;
+      return [];
+    },
+  };
+  const registry = new AgentRegistry([adapter]);
+  const scheduled = registry.refresh({ force: false });
+  onChange({ type: "changed" });
+  const explicit = registry.refresh({ force: true });
+  firstGate.resolve();
+  await scheduled;
+  await nextTurn();
+  secondGate.resolve();
+  await Promise.race([
+    explicit,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("forced refresh remained pending")), 100)),
+  ]);
+  await nextTurn();
+  assert.equal(calls, 3);
+  await registry.close();
 });

@@ -153,14 +153,14 @@ export class CodexAdapter {
     };
   }
 
-  async prompt(agent, text) {
+  async prompt(agent, text, options = {}) {
     if (!text.trim()) return this.#fail(agent, "prompt", "text is required");
     try {
       await this.#ensureStarted();
       const threadId = agent.sessionId ?? agent.target;
       const generation = this.#assertControllable(threadId, "prompt");
-      if (this.#mode === "owned") await this.#client.request("thread/resume", { threadId });
-      const activeTurnId = this.#activeTurns.get(threadId) ?? await this.#findActiveTurn(threadId, generation);
+      if (this.#mode === "owned") await this.#client.request("thread/resume", { threadId }, { signal: options.signal });
+      const activeTurnId = this.#activeTurns.get(threadId) ?? await this.#findActiveTurn(threadId, generation, options.signal);
       let result;
       if (activeTurnId) {
         try {
@@ -168,20 +168,21 @@ export class CodexAdapter {
             threadId,
             expectedTurnId: activeTurnId,
             input: [{ type: "text", text }],
-          }, this.#actionOptions(generation));
+          }, this.#actionOptions(generation, options.signal));
         } catch (error) {
+          if (options.signal?.aborted) throw error;
           this.#activeTurns.delete(threadId);
           if (this.#mode === "control") throw error;
           result = await this.#client.request("turn/start", {
             threadId,
             input: [{ type: "text", text }],
-          }, this.#actionOptions(generation));
+          }, this.#actionOptions(generation, options.signal));
         }
       } else {
         result = await this.#client.request("turn/start", {
           threadId,
           input: [{ type: "text", text }],
-        }, this.#actionOptions(generation));
+        }, this.#actionOptions(generation, options.signal));
       }
       const turnId = result?.turn?.id ?? result?.turnId;
       if (turnId) this.#activeTurns.set(threadId, turnId);
@@ -191,25 +192,25 @@ export class CodexAdapter {
     }
   }
 
-  async approve(agent, payload = {}) {
-    return this.#resolveApproval(agent, payload, "accept", "approve");
+  async approve(agent, payload = {}, options = {}) {
+    return this.#resolveApproval(agent, payload, "accept", "approve", options);
   }
 
-  async reject(agent, payload = {}) {
-    return this.#resolveApproval(agent, payload, "decline", "reject");
+  async reject(agent, payload = {}, options = {}) {
+    return this.#resolveApproval(agent, payload, "decline", "reject", options);
   }
 
-  async interrupt(agent) {
+  async interrupt(agent, options = {}) {
     try {
       await this.#ensureStarted();
       const threadId = agent.sessionId ?? agent.target;
       const generation = this.#assertControllable(threadId, "interrupt");
-      const turnId = this.#activeTurns.get(threadId) ?? await this.#findActiveTurn(threadId, generation);
+      const turnId = this.#activeTurns.get(threadId) ?? await this.#findActiveTurn(threadId, generation, options.signal);
       if (!turnId) return this.#fail(agent, "interrupt", "no active turn found");
       const result = await this.#client.request(
         "turn/interrupt",
         { threadId, turnId },
-        this.#actionOptions(generation),
+        this.#actionOptions(generation, options.signal),
       );
       this.#activeTurns.delete(threadId);
       return { ok: true, agentId: agent.id, action: "interrupt", data: result };
@@ -218,7 +219,7 @@ export class CodexAdapter {
     }
   }
 
-  async read(agent) {
+  async read(agent, options = {}) {
     try {
       await this.#ensureStarted();
       const threadId = agent.sessionId ?? agent.target;
@@ -226,7 +227,7 @@ export class CodexAdapter {
       const result = await this.#client.request(
         "thread/read",
         { threadId, includeTurns: true },
-        this.#actionOptions(generation),
+        this.#actionOptions(generation, options.signal),
       );
       return { ok: true, agentId: agent.id, action: "read", data: result };
     } catch (error) {
@@ -354,11 +355,11 @@ export class CodexAdapter {
     return all.slice(0, maxThreads);
   }
 
-  async #findActiveTurn(threadId, generation) {
+  async #findActiveTurn(threadId, generation, signal) {
     const result = await this.#client.request(
       "thread/read",
       { threadId, includeTurns: true },
-      this.#actionOptions(generation),
+      this.#actionOptions(generation, signal),
     );
     this.#rememberThread(result?.thread);
     const turns = result?.thread?.turns ?? [];
@@ -501,8 +502,9 @@ export class CodexAdapter {
     return this.#pendingApprovals.delete(id);
   }
 
-  async #resolveApproval(agent, payload, decision, action) {
+  async #resolveApproval(agent, payload, decision, action, options) {
     try {
+      options.signal?.throwIfAborted();
       await this.#ensureStarted();
       const threadId = agent.sessionId ?? agent.target;
       this.#assertControllable(threadId, action);
@@ -548,8 +550,12 @@ export class CodexAdapter {
     return this.#connectionGeneration;
   }
 
-  #actionOptions(generation) {
-    return this.#mode === "control" ? { expectedGeneration: generation } : undefined;
+  #actionOptions(generation, signal) {
+    const options = {
+      ...(this.#mode === "control" ? { expectedGeneration: generation } : {}),
+      ...(signal ? { signal } : {}),
+    };
+    return Object.keys(options).length ? options : undefined;
   }
 
   markStale(agent) {

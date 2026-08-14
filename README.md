@@ -46,6 +46,7 @@ Clients only consume a stable agent model and invoke capabilities exposed by the
 GET  /health
 GET  /ready
 GET  /v1/adapters
+GET  /v1/diagnostics                   # authenticated, sanitized, bounded operations snapshot
 GET  /v1/agents                        # bounded summaries; default limit 50, maximum 200
 GET  /v1/agents/:id
 POST /v1/refresh
@@ -64,6 +65,8 @@ request requires `Authorization: Bearer <token>`. Action requests also require
 `Content-Type: application/json` and an 8-128 character `Idempotency-Key`; retries
 with the same key and payload return the original result, while conflicting reuse
 returns `409 idempotency_conflict`. Mutations for one agent execute serially.
+Action queues are bounded at 32 entries per agent and 256 globally; excess work
+returns `429 queue_full` with `Retry-After: 1`.
 
 `GET /v1/agents` accepts repeatable or comma-separated `provider` and `status`
 filters, plus `view`, `cwd`, free-text `q`, `limit`, and an opaque `cursor`. Responses include
@@ -125,9 +128,12 @@ a new API version.
 `/ready` returns `503` only while the bounded initial discovery is still loading, then
 returns `200` even when one adapter is degraded. `GET /v1/adapters` exposes each
 adapter's `status` (`loading`, `healthy`, `error`, or `timeout`), last attempt and
-success timestamps, duration, agent count, and sanitized error. Slow and failed
+success timestamps, duration, agent count, sanitized error, and circuit state. Slow and failed
 adapters retain their last successful agents while healthy adapters continue updating.
 SSE emits `adapter.health` only when status, agent count, or sanitized error changes.
+Repeated failures use deterministic exponential backoff and open the adapter circuit
+after three failures. Scheduled refreshes respect the circuit; an authenticated explicit
+refresh can request a rate-limited single probe and is never lost behind a scheduled pass.
 
 Example Codex agent waiting for approval:
 
@@ -194,7 +200,7 @@ settings are:
 | `tokenFile` | `--token-file` / `AGENT_HOST_TOKEN_FILE` | private bearer token file |
 | `lockFile` | `--lock-file` / `AGENT_HOST_LOCK_FILE` | single-instance ownership file |
 | `logLevel` | `--log-level` / `AGENT_HOST_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` |
-| `logFile` | `--log-file` / `AGENT_HOST_LOG_FILE` | LaunchAgent output log |
+| `logFile` | `--log-file` / `AGENT_HOST_LOG_FILE` | rotating application JSONL log |
 | `dashboardUrl` | `--dashboard-url` / `AGENT_HOST_DASHBOARD_URL` | canonical dashboard origin |
 | `allowedOrigins` | repeatable `--allowed-origin` / `AGENT_HOST_ALLOWED_ORIGINS` | additional canonical browser origins |
 
@@ -218,7 +224,7 @@ node src/cli.js service uninstall
 ```
 
 `service install` writes `~/Library/LaunchAgents/dev.agent-host.plist` but does not
-start it. The plist contains absolute Node, CLI, config, and log paths; it never embeds
+start it. The plist contains absolute Node, CLI, config, and console-log paths; it never embeds
 the API token. `RunAtLoad` and `KeepAlive` restore the service after login or a crash.
 Only the managed plist is removed on uninstall—configuration, token, and logs remain.
 `start`, `stop`, and `restart` are macOS service commands; use Ctrl-C or SIGTERM for a
@@ -277,6 +283,47 @@ Discovery runs concurrently, is coalesced when refreshes overlap, and defaults t
 `AGENT_HOST_ADAPTER_TIMEOUT_MS`; invalid values stop startup. The
 normal refresh interval remains configurable with `AGENT_HOST_REFRESH_MS`.
 
+### Operations and diagnostics
+
+Runtime logs are JSON Lines in the configured `logFile`. They use a fixed field
+allowlist and central redaction for credentials, bearer values, prompts, configured
+private paths, URL credentials/query strings, and home paths. The file is owner-only,
+rotates at 1 MiB, and retains three generations; the in-memory diagnostics ring retains
+the latest 200 records. LaunchAgent stdout/stderr use the separate
+`agent-host.log.console` and `.console.error` files so launchd cannot keep writing to a
+rotated application-log inode.
+Write, capacity, and rotation failures do not terminate the host. The logger pauses
+sink retries for 30 seconds and exposes the failure code and operation through the
+diagnostics snapshot and bounded in-memory ring.
+
+Operational metrics have fixed labels and bounded histogram buckets. They cover
+refresh duration, adapter failure/recovery and circuit probes, SSE connections,
+reconnects and overflow, subscriber and queue depth, action rejection/latency, and a
+current Node memory snapshot. Obtain the running snapshot through authenticated
+`GET /v1/diagnostics`, or create a single owner-only JSON bundle that falls back to
+local config, lock state, versions, and rotated logs when the daemon is offline:
+
+```bash
+node src/cli.js diagnostics
+node src/cli.js diagnostics /private/path/agent-host-diagnostics.json
+```
+
+SSE delivery keeps at most 64 pending events or 256 KiB per client after Node signals
+backpressure. Heartbeats are dropped while blocked. A client that exceeds either bound
+is disconnected and must reconnect and replace its local snapshot; other clients remain
+connected. Shutdown stops new mutations, closes SSE listeners, rejects queued actions,
+gives active actions a bounded grace period, aborts remaining work, then closes adapters
+and the HTTP listener.
+
+The accelerated soak models 28,800 one-second refresh periods (eight hours), injected
+adapter exits/circuit recovery, action traffic, and repeated slow SSE clients. It reports
+heap/RSS, handle, queue, log-ring, metric-series, and tracked-child trends:
+
+```bash
+npm run soak:quick
+npm run soak
+```
+
 Then:
 
 ```bash
@@ -303,6 +350,7 @@ Checks:
 
 ```bash
 npm run check
+npm run soak:quick
 ```
 
 ## Dashboard demo and client conformance

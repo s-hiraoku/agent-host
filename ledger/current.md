@@ -19,17 +19,17 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - [x] #6 Demo adapter and conformance fixtures
 - [x] #7 Supported live-session integration
 - [x] #8 Configuration and service lifecycle
-- [ ] #9 Operational resilience and diagnostics
+- [x] #9 Operational resilience and diagnostics
 - [ ] #10 Packaging, versioning, and updates
 - [ ] #11 Backend portion of integrated release gate
 
 ## Current step
 
-- Branch: `codex/issue-8-service-lifecycle`
-- Issue: https://github.com/s-hiraoku/agent-host/issues/8
-- Base: `main` at merge commit `187773c` (PR #17)
-- PR: https://github.com/s-hiraoku/agent-host/pull/18
-- Next: complete PR #18 review/CI follow-up, then branch Issue #9 without merging absent explicit user authorization.
+- Branch: `codex/issue-9-operational-resilience`
+- Issue: https://github.com/s-hiraoku/agent-host/issues/9
+- Base: `main` at merge commit `443461a` (PR #18)
+- PR: https://github.com/s-hiraoku/agent-host/pull/19
+- Next: monitor PR #19 checks and review feedback, then begin Issue #10 from the verified Issue #9 head while merge remains user-gated.
 
 ## Progress notes
 
@@ -46,3 +46,7 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - 2026-08-12: Confirmed PR #17 merged as `187773c`, synchronized `main`, and created `codex/issue-8-service-lifecycle`. Began Issue #8 with a modular plan for configuration, secure state/token storage, instance ownership, testable CLI lifecycle commands, and a macOS LaunchAgent integration.
 - 2026-08-12: Completed Issue #8 implementation: strict versioned configuration, secure token lifecycle, race-aware instance ownership, foreground and LaunchAgent lifecycle commands, selective adapters, documentation, and isolated service smoke coverage. The full 82-test suite and a real macOS launchctl install/start/status/stop/restart/uninstall smoke passed; the test service and temporary state were removed. Adviser completion review found no PR blocker and kept logging/diagnostics in #9 and installed-path stability in #10.
 - 2026-08-12: Opened regular ready-for-review PR #18 for Issue #8. Merge remains gated on explicit user authorization.
+- 2026-08-12: PR #18 is mergeable and its CodeRabbit status completed successfully, but the bot skipped an actual review due to its 58-minute usage limit; there are no review threads. Created dependent branch `codex/issue-9-operational-resilience` without merging. Issue #9 Adviser design review selected split redaction/logger/metrics/diagnostics components with fixed retention, circuit-breaker state in the registry, bounded SSE/action queues, deadline-bounded shutdown, and separate app JSONL versus LaunchAgent console logs.
+- 2026-08-12: User merged PR #18 as `443461a`. Rebasing the Issue #9 branch onto that merge required no conflict; all in-progress #9 changes were preserved.
+- 2026-08-12: Completed Issue #9 implementation with centrally redacted bounded JSONL logging and metrics, authenticated/offline diagnostics, per-adapter circuit backoff and recovery, bounded SSE/action queues, abort-aware actions, deadline-bounded shutdown, and an eight-hour-equivalent accelerated soak. Adviser completion review identified untested logging sink failures; EACCES, ENOSPC, and rotation-rename fault injection now proves failures degrade into bounded diagnostics rather than terminating the host. The final 100-test suite and 28,800-cycle soak pass.
+- 2026-08-12: Opened regular ready-for-review PR #19 for Issue #9. Merge remains gated on explicit user authorization; packaging and upgrade work continues separately under Issue #10.
