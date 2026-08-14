@@ -1,4 +1,5 @@
 const SENSITIVE_KEY = /(?:^|[._-])(?:authorization|cookie|token|secret|password|prompt|text|command|metadata|environment|headers?)(?:[._-]|$)/i;
+const SENSITIVE_CAMEL_SUFFIX = /(?:Authorization|Cookie|Token|Secret|Password|Prompt|Text|Command|Metadata|Environment|Headers?)$/;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi;
 
 export function createRedactor(options = {}) {
@@ -11,7 +12,7 @@ export function createRedactor(options = {}) {
 }
 
 function sanitize(value, state, key = "") {
-  if (SENSITIVE_KEY.test(key)) return "[REDACTED]";
+  if (SENSITIVE_KEY.test(key) || SENSITIVE_CAMEL_SUFFIX.test(key)) return "[REDACTED]";
   if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value === "string") return sanitizeString(value, state);
   if (typeof value === "bigint") return String(value);

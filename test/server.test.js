@@ -75,6 +75,23 @@ test("server shutdown closes active SSE clients before registry cleanup", { time
   assert.equal(operations.metrics.snapshot().gauges.find((entry) => entry.name === "event_subscribers").value, 0);
 });
 
+test("server bounds registry cleanup by the shutdown grace period", { timeout: 2_000 }, async () => {
+  const registry = {
+    revision: 0,
+    events: new AgentEventBus(),
+    async refresh() { return []; },
+    async close() { return new Promise(() => {}); },
+  };
+  const server = createAgentServer(registry, {
+    host: "127.0.0.1", port: 0, refreshMs: 60_000, apiToken: API_TOKEN, shutdownGraceMs: 5,
+  });
+  await server.start();
+
+  const began = Date.now();
+  await server.stop();
+  assert.ok(Date.now() - began < 1_000);
+});
+
 test("server bounds action queues and finishes shutdown with an active action", { timeout: 5_000 }, async () => {
   let actionStarted;
   const started = new Promise((resolve) => { actionStarted = resolve; });

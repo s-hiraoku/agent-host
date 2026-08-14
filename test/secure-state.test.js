@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readOrCreateToken, rotateToken } from "../src/secure-state.js";
+import { readOrCreateToken, readPrivateFile, readPrivateFileTail, rotateToken } from "../src/secure-state.js";
 
 test("token bootstrap and rotation are atomic and owner-only", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "agent-host-token-"));
@@ -28,6 +28,18 @@ test("token reader rejects symbolic links", async (t) => {
   await writeFile(target, "secret\n");
   await symlink(target, link);
   await assert.rejects(readOrCreateToken(link), /regular file/);
+  await assert.rejects(readPrivateFileTail(link, 16), /regular file/);
+});
+
+test("private file readers validate and tighten the opened file", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-private-reader-"));
+  t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));
+  const path = join(home, "private.txt");
+  await writeFile(path, "first\nsecond\n", { mode: 0o644 });
+
+  assert.equal(await readPrivateFile(path), "first\nsecond\n");
+  assert.equal((await lstat(path)).mode & 0o777, 0o600);
+  assert.equal(await readPrivateFileTail(path, 8), "second\n");
 });
 
 test("token reader rejects an empty persistent token", async (t) => {
