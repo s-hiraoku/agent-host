@@ -6,12 +6,34 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEventBus } from "../src/core/event-bus.js";
 import { AgentRegistry } from "../src/core/registry.js";
-import { agentSummary, projectView } from "../src/core/contracts.js";
+import { agentSummary, pageAgents, parseAgentListQuery, projectView } from "../src/core/contracts.js";
 import { createAgentServer } from "../src/http/server.js";
 import { OperationsContext } from "../src/operations/context.js";
 
 const API_TOKEN = "test-api-token";
 const AUTHORIZATION = { authorization: `Bearer ${API_TOKEN}` };
+
+test("attention sorting compares activity timestamps as instants", () => {
+  const agents = [
+    {
+      id: "fixture:alpha", provider: "fixture", source: "fixture", name: "Alpha", status: "idle",
+      capabilities: {}, lastActivityAt: "2026-08-12T12:00:00Z",
+    },
+    {
+      id: "fixture:beta", provider: "fixture", source: "fixture", name: "Beta", status: "idle",
+      capabilities: {}, lastActivityAt: "2026-08-12T08:00:00-05:00",
+    },
+  ];
+  const ascending = parseAgentListQuery(new URLSearchParams("sort=attention"), 1);
+  const descending = parseAgentListQuery(new URLSearchParams("sort=attention&direction=desc"), 1);
+
+  assert.deepEqual(pageAgents(agents, ascending, 1).agents.map((agent) => agent.id), [
+    "fixture:beta", "fixture:alpha",
+  ]);
+  assert.deepEqual(pageAgents(agents, descending, 1).agents.map((agent) => agent.id), [
+    "fixture:alpha", "fixture:beta",
+  ]);
+});
 
 test("project identity preserves significant cwd whitespace", () => {
   const base = {
