@@ -18,6 +18,10 @@ test("central redaction bounds nested values and removes secrets, auth, paths, p
   circular.self = circular;
   const result = redact({
     authorization: "Bearer top-secret-token",
+    apiToken: "api-token-value",
+    clientSecret: "client-secret-value",
+    userPassword: "password-value",
+    requestHeaders: { authorization: "Bearer nested-value" },
     context: "kept",
     commandCount: 2,
     environmentReady: true,
@@ -33,6 +37,10 @@ test("central redaction bounds nested values and removes secrets, auth, paths, p
   });
   const serialized = JSON.stringify(result);
   assert.equal(result.authorization, "[REDACTED]");
+  assert.equal(result.apiToken, "[REDACTED]");
+  assert.equal(result.clientSecret, "[REDACTED]");
+  assert.equal(result.userPassword, "[REDACTED]");
+  assert.equal(result.requestHeaders, "[REDACTED]");
   assert.equal(result.nested.prompt, "[REDACTED]");
   assert.match(result.nested.message, /\$HOME\/project/);
   assert.match(result.nested.message, /Bearer \[REDACTED\]/);

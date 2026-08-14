@@ -29,6 +29,12 @@ export class ActionExecutor {
     this.#perAgentLimit = options.maxActionsPerAgent ?? MAX_ACTIONS_PER_AGENT;
     this.#globalLimit = options.maxActionsGlobal ?? MAX_ACTIONS_GLOBAL;
     this.#actionTimeoutMs = options.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.#perAgentLimit) || this.#perAgentLimit <= 0) {
+      throw new RangeError("maxActionsPerAgent must be a positive safe integer");
+    }
+    if (!Number.isSafeInteger(this.#globalLimit) || this.#globalLimit <= 0) {
+      throw new RangeError("maxActionsGlobal must be a positive safe integer");
+    }
     if (!Number.isFinite(this.#actionTimeoutMs) || this.#actionTimeoutMs <= 0) {
       throw new RangeError("actionTimeoutMs must be a positive finite number");
     }
