@@ -31,6 +31,29 @@ export async function readPrivateFile(path) {
   return readFile(path, "utf8");
 }
 
+export async function readPrivateFileTail(path, maxBytes) {
+  if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new RangeError("maxBytes must be a positive integer");
+  const stat = await lstat(path);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`private state must be a regular file: ${path}`);
+  assertOwned(stat, path);
+  if ((stat.mode & 0o077) !== 0) await chmod(path, 0o600);
+  const length = Math.min(stat.size, maxBytes);
+  const offset = Math.max(0, stat.size - length);
+  const handle = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, offset);
+    let content = buffer.subarray(0, bytesRead).toString("utf8");
+    if (offset > 0) {
+      const newline = content.indexOf("\n");
+      content = newline === -1 ? "" : content.slice(newline + 1);
+    }
+    return content;
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function writePrivateFileAtomic(path, content, { tightenDirectory = true } = {}) {
   const directory = dirname(path);
   await ensureOwnedDirectory(directory, { mode: 0o700, tighten: tightenDirectory });

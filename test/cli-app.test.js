@@ -150,6 +150,7 @@ test("offline diagnostics writes an owner-only redacted bounded JSON bundle", as
   await runCli(["init"], { homeDirectory: home, env: {}, output() {} });
   const token = (await readFile(join(home, ".agent-host", "token"), "utf8")).trim();
   await writeFile(join(home, ".agent-host", "agent-host.log"), [
+    `${"x".repeat(4 * 1024 * 1024)}\n`,
     JSON.stringify({ level: "info", event: "safe" }),
     JSON.stringify({ level: "error", event: "unsafe", details: { token, prompt: "private", path: `${home}/project` } }),
   ].join("\n"), { mode: 0o600 });
