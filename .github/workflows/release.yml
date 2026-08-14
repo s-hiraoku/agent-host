@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: agent-host
+          persist-credentials: false
+      - id: compatibility
+        working-directory: agent-host
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          test "v$version" = "$GITHUB_REF_NAME"
+          test "$version" = "$(node -p "require('./release-compatibility.json').productVersion")"
+          grep -F "## $version " CHANGELOG.md
+          echo "dashboard_sha=$(node -p "require('./release-compatibility.json').dashboard.commit")" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: s-hiraoku/agent-host-dashboard
+          ref: "${{ steps.compatibility.outputs.dashboard_sha }}"
+          path: dashboard
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci && npm run check
+        working-directory: dashboard
+      - run: npm run check
+        working-directory: agent-host
+      - run: node scripts/build-release.js --dashboard-dir=../dashboard/dist --output=dist
+        working-directory: agent-host
+      - name: Verify extracted release and cross-repository contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd agent-host/dist
+          shasum -a 256 -c checksums.txt
+          mkdir extracted
+          tar -xzf agent-host-*.tar.gz -C extracted
+          release="$(find extracted -mindepth 1 -maxdepth 1 -type d)"
+          env AGENT_HOST_INSTALL_ROOT="$RUNNER_TEMP/install" AGENT_HOST_BIN_DIR="$RUNNER_TEMP/bin" node "$release/scripts/manage-installation.js" install "$release"
+          token="$(openssl rand -hex 24)"
+          mkdir -p "$RUNNER_TEMP/home"
+          env HOME="$RUNNER_TEMP/home" AGENT_HOST_API_TOKEN="$token" AGENT_HOST_PORT=48777 AGENT_HOST_REFRESH_MS=60000 "$RUNNER_TEMP/bin/agent-host" demo >"$RUNNER_TEMP/agent-host-release.log" 2>&1 &
+          host_pid=$!
+          cleanup() { kill "$host_pid" 2>/dev/null || true; wait "$host_pid" 2>/dev/null || true; }
+          trap cleanup EXIT
+          cd ../../dashboard
+          env AGENT_HOST_BASE_URL=http://127.0.0.1:48777 AGENT_HOST_API_TOKEN="$token" npm run test:conformance:live
+      - id: subject
+        run: echo "path=$(find agent-host/dist -name '*.tar.gz' -maxdepth 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "${{ steps.subject.outputs.path }}"
+      - run: >-
+          gh release create "$GITHUB_REF_NAME"
+          agent-host/dist/checksums.txt
+          agent-host/dist/agent-host-*.tar.gz
+          agent-host/dist/agent-host-*-release-manifest.json
+          agent-host/dist/agent-host-*.spdx.json
+          --title "agent-host $GITHUB_REF_NAME"
+          --notes-file agent-host/CHANGELOG.md
+        env:
+          GH_TOKEN: "${{ github.token }}"
