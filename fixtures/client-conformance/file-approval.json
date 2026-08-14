@@ -1,0 +1,21 @@
+{
+  "fixtureVersion": 1,
+  "scenario": "file-approval",
+  "agentId": "codex:fixture-file-change",
+  "status": "blocked",
+  "pendingApproval": {
+    "approvalId": "fixture-file-approval-1",
+    "method": "item/fileChange/requestApproval",
+    "actionable": true,
+    "context": {
+      "kind": "file-change",
+      "fileCount": 2,
+      "files": [
+        { "path": "src/agent.js", "kind": "update" },
+        { "path": "test/agent.test.js", "kind": "add" }
+      ],
+      "truncated": false
+    }
+  },
+  "clientRule": "Never offer approve or reject when actionable is false; display only the sanitized context and never infer diff content."
+}

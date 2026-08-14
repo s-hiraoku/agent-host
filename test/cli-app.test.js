@@ -15,6 +15,17 @@ async function waitFor(predicate) {
   assert.fail("condition was not reached");
 }
 
+test("version reports product, API, and bundled dashboard compatibility without configuration", async () => {
+  const lines = [];
+  assert.equal(await runCli(["version", "--json"], { env: {}, output: (line) => lines.push(line) }), 0);
+  assert.deepEqual(JSON.parse(lines[0]), {
+    serverVersion: "0.3.0",
+    apiVersions: ["1"],
+    configSchema: { reads: [1], writes: 1 },
+    dashboard: { version: "0.1.0", apiVersions: ["1"] },
+  });
+});
+
 test("fresh-home init creates versioned config and private token without printing the secret", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "agent-host-cli-init-"));
   t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));
@@ -103,7 +114,8 @@ test("service lifecycle commands initialize state and delegate without deleting 
     async restart(path) { calls.push(["restart", path]); return { installed: true, running: true }; },
     async uninstall(path) { calls.push(["uninstall", path]); return { installed: false, running: false }; },
   };
-  const dependencies = { homeDirectory: home, env: {}, output() {}, service, platform: "darwin" };
+  const dashboardDirectory = join(home, "custom-dashboard");
+  const dependencies = { homeDirectory: home, env: { AGENT_HOST_DASHBOARD_DIR: dashboardDirectory }, output() {}, service, platform: "darwin" };
 
   assert.equal(await runCli(["service", "install"], dependencies), 0);
   assert.equal(await runCli(["start"], dependencies), 0);
@@ -117,6 +129,7 @@ test("service lifecycle commands initialize state and delegate without deleting 
   assert.equal(calls[0][1].nodePath, process.execPath);
   assert.match(calls[0][1].configPath, /\.agent-host\/config\.json$/);
   assert.match(calls[0][1].logFile, /agent-host\.log\.console$/);
+  assert.equal(calls[0][1].dashboardDirectory, dashboardDirectory);
 });
 
 test("stop remains available when configuration is malformed", async (t) => {

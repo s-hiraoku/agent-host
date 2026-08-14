@@ -34,7 +34,7 @@ test("client fixtures are versioned, sanitized, and schema-compatible", async ()
   const files = (await readdir(fixtureDirectory)).filter((name) => name.endsWith(".json"));
   assert.deepEqual(files.sort(), [
     "action.json", "adapter-failure.json", "approval.json", "error.json",
-    "event-reconnect.json", "large-list.json", "snapshot.json",
+    "event-reconnect.json", "file-approval.json", "large-list.json", "list-features.json", "snapshot.json",
   ]);
   const fixtures = [];
   for (const file of files) {
@@ -49,6 +49,12 @@ test("client fixtures are versioned, sanitized, and schema-compatible", async ()
   assert.equal(fixtures.find((fixture) => fixture.scenario === "action").expected.transition.to, "working");
   assert.equal(fixtures.find((fixture) => fixture.scenario === "error").expected.code, "agent_not_found");
   assert.equal(fixtures.find((fixture) => fixture.scenario === "approval").pendingApproval.approvalId, "demo-approval-1");
+  const fileApproval = fixtures.find((fixture) => fixture.scenario === "file-approval").pendingApproval;
+  assert.equal(fileApproval.actionable, true);
+  assert.deepEqual(fileApproval.context.files.map((file) => file.path), ["src/agent.js", "test/agent.test.js"]);
+  const listFeatures = fixtures.find((fixture) => fixture.scenario === "list-features");
+  assert.equal(listFeatures.responseShape.facets.revision, listFeatures.responseShape.revision);
+  assert.equal(listFeatures.responseShape.page.sort, "name");
   assert.equal(fixtures.find((fixture) => fixture.scenario === "adapter-failure").response.adapters[0].status, "error");
   assert.match(fixtures.find((fixture) => fixture.scenario === "event-reconnect").reconnection.clientRule, /replace the local snapshot/);
 

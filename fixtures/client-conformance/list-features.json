@@ -1,0 +1,40 @@
+{
+  "fixtureVersion": 1,
+  "scenario": "list-features",
+  "request": {
+    "method": "GET",
+    "path": "/v1/agents?view=recent&provider=codex&sort=name&direction=asc&limit=50"
+  },
+  "responseShape": {
+    "apiVersion": "1",
+    "revision": 12,
+    "facets": {
+      "revision": 12,
+      "providers": [
+        { "value": "codex", "count": 2 },
+        { "value": "herdr", "count": 1 }
+      ],
+      "statuses": [
+        { "value": "blocked", "count": 1 },
+        { "value": "working", "count": 1 }
+      ]
+    },
+    "page": {
+      "limit": 50,
+      "total": 2,
+      "sort": "name",
+      "direction": "asc"
+    },
+    "agentProject": {
+      "id": "local:ZdgNLEiz0juJ-3ZE-7A0pA",
+      "name": "project",
+      "scope": "local"
+    }
+  },
+  "semantics": {
+    "sorting": "The complete filtered snapshot is sorted before pagination.",
+    "providerFacets": "Apply view, cwd, q, and status filters while ignoring provider filters.",
+    "statusFacets": "Apply view, cwd, q, and provider filters while ignoring status filters.",
+    "project": "Equal normalized absolute cwd values produce the same local project id."
+  }
+}

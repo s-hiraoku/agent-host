@@ -18,12 +18,15 @@ import {
   writePrivateFileAtomic,
 } from "./secure-state.js";
 import { basename, dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { AGENT_HOST_VERSION, OperationsContext } from "./operations/context.js";
 import { createRedactor } from "./operations/redact.js";
+import { publicReleaseInfo } from "./release-info.js";
 
 const DEFAULT_CLI_PATH = fileURLToPath(new URL("./cli.js", import.meta.url));
+const PACKAGED_DASHBOARD_PATH = fileURLToPath(new URL("../dashboard", import.meta.url));
 const OFFLINE_LOG_TAIL_BYTES = 4 * 1024 * 1024;
 
 export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
@@ -39,6 +42,10 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
     run: dependencies.runLaunchctl,
   });
   const servicePaths = defaultPaths(dependencies.homeDirectory);
+  if (parsed.command === "version") {
+    print(publicReleaseInfo());
+    return 0;
+  }
   if (parsed.command === "start") {
     print(await service.start(servicePaths.launchAgentFile));
     return 0;
@@ -92,7 +99,13 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
     }
     const bundle = redact(remote ?? {
       generatedAt: new Date().toISOString(),
-      versions: { agentHost: AGENT_HOST_VERSION, node: process.version, platform: process.platform, arch: process.arch },
+      versions: {
+        agentHost: AGENT_HOST_VERSION,
+        ...publicReleaseInfo(),
+        node: process.version,
+        platform: process.platform,
+        arch: process.arch,
+      },
       configuration: diagnosticConfiguration(configuration),
       lock: publicLock(await inspectInstanceLock(configuration.lockFile, dependencies.lockOptions)),
       service: serviceState,
@@ -161,7 +174,9 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
         plistPath: paths.launchAgentFile,
         nodePath: dependencies.nodePath ?? process.execPath,
         cliPath: dependencies.cliPath ?? DEFAULT_CLI_PATH,
+        launcherPath: dependencies.launcherPath ?? env.AGENT_HOST_LAUNCHER_PATH,
         configPath: configFile,
+        dashboardDirectory: configuration.dashboardDirectory,
         logFile: `${configuration.logFile}.console`,
       }));
       return 0;
@@ -223,6 +238,8 @@ async function runForeground(options) {
       allowedOrigins: options.configuration.allowedOrigins,
       operations,
       diagnosticsConfiguration: diagnosticConfiguration(options.configuration),
+      dashboardDirectory: options.configuration.dashboardDirectory
+        ?? (existsSync(PACKAGED_DASHBOARD_PATH) ? PACKAGED_DASHBOARD_PATH : undefined),
     });
     await server.start();
   } catch (error) {
@@ -312,12 +329,19 @@ function diagnosticConfiguration(configuration) {
     logLevel: configuration.logLevel,
     logFile: configuration.logFile,
     dashboardUrl: configuration.dashboardUrl,
+    dashboardDirectory: configuration.dashboardDirectory,
     allowedOrigins: configuration.allowedOrigins,
   };
 }
 
 function privatePaths(configuration) {
-  return [configuration.codexSocket, configuration.tokenFile, configuration.lockFile, configuration.logFile]
+  return [
+    configuration.codexSocket,
+    configuration.tokenFile,
+    configuration.lockFile,
+    configuration.logFile,
+    configuration.dashboardDirectory,
+  ]
     .filter(Boolean);
 }
 
