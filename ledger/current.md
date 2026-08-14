@@ -25,11 +25,11 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 
 ## Current step
 
-- Branch: `codex/issue-10-packaging-updates`
-- Issue: https://github.com/s-hiraoku/agent-host/issues/10
-- Base: `codex/issue-9-operational-resilience` at `2b5478e` (PR #19)
-- PR: https://github.com/s-hiraoku/agent-host/pull/20 (stacked on PR #19)
-- Next: monitor PR #20 CI/review, retarget it to `main` after PR #19 merges, then complete the backend evidence portion of Issue #11.
+- Branch: `codex/issue-11-backend-release-gate`
+- Issue: https://github.com/s-hiraoku/agent-host/issues/11
+- Base: `codex/issue-10-packaging-updates` at `07d645b` (PR #20)
+- PR: https://github.com/s-hiraoku/agent-host/pull/21 (stacked on PR #20)
+- Next: monitor PR #21 CI/review; after PRs #19/#20 merge, retarget the stack and hand off dashboard adoption, published-release, and real-environment close-out gates to the user.
 
 ## Progress notes
 
@@ -53,3 +53,6 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - 2026-08-12: Began Issue #10 on a dependent branch. Adviser review selected an integrated source artifact containing host plus built assets from a pinned dashboard commit, same-origin serving through the existing listener, immutable version directories behind an atomic pointer, a stable LaunchAgent launcher, checksums/SBOM/provenance, and transactional rollback while preserving `~/.agent-host` state.
 - 2026-08-12: Completed Issue #10 implementation and candidate verification. The exact pinned dashboard commit passed 158 tests/build/live conformance; the host passed 110 tests; extracted-artifact install/version and real macOS LaunchAgent lifecycle passed. Adviser completion review found stale-lock takeover and transaction-cleanup recovery races; deterministic inode quarantine, ownership-safe release, durable recovery markers, Node 23 CI, and fault-injection tests resolved every blocker. Adviser re-review returned GO.
 - 2026-08-12: Opened regular ready-for-review stacked PR #20 for Issue #10 with base PR #19. No release tag or GitHub Release was created; merging and publication remain explicitly user-gated.
+- 2026-08-12: PR #20's first integrated-artifact run failed before dashboard checkout because escaped nested quotes made the compatibility-manifest shell expression invalid. A focused CI fix now passes Node 22/23/24 and the pinned-dashboard build, extracted install, and live conformance job at run 31594311951.
+- 2026-08-12: Evaluated every Issue #11 acceptance item. Implemented the remaining additive backend contracts for global sort, revision-consistent facets, stable local project association, and fail-closed sanitized file-change approval context. Stable release remains NO-GO pending dashboard adoption and CI, dependency merges, a published RC, clean-Mac timed setup and reboot, complete real Herdr/Codex workflows, and normal daily use. The evidence and external close-out checklist are recorded in `docs/release-gate.md`.
+- 2026-08-12: Opened regular ready-for-review stacked PR #21 for the Issue #11 backend contracts and release-gate evidence. Adviser returned GO after malicious-adapter, wrong-turn, path-safety, and bounded-state findings were fixed. Issue #11 deliberately remains open for dashboard adoption and real-environment release gates.

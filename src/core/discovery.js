@@ -35,8 +35,16 @@ export function compareAgents(a, b) {
   if (aVisibility !== bVisibility) return aVisibility - bVisibility;
   const status = (STATUS_RANK.get(a.status) ?? 6) - (STATUS_RANK.get(b.status) ?? 6);
   if (status) return status;
-  const aActivity = String(a.lastActivityAt ?? "");
-  const bActivity = String(b.lastActivityAt ?? "");
-  if (aActivity !== bActivity) return aActivity < bActivity ? 1 : -1;
+  const activity = compareActivity(a.lastActivityAt, b.lastActivityAt);
+  if (activity) return activity;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function compareActivity(left, right) {
+  const a = Date.parse(left ?? "");
+  const b = Date.parse(right ?? "");
+  if (Number.isFinite(a) && Number.isFinite(b)) return a < b ? 1 : a > b ? -1 : 0;
+  const aText = String(left ?? "");
+  const bText = String(right ?? "");
+  return aText < bText ? 1 : aText > bText ? -1 : 0;
 }
