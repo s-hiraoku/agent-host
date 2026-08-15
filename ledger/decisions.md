@@ -58,6 +58,14 @@
   canonical record for the configured live transport while retaining unsupported
   process evidence in the explicit raw view.
 
+# Issue #10 decisions
+
+- Ship one integrated source release containing agent-host and only the built assets from an exact pinned dashboard commit. Keep dashboard source and implementation ownership in its separate repository.
+- Serve packaged dashboard assets from the existing loopback listener and normalize same-origin `/agent-host/*` requests into the authenticated public API. Never inject the bearer token into built assets or a proxy.
+- Separate immutable code under `~/.local/share/agent-host/releases/<version>` from mutable user state under `~/.agent-host`. Use an atomic `current` symlink and stable `~/.local/bin/agent-host` launcher for update and rollback.
+- Keep product SemVer, wire API, configuration schema, dashboard version, and adapter compatibility independent in `release-compatibility.json`. Keep configuration schema 1 for 0.3.0 rather than inventing a migration.
+- Treat the 0.3.0 archive as a source distribution with SHA-256, SPDX SBOM, GitHub build provenance, content allowlisting, and secret scanning. Do not claim Apple signing or notarization for a JavaScript/static archive.
+
 # Issue #23 decisions
 
 - Publish repository association as an independently versioned authenticated extension,

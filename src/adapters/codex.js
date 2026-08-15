@@ -1,6 +1,7 @@
 import { CodexRpcClient } from "./codex-rpc.js";
 import { noCapabilities } from "../core/types.js";
 import { isDeepStrictEqual } from "node:util";
+import { isAbsolute, normalize, relative, resolve, sep } from "node:path";
 
 const APPROVAL_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -10,6 +11,9 @@ const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_RECENT_MS = 7 * 24 * 60 * 60_000;
 const DEFAULT_RECENT_LIMIT = 100;
 const MAX_HISTORY_THREADS = 1_000;
+const MAX_FILE_CHANGE_CONTEXTS = 256;
+const MAX_APPROVAL_FILES = 20;
+const MAX_THREAD_CWDS = 1_000;
 const TERMINAL_TURN_METHODS = new Set(["turn/completed", "turn/failed", "turn/aborted"]);
 
 function mapStatus(status, hasApproval) {
@@ -35,7 +39,51 @@ function pendingApprovalView(entry) {
     command: params.command,
     cwd: params.cwd,
     availableDecisions: params.availableDecisions,
+    context: entry.context,
+    actionable: entry.actionable,
   };
+}
+
+function publicFilePath(value, cwd) {
+  if (typeof value !== "string" || !value
+    || /[\u0000-\u001f\u007f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/u.test(value)) return undefined;
+  const raw = value;
+  if (/^[A-Za-z]:/.test(raw)) return undefined;
+  const rawSegments = sep === "\\" ? raw.split(/[\\/]/) : raw.split("/");
+  if (rawSegments.includes("..")) return undefined;
+  let candidate = raw;
+  if (isAbsolute(raw)) {
+    if (typeof cwd !== "string" || !isAbsolute(cwd)) return undefined;
+    candidate = relative(resolve(cwd), resolve(raw));
+  }
+  const normalized = normalize(candidate).split(sep).join("/");
+  if (!normalized || normalized === ".") return undefined;
+  if (normalized === ".." || normalized.startsWith("../") || isAbsolute(normalized)) {
+    return undefined;
+  }
+  if (normalized.length > 240) return undefined;
+  return normalized;
+}
+
+function fileChangeContext(item, cwd) {
+  if (item?.type !== "fileChange" || !Array.isArray(item.changes) || item.changes.length === 0) return undefined;
+  const validated = item.changes.flatMap((change) => {
+    const path = publicFilePath(change?.path, cwd);
+    if (!path || !["add", "delete", "update"].includes(change?.kind)) return [];
+    return [{ path, kind: change.kind }];
+  });
+  if (validated.length !== item.changes.length) return undefined;
+  const files = validated.slice(0, MAX_APPROVAL_FILES);
+  return {
+    kind: "file-change",
+    fileCount: item.changes.length,
+    files,
+    truncated: item.changes.length > files.length,
+  };
+}
+
+function contextKey(generation, threadId, turnId, itemId) {
+  return JSON.stringify([generation, threadId, turnId, itemId]);
 }
 
 export class CodexAdapter {
@@ -53,6 +101,8 @@ export class CodexAdapter {
   #subscriptions = new Map();
   #directInput = new Map();
   #loadedThreads = new Map();
+  #threadCwds = new Map();
+  #fileChangeContexts = new Map();
   #changeHandlers = new Set();
 
   constructor(options = {}) {
@@ -105,7 +155,9 @@ export class CodexAdapter {
   }
 
   #mapThread(thread, now) {
+    this.#rememberThreadCwd(thread.id, thread.cwd);
     const approvals = this.#approvalsForThread(thread.id);
+    const actionableApprovals = approvals.filter((entry) => entry.actionable);
     const status = this.#status.get(thread.id) ?? thread.status;
     const title = thread.name ?? thread.preview ?? thread.agentNickname ?? thread.id;
     const lastActivityAt = codexTimestamp(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt);
@@ -122,8 +174,8 @@ export class CodexAdapter {
       capabilities: {
         prompt: canPrompt,
         sendKeys: false,
-        approve: controllable && approvals.length > 0,
-        reject: controllable && approvals.length > 0,
+        approve: controllable && actionableApprovals.length > 0,
+        reject: controllable && actionableApprovals.length > 0,
         interrupt: controllable && (status?.type === "active" || this.#activeTurns.has(thread.id)),
         focus: false,
         read: controllable,
@@ -246,6 +298,8 @@ export class CodexAdapter {
       this.#subscriptions.clear();
       this.#directInput.clear();
       this.#loadedThreads.clear();
+      this.#threadCwds.clear();
+      this.#fileChangeContexts.clear();
     }
   }
 
@@ -280,7 +334,9 @@ export class CodexAdapter {
         this.#subscriptions.delete(threadId);
         this.#directInput.delete(threadId);
         this.#loadedThreads.delete(threadId);
+        this.#threadCwds.delete(threadId);
         this.#clearApprovalsForThread(threadId);
+        this.#clearFileContextsForThread(threadId);
         this.#status.delete(threadId);
         this.#activeTurns.delete(threadId);
       }
@@ -304,7 +360,9 @@ export class CodexAdapter {
         this.#subscriptions.delete(threadId);
         this.#directInput.delete(threadId);
         this.#loadedThreads.delete(threadId);
+        this.#threadCwds.delete(threadId);
         this.#clearApprovalsForThread(threadId);
+        this.#clearFileContextsForThread(threadId);
         this.#status.delete(threadId);
         this.#activeTurns.delete(threadId);
         signal?.throwIfAborted();
@@ -331,9 +389,19 @@ export class CodexAdapter {
     if (!threadId) return;
     const normalized = { ...thread, id: threadId };
     this.#loadedThreads.set(threadId, { ...this.#loadedThreads.get(threadId), ...normalized });
+    this.#rememberThreadCwd(threadId, thread.cwd);
     if (rememberStatus && thread.status) this.#status.set(threadId, thread.status);
     if (thread.canAcceptDirectInput !== undefined) {
       this.#directInput.set(threadId, Boolean(thread.canAcceptDirectInput));
+    }
+  }
+
+  #rememberThreadCwd(threadId, cwd) {
+    if (typeof cwd !== "string" || !cwd) return;
+    this.#threadCwds.delete(threadId);
+    this.#threadCwds.set(threadId, cwd);
+    while (this.#threadCwds.size > MAX_THREAD_CWDS) {
+      this.#threadCwds.delete(this.#threadCwds.keys().next().value);
     }
   }
 
@@ -391,7 +459,21 @@ export class CodexAdapter {
       ? `${generation}:${threadId}:${message.id}`
       : String(message.id);
     this.#deleteApproval(approvalId);
-    const entry = { approvalId, rawId: message.id, generation, message, receivedAt: Date.now() };
+    const context = message.method === "item/fileChange/requestApproval"
+      ? this.#fileChangeContexts.get(contextKey(
+        generation, threadId, message.params?.turnId, message.params?.itemId,
+      ))
+      : undefined;
+    const entry = {
+      approvalId,
+      rawId: message.id,
+      generation,
+      message,
+      receivedAt: Date.now(),
+      context,
+      actionable: message.method !== "item/fileChange/requestApproval" || Boolean(context),
+      contextInvalidated: false,
+    };
     entry.timer = setTimeout(() => {
       if (this.#pendingApprovals.get(approvalId) !== entry) return;
       try {
@@ -418,6 +500,37 @@ export class CodexAdapter {
     let changed = false;
     if (this.#mode === "control" && threadId
       && this.#subscriptions.get(threadId) !== generation) return;
+    if ((message.method === "item/started" || message.method === "item/completed") && threadId) {
+      const context = fileChangeContext(params.item, this.#threadCwds.get(threadId));
+      if (params.item?.id) {
+        const key = contextKey(generation, threadId, params.turnId, params.item.id);
+        this.#fileChangeContexts.delete(key);
+        if (context) {
+          this.#fileChangeContexts.set(key, context);
+          while (this.#fileChangeContexts.size > MAX_FILE_CHANGE_CONTEXTS) {
+            this.#fileChangeContexts.delete(this.#fileChangeContexts.keys().next().value);
+          }
+        }
+        for (const entry of this.#pendingApprovals.values()) {
+          if (entry.message.method === "item/fileChange/requestApproval"
+            && entry.generation === generation
+            && entry.message.params?.threadId === threadId
+            && entry.message.params?.turnId === params.turnId
+            && entry.message.params?.itemId === params.item.id) {
+            if (entry.context && !isDeepStrictEqual(entry.context, context)) {
+              entry.context = undefined;
+              entry.actionable = false;
+              entry.contextInvalidated = true;
+              changed = true;
+            } else if (!entry.context && !entry.contextInvalidated && context) {
+              entry.context = context;
+              entry.actionable = true;
+              changed = true;
+            }
+          }
+        }
+      }
+    }
     if (message.method === "thread/status/changed" && params.threadId) {
       changed = !isDeepStrictEqual(this.#status.get(params.threadId), params.status);
       this.#status.set(params.threadId, params.status);
@@ -451,6 +564,7 @@ export class CodexAdapter {
       this.#activeTurns.delete(params.threadId);
       this.#status.set(params.threadId, nextStatus);
       this.#clearApprovalsForThread(params.threadId);
+      this.#clearFileContextsForThread(params.threadId);
       changed = changed || approvalCount !== this.#pendingApprovals.size;
     }
     if (message.method === "serverRequest/resolved" && params.requestId !== undefined) {
@@ -482,6 +596,8 @@ export class CodexAdapter {
     this.#subscriptions.clear();
     this.#directInput.clear();
     this.#loadedThreads.clear();
+    this.#threadCwds.clear();
+    this.#fileChangeContexts.clear();
     this.#activeTurns.clear();
     this.#status.clear();
   }
@@ -493,6 +609,12 @@ export class CodexAdapter {
   #clearApprovalsForThread(threadId) {
     for (const [id, entry] of this.#pendingApprovals) {
       if (entry.message.params?.threadId === threadId) this.#deleteApproval(id);
+    }
+  }
+
+  #clearFileContextsForThread(threadId) {
+    for (const key of this.#fileChangeContexts.keys()) {
+      if (JSON.parse(key)[1] === threadId) this.#fileChangeContexts.delete(key);
     }
   }
 
@@ -523,8 +645,14 @@ export class CodexAdapter {
         this.#deleteApproval(entry.approvalId);
         return this.#fail(agent, action, "approval belongs to a stale connection");
       }
+      if (!entry.actionable) {
+        return this.#fail(agent, action, "file-change approval is unavailable without sanitized file context");
+      }
       this.#client.respond(entry.rawId, { decision });
       this.#deleteApproval(entry.approvalId);
+      this.#fileChangeContexts.delete(contextKey(
+        entry.generation, threadId, entry.message.params?.turnId, entry.message.params?.itemId,
+      ));
       this.#emitChange();
       return { ok: true, agentId: agent.id, action, data: { approvalId: entry.approvalId, decision } };
     } catch (error) {

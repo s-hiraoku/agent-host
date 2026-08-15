@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runCli } from "../src/cli-app.js";
 import { inspectInstanceLock } from "../src/instance-lock.js";
+import { OperationsContext } from "../src/operations/context.js";
+import { RELEASE_COMPATIBILITY, publicReleaseInfo } from "../src/release-info.js";
 
 async function waitFor(predicate) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -14,6 +16,26 @@ async function waitFor(predicate) {
   }
   assert.fail("condition was not reached");
 }
+
+test("version reports product, API, and bundled dashboard compatibility without configuration", async () => {
+  const lines = [];
+  assert.equal(await runCli(["version", "--json"], { env: {}, output: (line) => lines.push(line) }), 0);
+  assert.deepEqual(JSON.parse(lines[0]), {
+    serverVersion: "0.3.0",
+    apiVersions: ["1"],
+    configSchema: { reads: [1], writes: 1 },
+    dashboard: { version: "0.1.0", apiVersions: ["1"] },
+  });
+});
+
+test("release compatibility metadata is deeply immutable", () => {
+  assert.throws(() => RELEASE_COMPATIBILITY.apiVersions.push("2"), TypeError);
+  assert.throws(() => { RELEASE_COMPATIBILITY.dashboard.version = "mutated"; }, TypeError);
+  assert.throws(() => RELEASE_COMPATIBILITY.configSchema.reads.push(2), TypeError);
+  assert.deepEqual(RELEASE_COMPATIBILITY.apiVersions, ["1"]);
+  assert.equal(RELEASE_COMPATIBILITY.dashboard.version, "0.1.0");
+  assert.deepEqual(RELEASE_COMPATIBILITY.configSchema.reads, [1]);
+});
 
 test("fresh-home init creates versioned config and private token without printing the secret", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "agent-host-cli-init-"));
@@ -103,7 +125,8 @@ test("service lifecycle commands initialize state and delegate without deleting 
     async restart(path) { calls.push(["restart", path]); return { installed: true, running: true }; },
     async uninstall(path) { calls.push(["uninstall", path]); return { installed: false, running: false }; },
   };
-  const dependencies = { homeDirectory: home, env: {}, output() {}, service, platform: "darwin" };
+  const dashboardDirectory = join(home, "custom-dashboard");
+  const dependencies = { homeDirectory: home, env: { AGENT_HOST_DASHBOARD_DIR: dashboardDirectory }, output() {}, service, platform: "darwin" };
 
   assert.equal(await runCli(["service", "install"], dependencies), 0);
   assert.equal(await runCli(["start"], dependencies), 0);
@@ -117,6 +140,7 @@ test("service lifecycle commands initialize state and delegate without deleting 
   assert.equal(calls[0][1].nodePath, process.execPath);
   assert.match(calls[0][1].configPath, /\.agent-host\/config\.json$/);
   assert.match(calls[0][1].logFile, /agent-host\.log\.console$/);
+  assert.equal(calls[0][1].dashboardDirectory, dashboardDirectory);
 });
 
 test("stop remains available when configuration is malformed", async (t) => {
@@ -160,4 +184,30 @@ test("offline diagnostics writes an owner-only redacted bounded JSON bundle", as
   assert.doesNotMatch(contents, /private/);
   assert.doesNotMatch(contents, new RegExp(home));
   assert.match(lines.join("\n"), /"source": "offline"/);
+  assert.equal(bundle.versions.serverVersion, publicReleaseInfo().serverVersion);
+  assert.deepEqual(bundle.versions.configSchema, publicReleaseInfo().configSchema);
+});
+
+test("online diagnostics keep the same release metadata as the offline fallback", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-cli-diagnostics-online-"));
+  t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));
+  await runCli(["init"], { homeDirectory: home, env: {}, output() {} });
+  const outputFile = join(home, "online.json");
+  const remote = new OperationsContext().snapshot();
+  const lines = [];
+
+  assert.equal(await runCli(["diagnostics", outputFile], {
+    homeDirectory: home,
+    env: {},
+    platform: "linux",
+    fetchDiagnostics: async () => remote,
+    output: (line) => lines.push(line),
+  }), 0);
+  const bundle = JSON.parse(await readFile(outputFile, "utf8"));
+  const release = publicReleaseInfo();
+  assert.match(lines.join("\n"), /"source": "running"/);
+  assert.equal(bundle.versions.serverVersion, release.serverVersion);
+  assert.deepEqual(bundle.versions.configSchema, release.configSchema);
+  assert.deepEqual(bundle.versions.apiVersions, release.apiVersions);
+  assert.deepEqual(bundle.versions.dashboard, release.dashboard);
 });

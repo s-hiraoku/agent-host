@@ -1,4 +1,6 @@
 import { compareAgents, matchesView } from "./discovery.js";
+import { createHash } from "node:crypto";
+import { posix, sep, win32 } from "node:path";
 
 export const API_VERSION = "1";
 export const DEFAULT_PAGE_LIMIT = 50;
@@ -6,6 +8,8 @@ export const MAX_PAGE_LIMIT = 200;
 
 const STATUSES = new Set(["unknown", "idle", "working", "blocked", "done", "error"]);
 const VIEWS = new Set(["active", "recent", "historical", "raw"]);
+const SORTS = new Set(["attention", "activity", "name", "provider", "status"]);
+const DIRECTIONS = new Set(["asc", "desc"]);
 const CAPABILITIES = ["prompt", "sendKeys", "approve", "reject", "interrupt", "focus", "read"];
 
 function compact(object) {
@@ -13,6 +17,10 @@ function compact(object) {
 }
 
 function approvalView(approval) {
+  const context = approvalContextView(approval?.context);
+  const actionable = approval?.method === "item/fileChange/requestApproval"
+    ? Boolean(approval?.actionable && context?.files.length)
+    : approval?.actionable;
   return compact({
     approvalId: approval?.approvalId,
     method: approval?.method,
@@ -23,19 +31,76 @@ function approvalView(approval) {
     command: approval?.command,
     cwd: approval?.cwd,
     availableDecisions: approval?.availableDecisions,
+    context: actionable === false ? undefined : context,
+    actionable,
   });
+}
+
+export function isActionableApproval(approval) {
+  if (!approval || approval.actionable === false) return false;
+  return approval.method !== "item/fileChange/requestApproval" || approvalView(approval).actionable === true;
+}
+
+function approvalContextView(context) {
+  if (context?.kind !== "file-change") return undefined;
+  const supplied = Array.isArray(context.files) ? context.files : [];
+  const validated = supplied.flatMap((file) => {
+    const path = publicApprovalPath(file?.path);
+    if (!path || !["add", "delete", "update"].includes(file.kind)) return [];
+    return [{ path, kind: file.kind }];
+  });
+  if (validated.length !== supplied.length || validated.length === 0) return undefined;
+  const files = validated.slice(0, 20);
+  const fileCount = Number.isInteger(context.fileCount) && context.fileCount >= supplied.length
+    ? context.fileCount
+    : supplied.length;
+  return {
+    kind: "file-change",
+    fileCount,
+    files,
+    truncated: Boolean(context.truncated) || supplied.length > files.length || fileCount > files.length,
+  };
+}
+
+function publicApprovalPath(value) {
+  if (typeof value !== "string" || !value
+    || /[\u0000-\u001f\u007f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/u.test(value)) return undefined;
+  const portable = sep === "\\" ? value.replaceAll("\\", "/") : value;
+  if (portable.startsWith("/") || /^[A-Za-z]:/.test(portable)) return undefined;
+  const segments = portable.split("/").filter((segment) => segment && segment !== ".");
+  if (segments.length === 0 || segments.includes("..")) return undefined;
+  const normalized = segments.join("/");
+  return normalized.length <= 240 ? normalized : undefined;
+}
+
+export function projectView(cwd, platform = process.platform) {
+  const paths = platform === "win32" ? win32 : posix;
+  if (typeof cwd !== "string" || !paths.isAbsolute(cwd)) return undefined;
+  const resolved = paths.resolve(cwd);
+  const canonical = platform === "win32" ? resolved.toLowerCase() : resolved;
+  return {
+    id: `local:${createHash("sha256").update(canonical).digest("base64url").slice(0, 22)}`,
+    name: paths.basename(resolved) || resolved,
+    scope: "local",
+  };
 }
 
 export function agentSummary(agent) {
   const pendingApprovals = agent.pendingApprovals ?? [];
+  const hasActionableApproval = pendingApprovals.some((approval) => {
+    return isActionableApproval(approval);
+  });
   return compact({
     id: agent.id,
     provider: agent.provider,
     source: agent.source,
     name: agent.name,
     status: agent.status,
-    capabilities: Object.fromEntries(CAPABILITIES.map((name) => [name, Boolean(agent.capabilities?.[name])])),
+    capabilities: Object.fromEntries(CAPABILITIES.map((name) => [name, Boolean(
+      agent.capabilities?.[name] && (!["approve", "reject"].includes(name) || hasActionableApproval),
+    )])),
     cwd: agent.cwd,
+    project: projectView(agent.cwd),
     lastActivityAt: agent.lastActivityAt ?? agent.updatedAt,
     discoveredAt: agent.discoveredAt,
     updatedAt: agent.updatedAt,
@@ -73,7 +138,7 @@ export function actionResult(result, agentId, action) {
 
 export function eventView(event) {
   if (!event.agent) return { ...event };
-  const { cwd: _cwd, pendingApprovals = [], ...agent } = agentDetail(event.agent);
+  const { cwd: _cwd, project: _project, pendingApprovals = [], ...agent } = agentDetail(event.agent);
   return {
     ...event,
     agent: {
@@ -96,6 +161,10 @@ export function parseAgentListQuery(searchParams, revision) {
   if (invalidStatus) throw new ContractError("invalid_status", `unsupported status: ${invalidStatus}`);
   const view = searchParams.get("view") ?? "recent";
   if (!VIEWS.has(view)) throw new ContractError("invalid_view", `unsupported view: ${view}`);
+  const sort = searchParams.get("sort") ?? "attention";
+  if (!SORTS.has(sort)) throw new ContractError("invalid_sort", `unsupported sort: ${sort}`);
+  const direction = searchParams.get("direction") ?? (sort === "activity" ? "desc" : "asc");
+  if (!DIRECTIONS.has(direction)) throw new ContractError("invalid_direction", `unsupported direction: ${direction}`);
 
   const filter = {
     view,
@@ -103,6 +172,8 @@ export function parseAgentListQuery(searchParams, revision) {
     statuses,
     cwd: searchParams.get("cwd")?.trim().toLocaleLowerCase() ?? "",
     query: searchParams.get("q")?.trim().toLocaleLowerCase() ?? "",
+    sort,
+    direction,
   };
   const filterKey = JSON.stringify(filter);
   const cursor = searchParams.get("cursor");
@@ -111,7 +182,7 @@ export function parseAgentListQuery(searchParams, revision) {
 }
 
 export function pageAgents(agents, query, revision) {
-  const filtered = agents.filter((agent) => matches(agent, query.filter)).sort(compareAgents);
+  const filtered = agents.filter((agent) => matches(agent, query.filter)).sort(comparator(query.filter));
   if (query.offset > filtered.length) {
     throw new ContractError("invalid_cursor", "cursor offset is outside the current result set");
   }
@@ -119,14 +190,65 @@ export function pageAgents(agents, query, revision) {
   const nextOffset = query.offset + page.length;
   return {
     agents: page.map(agentSummary),
+    facets: facetsFor(agents, query.filter, revision),
     page: compact({
       limit: query.limit,
       total: filtered.length,
+      sort: query.filter.sort,
+      direction: query.filter.direction,
       nextCursor: nextOffset < filtered.length
         ? encodeCursor(nextOffset, revision, query.filterKey)
         : undefined,
     }),
   };
+}
+
+function comparator(filter) {
+  const direction = filter.direction === "desc" ? -1 : 1;
+  if (filter.sort === "attention") return (left, right) => direction * compareAgents(left, right);
+  return (left, right) => {
+    let result;
+    if (filter.sort === "activity") {
+      result = compareTimestamp(left.lastActivityAt ?? left.updatedAt, right.lastActivityAt ?? right.updatedAt);
+    } else if (filter.sort === "status") {
+      result = compareText(left.status, right.status);
+    } else {
+      result = compareText(left[filter.sort], right[filter.sort]);
+    }
+    return result ? direction * result : compareText(left.id, right.id);
+  };
+}
+
+function compareTimestamp(left, right) {
+  const a = Date.parse(left ?? "");
+  const b = Date.parse(right ?? "");
+  if (Number.isFinite(a) && Number.isFinite(b)) return a < b ? -1 : a > b ? 1 : 0;
+  if (Number.isFinite(a)) return 1;
+  if (Number.isFinite(b)) return -1;
+  return compareText(left, right);
+}
+
+function compareText(left, right) {
+  const a = String(left ?? "").normalize("NFKC").toLowerCase();
+  const b = String(right ?? "").normalize("NFKC").toLowerCase();
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function facetsFor(agents, filter, revision) {
+  const withoutProviders = { ...filter, providers: [] };
+  const withoutStatuses = { ...filter, statuses: [] };
+  return {
+    revision,
+    providers: counts(agents.filter((agent) => matches(agent, withoutProviders)), "provider"),
+    statuses: counts(agents.filter((agent) => matches(agent, withoutStatuses)), "status"),
+  };
+}
+
+function counts(agents, field) {
+  const result = new Map();
+  for (const agent of agents) result.set(agent[field], (result.get(agent[field]) ?? 0) + 1);
+  return [...result].sort(([left], [right]) => compareText(left, right))
+    .map(([value, count]) => ({ value, count }));
 }
 
 export class ContractError extends Error {

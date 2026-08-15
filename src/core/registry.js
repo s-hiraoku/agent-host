@@ -5,6 +5,7 @@ import {
   normalizeRepositoryContext,
   repositoryContextsEqual,
 } from "./repository-associations.js";
+import { isActionableApproval } from "./contracts.js";
 
 const ACTION_CAPABILITIES = new Map([
   ["prompt", "prompt"],
@@ -650,6 +651,9 @@ export class AgentRegistry {
     if (!agent.capabilities?.[capability]) {
       return { ok: false, code: "capability_not_available", agentId: id, action, message: `capability ${capability} is not available` };
     }
+    if ((action === "approve" || action === "reject") && !actionableApproval(agent, payload?.approvalId)) {
+      return { ok: false, code: "capability_not_available", agentId: id, action, message: "approval is not safely actionable" };
+    }
 
     let result;
     try {
@@ -704,6 +708,15 @@ export class AgentRegistry {
     });
     return normalizedResult;
   }
+}
+
+function actionableApproval(agent, requestedId) {
+  const approvals = agent.pendingApprovals ?? [];
+  const approval = requestedId !== undefined
+    ? approvals.find((candidate) => String(candidate.approvalId) === String(requestedId))
+    : approvals.length === 1 ? approvals[0] : undefined;
+  if (!approval) return false;
+  return isActionableApproval(approval);
 }
 
 function historyOverlay(agents, historyAgents) {

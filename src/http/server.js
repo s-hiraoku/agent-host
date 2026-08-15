@@ -16,6 +16,8 @@ import {
   repositoryAssociationCapabilities,
   parseRepositoryAssociationVersion,
 } from "../core/repository-associations.js";
+import { createStaticDashboard } from "./static-dashboard.js";
+import { publicReleaseInfo } from "../release-info.js";
 
 const MAX_BODY_BYTES = 1_000_000;
 
@@ -70,6 +72,7 @@ export function createAgentServer(registry, options) {
   const operations = options.operations;
   const security = createApiSecurity(options);
   const actionExecutor = new ActionExecutor(registry, options);
+  const serveDashboard = createStaticDashboard(options.dashboardDirectory);
   let stopping = false;
   const server = createServer(async (req, res) => {
     let audit;
@@ -99,6 +102,9 @@ export function createAgentServer(registry, options) {
     };
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
+      if (url.pathname === "/agent-host" || url.pathname.startsWith("/agent-host/")) {
+        url.pathname = url.pathname.slice("/agent-host".length) || "/";
+      }
       const actionMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(prompt|send-keys|approve|reject|interrupt|focus|read)$/);
       const requestOrigin = security.validateHost(req, server.address());
       const origin = security.validateOrigin(req, requestOrigin);
@@ -125,7 +131,13 @@ export function createAgentServer(registry, options) {
       }
 
       if (req.method === "GET" && url.pathname === "/health") {
-        return send(res, 200, { ok: true, live: true, apiVersion: API_VERSION, revision: registry.revision });
+        return send(res, 200, {
+          ok: true,
+          live: true,
+          apiVersion: API_VERSION,
+          ...publicReleaseInfo(),
+          revision: registry.revision,
+        });
       }
       if (req.method === "GET" && url.pathname === "/ready") {
         const { adapters: _adapters, ...readiness } = registry.readiness();
@@ -138,10 +150,12 @@ export function createAgentServer(registry, options) {
       if (req.method === "GET" && url.pathname === "/v1/adapters") {
         return send(res, 200, {
           apiVersion: API_VERSION,
+          ...publicReleaseInfo(),
           revision: registry.revision,
           ...registry.readiness(),
         });
       }
+      if (!url.pathname.startsWith("/v1") && serveDashboard && await serveDashboard(req, res, url.pathname)) return;
       if (req.method === "GET" && url.pathname === "/v1/capabilities") {
         return sendPrivate(res, 200, {
           apiVersion: API_VERSION,

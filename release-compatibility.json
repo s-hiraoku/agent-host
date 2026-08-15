@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "productVersion": "0.3.0",
+  "apiVersions": ["1"],
+  "configSchema": {
+    "reads": [1],
+    "writes": 1
+  },
+  "node": ">=22 <25",
+  "adapters": {
+    "codex": ">=0.144.6 <0.145.0",
+    "herdr": ">=0.7.5 <0.8.0"
+  },
+  "dashboard": {
+    "repository": "s-hiraoku/agent-host-dashboard",
+    "commit": "f641cb09e144490297fb3fe6759bac42aeb8e799",
+    "version": "0.1.0",
+    "apiVersions": ["1"]
+  }
+}
