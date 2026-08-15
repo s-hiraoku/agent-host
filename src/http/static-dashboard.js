@@ -1,4 +1,5 @@
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 
 const MEDIA_TYPES = new Map([
@@ -14,8 +15,9 @@ const MEDIA_TYPES = new Map([
   [".woff2", "font/woff2"],
 ]);
 
-export function createStaticDashboard(directory) {
+export function createStaticDashboard(directory, fileSystem = { lstat, open, realpath }) {
   if (!directory) return undefined;
+  if (!Number.isInteger(constants.O_NOFOLLOW)) throw new Error("static dashboard serving requires O_NOFOLLOW support");
   const root = resolve(directory);
   return async function serveStaticDashboard(req, res, pathname) {
     if (req.method !== "GET" && req.method !== "HEAD") return false;
@@ -26,18 +28,25 @@ export function createStaticDashboard(directory) {
     const requested = decoded === "/" || !extname(decoded) ? "index.html" : decoded.slice(1);
     const path = resolve(root, requested);
     if (path !== root && !path.startsWith(`${root}${sep}`)) return false;
+    let file;
     let body;
     try {
-      const stat = await lstat(path);
+      const stat = await fileSystem.lstat(path);
       if (!stat.isFile() || stat.isSymbolicLink()) return false;
-      const realPath = await realpath(path);
-      const realRoot = await realpath(root);
+      const realPath = await fileSystem.realpath(path);
+      const realRoot = await fileSystem.realpath(root);
       if (!realPath.startsWith(`${realRoot}${sep}`)) return false;
-      body = await readFile(realPath);
+      file = await fileSystem.open(realPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const opened = await file.stat();
+      if (!opened.isFile()) return false;
+      body = await file.readFile();
     }
     catch (error) {
-      if (error?.code === "ENOENT" || error?.code === "EISDIR") return false;
+      if (["EISDIR", "ELOOP", "ENOENT", "ENOTDIR"].includes(error?.code)) return false;
       throw error;
+    }
+    finally {
+      await file?.close();
     }
     const extension = extname(path).toLowerCase();
     if (!MEDIA_TYPES.has(extension)) return false;

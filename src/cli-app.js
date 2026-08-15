@@ -21,7 +21,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { AGENT_HOST_VERSION, OperationsContext } from "./operations/context.js";
+import { OperationsContext, diagnosticVersions } from "./operations/context.js";
 import { createRedactor } from "./operations/redact.js";
 import { publicReleaseInfo } from "./release-info.js";
 
@@ -99,13 +99,7 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
     }
     const bundle = redact(remote ?? {
       generatedAt: new Date().toISOString(),
-      versions: {
-        agentHost: AGENT_HOST_VERSION,
-        ...publicReleaseInfo(),
-        node: process.version,
-        platform: process.platform,
-        arch: process.arch,
-      },
+      versions: diagnosticVersions(),
       configuration: diagnosticConfiguration(configuration),
       lock: publicLock(await inspectInstanceLock(configuration.lockFile, dependencies.lockOptions)),
       service: serviceState,

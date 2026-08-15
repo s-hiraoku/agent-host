@@ -27,9 +27,9 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 
 - Branch: `codex/issue-11-backend-release-gate`
 - Issue: https://github.com/s-hiraoku/agent-host/issues/11
-- Base: `codex/issue-10-packaging-updates` at `07d645b` (PR #20)
-- PR: https://github.com/s-hiraoku/agent-host/pull/21 (stacked on PR #20)
-- Next: monitor PR #21 CI/review; after PRs #19/#20 merge, retarget the stack and hand off dashboard adoption, published-release, and real-environment close-out gates to the user.
+- Base: `main` at `d630a79` after PRs #19, #20, and #21 integrated
+- PR: https://github.com/s-hiraoku/agent-host/pull/22
+- Next: complete the externally owned dashboard adoption, published-release, clean-Mac, real Herdr/Codex workflow, and daily-use close-out gates recorded in `docs/release-gate.md`.
 
 ## Progress notes
 

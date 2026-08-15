@@ -275,15 +275,25 @@ async function recoverTransaction({ prefix, binDirectory, nodePath }) {
   const to = validVersion(transaction.to);
   const from = transaction.from === null ? null : validVersion(transaction.from);
   if (state?.current === to) {
+    await validateRecoveryTarget(prefix, to);
     await switchCurrent(prefix, to);
     await writeLauncher({ prefix, binDirectory, nodePath });
   } else if (from) {
+    await validateRecoveryTarget(prefix, from);
     await switchCurrent(prefix, from);
     await writeLauncher({ prefix, binDirectory, nodePath });
   } else {
     await removeCurrentAndLauncher(prefix, binDirectory);
   }
   await clearTransaction(prefix);
+}
+
+async function validateRecoveryTarget(prefix, version) {
+  try {
+    await validateReleaseSource(join(prefix, "releases", version));
+  } catch (error) {
+    throw new Error(`cannot recover install transaction because release ${version} is unavailable or invalid`, { cause: error });
+  }
 }
 
 async function restorePrevious({ prefix, binDirectory, nodePath, previousState }) {

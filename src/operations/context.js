@@ -6,6 +6,16 @@ import { publicReleaseInfo } from "../release-info.js";
 
 export const AGENT_HOST_VERSION = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
 
+export function diagnosticVersions() {
+  return {
+    agentHost: AGENT_HOST_VERSION,
+    ...publicReleaseInfo(),
+    node: process.version,
+    platform: process.platform,
+    arch: process.arch,
+  };
+}
+
 export class OperationsContext {
   constructor(options = {}) {
     this.redact = options.redact ?? createRedactor(options);
@@ -19,17 +29,9 @@ export class OperationsContext {
   }
 
   snapshot(extra = {}) {
-    const release = publicReleaseInfo();
     return this.redact({
       generatedAt: new Date().toISOString(),
-      versions: {
-        agentHost: AGENT_HOST_VERSION,
-        apiVersions: release.apiVersions,
-        dashboard: release.dashboard,
-        node: process.version,
-        platform: process.platform,
-        arch: process.arch,
-      },
+      versions: diagnosticVersions(),
       metrics: this.metrics.snapshot(),
       logging: this.logger.sinkStatus(),
       recentLogs: this.logger.recent(),

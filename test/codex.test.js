@@ -225,10 +225,13 @@ test("Codex adapter exposes and resolves semantic approvals", async () => {
       item: { id: "item_replaced", type: "fileChange", status: "completed", changes: [{ path: "different-safe.js", kind: "update" }] },
     },
   });
-  const replaced = (await adapter.discover())[0].pendingApprovals[0];
+  const [replacedAgent] = await adapter.discover();
+  const replaced = replacedAgent.pendingApprovals[0];
   assert.equal(replaced.actionable, false);
   assert.equal(replaced.context, undefined);
-  assert.equal((await adapter.approve(replaced, { approvalId: "74" })).ok, false);
+  const replacedApproval = await adapter.approve(replacedAgent, { approvalId: "74" });
+  assert.equal(replacedApproval.ok, false);
+  assert.match(replacedApproval.message, /sanitized file context/);
   client.emitNotification({ method: "serverRequest/resolved", params: { requestId: 74 } });
 
   const unsafeChanges = Array.from({ length: 21 }, (_, index) => ({

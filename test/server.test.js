@@ -1,13 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { get } from "node:http";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEventBus } from "../src/core/event-bus.js";
 import { AgentRegistry } from "../src/core/registry.js";
 import { agentSummary, pageAgents, parseAgentListQuery, projectView } from "../src/core/contracts.js";
+import { compareAgents } from "../src/core/discovery.js";
 import { createAgentServer } from "../src/http/server.js";
+import { createStaticDashboard } from "../src/http/static-dashboard.js";
 import { OperationsContext } from "../src/operations/context.js";
 
 const API_TOKEN = "test-api-token";
@@ -23,16 +25,31 @@ test("attention sorting compares activity timestamps as instants", () => {
       id: "fixture:beta", provider: "fixture", source: "fixture", name: "Beta", status: "idle",
       capabilities: {}, lastActivityAt: "2026-08-12T08:00:00-05:00",
     },
+    {
+      id: "fixture:invalid", provider: "fixture", source: "fixture", name: "Invalid", status: "idle",
+      capabilities: {}, lastActivityAt: "not-a-timestamp",
+    },
   ];
   const ascending = parseAgentListQuery(new URLSearchParams("sort=attention"), 1);
   const descending = parseAgentListQuery(new URLSearchParams("sort=attention&direction=desc"), 1);
 
   assert.deepEqual(pageAgents(agents, ascending, 1).agents.map((agent) => agent.id), [
-    "fixture:beta", "fixture:alpha",
+    "fixture:beta", "fixture:alpha", "fixture:invalid",
   ]);
   assert.deepEqual(pageAgents(agents, descending, 1).agents.map((agent) => agent.id), [
-    "fixture:alpha", "fixture:beta",
+    "fixture:invalid", "fixture:alpha", "fixture:beta",
   ]);
+});
+
+test("attention sorting ranks valid timestamps ahead of invalid values consistently", () => {
+  const valid = { id: "valid", status: "idle", discovery: {}, lastActivityAt: "2026-08-12T12:00:00Z" };
+  const older = { id: "older", status: "idle", discovery: {}, lastActivityAt: "2026-08-12T11:00:00Z" };
+  const invalid = { id: "invalid", status: "idle", discovery: {}, lastActivityAt: "not-a-timestamp" };
+  assert.equal(Math.sign(compareAgents(valid, older)), -1);
+  assert.equal(Math.sign(compareAgents(older, valid)), 1);
+  assert.equal(Math.sign(compareAgents(older, invalid)), -1);
+  assert.equal(Math.sign(compareAgents(invalid, older)), 1);
+  assert.equal(Math.sign(compareAgents(valid, invalid)), -1);
 });
 
 test("project identity preserves significant cwd whitespace", () => {
@@ -112,6 +129,78 @@ test("serves the pinned dashboard and same-origin API alias without weakening au
   assert.equal(api.serverVersion, "0.3.0");
   assert.equal((await fetch(`${base}/agent-host/v1/unknown`, { headers: AUTHORIZATION })).status, 404);
 });
+
+test("static dashboard reads from a no-follow file descriptor across path replacement", async (t) => {
+  const dashboard = await mkdtemp(join(tmpdir(), "agent-host-dashboard-race-"));
+  t.after(() => rm(dashboard, { recursive: true, force: true }));
+  const asset = join(dashboard, "asset.js");
+  const original = join(dashboard, "asset.original.js");
+  const secret = join(dashboard, "secret.js");
+  await writeFile(asset, "safe");
+  await writeFile(secret, "secret");
+
+  let closed = 0;
+  const swappingFileSystem = {
+    lstat,
+    realpath,
+    async open(path, flags) {
+      const handle = await open(path, flags);
+      await rename(path, original);
+      await symlink(secret, path);
+      return {
+        stat: () => handle.stat(),
+        readFile: () => handle.readFile(),
+        async close() { closed += 1; await handle.close(); },
+      };
+    },
+  };
+  const response = captureResponse();
+  assert.equal(await createStaticDashboard(dashboard, swappingFileSystem)({ method: "GET" }, response, "/asset.js"), true);
+  assert.equal(response.body.toString(), "safe");
+  assert.equal(closed, 1);
+
+  await rm(asset);
+  await rename(original, asset);
+  const replaceBeforeOpen = {
+    lstat,
+    realpath,
+    async open(path, flags) {
+      await rename(path, original);
+      await symlink(secret, path);
+      return open(path, flags);
+    },
+  };
+  assert.equal(await createStaticDashboard(dashboard, replaceBeforeOpen)({ method: "GET" }, captureResponse(), "/asset.js"), false);
+
+  await rm(asset);
+  await rename(original, asset);
+  let closedAfterFailure = 0;
+  const failingFileSystem = {
+    lstat,
+    realpath,
+    async open(path, flags) {
+      const handle = await open(path, flags);
+      return {
+        async stat() { throw new Error("injected descriptor validation failure"); },
+        readFile: () => handle.readFile(),
+        async close() { closedAfterFailure += 1; await handle.close(); },
+      };
+    },
+  };
+  await assert.rejects(
+    createStaticDashboard(dashboard, failingFileSystem)({ method: "GET" }, captureResponse(), "/asset.js"),
+    /descriptor validation failure/,
+  );
+  assert.equal(closedAfterFailure, 1);
+});
+
+function captureResponse() {
+  return {
+    body: Buffer.alloc(0),
+    writeHead(status, headers) { this.status = status; this.headers = headers; },
+    end(body) { if (body) this.body = Buffer.from(body); },
+  };
+}
 
 test("server shutdown closes active SSE clients before registry cleanup", { timeout: 2000 }, async () => {
   let closeCalls = 0;
