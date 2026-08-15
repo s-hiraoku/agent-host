@@ -253,7 +253,10 @@ settings are:
 Relative paths in the JSON file resolve from the configuration directory. CLI and
 environment paths resolve from the current working directory. State directories are
 owner-only; configuration, token, lock, and LaunchAgent files reject unsafe ownership
-or symbolic-link use where they are read or replaced.
+or symbolic-link use where they are read or replaced. Dashboard assets are opened with
+no-follow semantics and read through the opened file descriptor. Keep a custom
+`dashboardDirectory` and its parent directories trusted and non-writable by other
+accounts; the packaged install satisfies this boundary with its private versioned root.
 
 ### Service lifecycle
 

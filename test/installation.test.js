@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -97,6 +97,40 @@ test("transaction cleanup failure keeps committed state consistent and recovers 
   await lstat(join(prefix, "install-transaction.json"));
   assert.equal((await installRelease({ source: second, prefix, binDirectory })).current, "0.3.0");
   await assert.rejects(lstat(join(prefix, "install-transaction.json")), { code: "ENOENT" });
+});
+
+test("transaction recovery refuses missing completion and rollback targets without mutation", async (t) => {
+  for (const selected of ["to", "from"]) {
+    await t.test(`missing ${selected} release`, async (t) => {
+      const home = await mkdtemp(join(tmpdir(), `agent-host-install-missing-${selected}-`));
+      t.after(() => rm(home, { recursive: true, force: true }));
+      const prefix = join(home, "install");
+      const binDirectory = join(home, "bin");
+      const first = await fixtureRelease(home, "0.2.0");
+      const second = await fixtureRelease(home, "0.3.0");
+      await installRelease({ source: first, prefix, binDirectory });
+      await installRelease({ source: second, prefix, binDirectory });
+      await writeFile(join(prefix, "install-state.json"), JSON.stringify({
+        schemaVersion: 1,
+        current: selected === "to" ? "0.3.0" : "0.2.0",
+        previous: null,
+      }));
+      await writeFile(join(prefix, "install-transaction.json"), JSON.stringify({
+        schemaVersion: 1, from: "0.2.0", to: "0.3.0",
+      }));
+      const currentBefore = await readlink(join(prefix, "current"));
+      await rm(join(prefix, "releases", selected === "to" ? "0.3.0" : "0.2.0"), { recursive: true });
+      const launcherBefore = await readFile(join(binDirectory, "agent-host"), "utf8");
+
+      await assert.rejects(
+        installRelease({ source: second, prefix, binDirectory }),
+        new RegExp(`cannot recover install transaction because release ${selected === "to" ? "0.3.0" : "0.2.0"}`),
+      );
+      await lstat(join(prefix, "install-transaction.json"));
+      assert.equal(await readFile(join(binDirectory, "agent-host"), "utf8"), launcherBefore);
+      assert.equal(await readlink(join(prefix, "current")), currentBefore);
+    });
+  }
 });
 
 test("installer rejects incompatible dashboard releases, links, unsafe roots, and concurrent transactions", async (t) => {

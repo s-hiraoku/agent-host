@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runCli } from "../src/cli-app.js";
 import { inspectInstanceLock } from "../src/instance-lock.js";
+import { RELEASE_COMPATIBILITY } from "../src/release-info.js";
 
 async function waitFor(predicate) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -24,6 +25,15 @@ test("version reports product, API, and bundled dashboard compatibility without 
     configSchema: { reads: [1], writes: 1 },
     dashboard: { version: "0.1.0", apiVersions: ["1"] },
   });
+});
+
+test("release compatibility metadata is deeply immutable", () => {
+  assert.throws(() => RELEASE_COMPATIBILITY.apiVersions.push("2"), TypeError);
+  assert.throws(() => { RELEASE_COMPATIBILITY.dashboard.version = "mutated"; }, TypeError);
+  assert.throws(() => RELEASE_COMPATIBILITY.configSchema.reads.push(2), TypeError);
+  assert.deepEqual(RELEASE_COMPATIBILITY.apiVersions, ["1"]);
+  assert.equal(RELEASE_COMPATIBILITY.dashboard.version, "0.1.0");
+  assert.deepEqual(RELEASE_COMPATIBILITY.configSchema.reads, [1]);
 });
 
 test("fresh-home init creates versioned config and private token without printing the secret", async (t) => {

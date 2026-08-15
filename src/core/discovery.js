@@ -44,6 +44,8 @@ function compareActivity(left, right) {
   const a = Date.parse(left ?? "");
   const b = Date.parse(right ?? "");
   if (Number.isFinite(a) && Number.isFinite(b)) return a < b ? 1 : a > b ? -1 : 0;
+  if (Number.isFinite(a)) return -1;
+  if (Number.isFinite(b)) return 1;
   const aText = String(left ?? "");
   const bText = String(right ?? "");
   return aText < bText ? 1 : aText > bText ? -1 : 0;
