@@ -20,16 +20,16 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - [x] #7 Supported live-session integration
 - [x] #8 Configuration and service lifecycle
 - [x] #9 Operational resilience and diagnostics
-- [ ] #10 Packaging, versioning, and updates
+- [x] #10 Packaging, versioning, and updates
 - [ ] #11 Backend portion of integrated release gate
 
 ## Current step
 
-- Branch: `codex/issue-9-operational-resilience`
-- Issue: https://github.com/s-hiraoku/agent-host/issues/9
-- Base: `main` at merge commit `443461a` (PR #18)
-- PR: https://github.com/s-hiraoku/agent-host/pull/19
-- Next: monitor PR #19 checks and review feedback, then begin Issue #10 from the verified Issue #9 head while merge remains user-gated.
+- Branch: `codex/issue-11-backend-release-gate`
+- Issue: https://github.com/s-hiraoku/agent-host/issues/11
+- Base: `main` at `d630a79` after PRs #19, #20, and #21 integrated
+- PR: https://github.com/s-hiraoku/agent-host/pull/22
+- Next: complete the externally owned dashboard adoption, published-release, clean-Mac, real Herdr/Codex workflow, and daily-use close-out gates recorded in `docs/release-gate.md`.
 
 ## Progress notes
 
@@ -50,3 +50,9 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - 2026-08-12: User merged PR #18 as `443461a`. Rebasing the Issue #9 branch onto that merge required no conflict; all in-progress #9 changes were preserved.
 - 2026-08-12: Completed Issue #9 implementation with centrally redacted bounded JSONL logging and metrics, authenticated/offline diagnostics, per-adapter circuit backoff and recovery, bounded SSE/action queues, abort-aware actions, deadline-bounded shutdown, and an eight-hour-equivalent accelerated soak. Adviser completion review identified untested logging sink failures; EACCES, ENOSPC, and rotation-rename fault injection now proves failures degrade into bounded diagnostics rather than terminating the host. The final 100-test suite and 28,800-cycle soak pass.
 - 2026-08-12: Opened regular ready-for-review PR #19 for Issue #9. Merge remains gated on explicit user authorization; packaging and upgrade work continues separately under Issue #10.
+- 2026-08-12: Began Issue #10 on a dependent branch. Adviser review selected an integrated source artifact containing host plus built assets from a pinned dashboard commit, same-origin serving through the existing listener, immutable version directories behind an atomic pointer, a stable LaunchAgent launcher, checksums/SBOM/provenance, and transactional rollback while preserving `~/.agent-host` state.
+- 2026-08-12: Completed Issue #10 implementation and candidate verification. The exact pinned dashboard commit passed 158 tests/build/live conformance; the host passed 110 tests; extracted-artifact install/version and real macOS LaunchAgent lifecycle passed. Adviser completion review found stale-lock takeover and transaction-cleanup recovery races; deterministic inode quarantine, ownership-safe release, durable recovery markers, Node 23 CI, and fault-injection tests resolved every blocker. Adviser re-review returned GO.
+- 2026-08-12: Opened regular ready-for-review stacked PR #20 for Issue #10 with base PR #19. No release tag or GitHub Release was created; merging and publication remain explicitly user-gated.
+- 2026-08-12: PR #20's first integrated-artifact run failed before dashboard checkout because escaped nested quotes made the compatibility-manifest shell expression invalid. A focused CI fix now passes Node 22/23/24 and the pinned-dashboard build, extracted install, and live conformance job at run 31594311951.
+- 2026-08-12: Evaluated every Issue #11 acceptance item. Implemented the remaining additive backend contracts for global sort, revision-consistent facets, stable local project association, and fail-closed sanitized file-change approval context. Stable release remains NO-GO pending dashboard adoption and CI, dependency merges, a published RC, clean-Mac timed setup and reboot, complete real Herdr/Codex workflows, and normal daily use. The evidence and external close-out checklist are recorded in `docs/release-gate.md`.
+- 2026-08-12: Opened regular ready-for-review stacked PR #21 for the Issue #11 backend contracts and release-gate evidence. Adviser returned GO after malicious-adapter, wrong-turn, path-safety, and bounded-state findings were fixed. Issue #11 deliberately remains open for dashboard adoption and real-environment release gates.
