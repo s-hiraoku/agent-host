@@ -1,0 +1,37 @@
+{
+  "name": "agent-host-cursor-companion-spike",
+  "displayName": "Agent Host Cursor Companion Spike",
+  "description": "Diagnoses whether a stock Cursor extension can access the desktop agent host surface.",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "publisher": "agent-host",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/s-hiraoku/agent-host.git"
+  },
+  "engines": {
+    "vscode": ">=1.128.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:agentHost.cursorCompanion.runProbe"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentHost.cursorCompanion.runProbe",
+        "title": "Agent Host: Run Cursor Companion Probe"
+      }
+    ]
+  },
+  "scripts": {
+    "prepackage": "node -e \"require('node:fs').mkdirSync('dist', { recursive: true })\"",
+    "package": "npx --yes @vscode/vsce@3.9.2 package --out dist/agent-host-cursor-companion-spike.vsix"
+  }
+}
