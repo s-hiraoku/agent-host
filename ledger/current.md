@@ -29,8 +29,8 @@ Publish Issue #23's stable, versioned, provider-neutral repository association c
 - Branch: `codex/issue-23-repository-associations`
 - Issue: https://github.com/s-hiraoku/agent-host/issues/23
 - Base: `main` at `d630a79` (PR #19 merge)
-- PR: pending
-- Next: run full verification, completion review, commit, push, open a ready PR, and audit immediate CI/review state.
+- PR: https://github.com/s-hiraoku/agent-host/pull/25
+- Next: audit current-head CI, bot/human feedback, and review threads; apply any actionable findings without merging.
 
 ## Progress notes
 
@@ -53,3 +53,4 @@ Publish Issue #23's stable, versioned, provider-neutral repository association c
 - 2026-08-12: Opened regular ready-for-review PR #19 for Issue #9. Merge remains gated on explicit user authorization; packaging and upgrade work continues separately under Issue #10.
 - 2026-08-15: Oriented Issue #23 against the current host API and dashboard `RepositoryContextSource`. Adviser design review led to explicit adapter unsupported/unavailable states, forge-neutral coordinates, a separate repository revision, redacted no-replay SSE invalidation, strict bounds, no-store responses, and worktree path rejection.
 - 2026-08-15: Implemented the authenticated capability/detail contract, normalized adapter boundary, deterministic demo coverage, privacy-safe change event, language-neutral fixtures, live HTTP/SSE conformance, focused tests, and documentation. Full verification and completion review remain before PR creation.
+- 2026-08-15: Final verification passed with 113 tests, 2 live conformance tests, and a 2,000-cycle/1,000-agent quick soak. A fresh Adviser completion review found no blocker; its documentation and prompt-independence follow-ups were applied and reverified. Opened regular ready-for-review PR #25; merge remains user-gated.
