@@ -5,9 +5,10 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 const STATE_FILE = "install-state.json";
-const INCOMPLETE_LOCK_GRACE_MS = 5_000;
-
-export async function installRelease({ source, prefix, binDirectory, nodePath = process.execPath, beforeTransactionClear }) {
+export async function installRelease({
+  source, prefix, binDirectory, nodePath = process.execPath, beforeTransactionClear,
+  beforeLockOwnerWrite, afterStaleOwnerRead, beforeStaleLockRename,
+}) {
   assertSupportedNode();
   source = resolve(source);
   prefix = resolve(prefix);
@@ -62,7 +63,7 @@ export async function installRelease({ source, prefix, binDirectory, nodePath = 
     await beforeTransactionClear?.();
     await clearTransaction(prefix);
     return { installed: true, current: version, previous: previous ?? null, prefix };
-  });
+  }, { beforeOwnerWrite: beforeLockOwnerWrite, afterStaleOwnerRead, beforeStaleLockRename });
 }
 
 export async function rollbackRelease({ prefix, binDirectory, nodePath = process.execPath, beforeTransactionClear }) {
@@ -297,71 +298,90 @@ async function readState(prefix) {
   catch (error) { if (error?.code === "ENOENT") return undefined; throw error; }
 }
 
-async function withInstallLock(prefix, callback) {
+async function withInstallLock(prefix, callback, lockHooks) {
   await mkdir(prefix, { recursive: true, mode: 0o700 });
   await assertPrivateDirectory(prefix);
   const lock = join(prefix, ".install-lock");
-  const ownership = await acquireInstallLock(lock);
+  const ownership = await acquireInstallLock(lock, lockHooks);
   try { return await callback(); }
   finally {
     await unlinkOwnedLock(lock, ownership.identity);
-    for (const quarantine of ownership.quarantines) {
-      await unlinkOwnedLock(quarantine.path, quarantine.identity);
-    }
   }
 }
 
-async function acquireInstallLock(path) {
+async function acquireInstallLock(path, hooks = {}) {
   try {
     await mkdir(path, { mode: 0o700 });
+    const identity = await lstat(path);
     try {
+      await hooks.beforeOwnerWrite?.();
       await writeFile(join(path, "owner.json"), `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`, {
         mode: 0o600,
         flag: "wx",
       });
     } catch (error) {
-      await rm(path, { recursive: true, force: true });
+      await unlinkOwnedLock(path, identity);
       throw error;
     }
-    return { identity: await lstat(path), quarantines: [] };
+    return { identity };
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
-    let record;
-    let staleStat;
-    try { record = JSON.parse(await readFile(join(path, "owner.json"), "utf8")); }
-    catch {
-      staleStat = await lstat(path);
-      if (Date.now() - staleStat.mtimeMs < INCOMPLETE_LOCK_GRACE_MS) {
-        throw new Error("another agent-host install, update, or rollback is in progress");
-      }
+    let inspected;
+    try { inspected = await lstat(path); }
+    catch (inspectionError) {
+      if (inspectionError?.code === "ENOENT") return acquireInstallLock(path, hooks);
+      throw inspectionError;
     }
-    if (Number.isInteger(record?.pid) && processAlive(record.pid)) {
+    let record;
+    try { record = JSON.parse(await readFile(join(path, "owner.json"), "utf8")); }
+    catch (ownerError) {
+      if (ownerError?.code === "ENOENT") {
+        try {
+          const current = await lstat(path);
+          if (!sameIdentity(inspected, current)) return acquireInstallLock(path, hooks);
+        } catch (inspectionError) {
+          if (inspectionError?.code === "ENOENT") return acquireInstallLock(path, hooks);
+          throw inspectionError;
+        }
+      }
+      throw new Error("install lock is incomplete or malformed; verify no installer is running before removing it");
+    }
+    await hooks.afterStaleOwnerRead?.();
+    let staleStat;
+    try { staleStat = await lstat(path); }
+    catch (inspectionError) {
+      if (inspectionError?.code === "ENOENT") return acquireInstallLock(path, hooks);
+      throw inspectionError;
+    }
+    if (!sameIdentity(inspected, staleStat)) return acquireInstallLock(path, hooks);
+    if (!Number.isInteger(record?.pid) || record.pid <= 0 || !Number.isFinite(Date.parse(record.startedAt))) {
+      throw new Error("install lock is incomplete or malformed; verify no installer is running before removing it");
+    }
+    if (processAlive(record.pid)) {
       throw new Error("another agent-host install, update, or rollback is in progress");
     }
-    if (!Number.isInteger(record?.pid) && !staleStat) {
-      staleStat = await lstat(path);
-      if (Date.now() - staleStat.mtimeMs < INCOMPLETE_LOCK_GRACE_MS) {
-        throw new Error("another agent-host install, update, or rollback is in progress");
-      }
-    }
-    staleStat ??= await lstat(path);
     const quarantine = `${path}.stale-${staleStat.dev}-${staleStat.ino}`;
+    await hooks.beforeStaleLockRename?.();
     try { await rename(path, quarantine); }
     catch (takeoverError) {
       if (["EEXIST", "ENOTEMPTY", "ENOENT"].includes(takeoverError?.code)) {
-        throw new Error("another agent-host process acquired the stale install lock");
+        try {
+          const current = await lstat(path);
+          if (sameIdentity(staleStat, current)) {
+            throw new Error("another agent-host process acquired the stale install lock");
+          }
+        } catch (inspectionError) {
+          if (inspectionError?.code !== "ENOENT") throw inspectionError;
+        }
+        return acquireInstallLock(path, hooks);
       }
       throw takeoverError;
     }
     const quarantineIdentity = await lstat(quarantine);
-    try {
-      const ownership = await acquireInstallLock(path);
-      ownership.quarantines.push({ path: quarantine, identity: quarantineIdentity });
-      return ownership;
-    } catch (error) {
-      await unlinkOwnedLock(quarantine, quarantineIdentity);
-      throw error;
+    if (!sameIdentity(staleStat, quarantineIdentity)) {
+      throw new Error("install lock changed during stale takeover; verify no installer is running");
     }
+    return acquireInstallLock(path, hooks);
   }
 }
 
