@@ -1,0 +1,70 @@
+{
+  "fixtureVersion": 1,
+  "scenario": "repository-associations",
+  "capability": {
+    "path": "/v1/capabilities",
+    "name": "repositoryAssociations",
+    "version": "1",
+    "maxItems": 100
+  },
+  "request": {
+    "method": "GET",
+    "pathTemplate": "/v1/agents/{agentId}/repository-associations?version=1"
+  },
+  "cases": {
+    "zero": {
+      "agentId": "demo:idle",
+      "response": { "state": "ready", "freshness": "current", "complete": true, "associations": [] }
+    },
+    "one": {
+      "agentId": "demo:working",
+      "associationCount": 1,
+      "repository": {
+        "forge": "github",
+        "host": "forge.example",
+        "coordinates": { "kind": "named", "owner": "example-labs", "name": "orbit" },
+        "webUrl": "https://forge.example/example-labs/orbit"
+      }
+    },
+    "multiplePrivateCandidate": {
+      "agentId": "demo:blocked",
+      "associationCount": 2,
+      "expectedKinds": ["confirmed", "candidate"],
+      "expectedVisibilities": ["private", "public"]
+    },
+    "stale": {
+      "agentId": "demo:done",
+      "state": "ready",
+      "freshness": "stale",
+      "complete": true
+    },
+    "unavailable": {
+      "agentId": "demo:error",
+      "state": "unavailable",
+      "retryable": true
+    },
+    "unsupported": {
+      "agentId": "demo:unknown",
+      "state": "unsupported",
+      "reason": "adapter_not_supported"
+    },
+    "partial": {
+      "state": "ready",
+      "freshness": "current",
+      "complete": false,
+      "error": {
+        "code": "repository_associations_partial",
+        "retryable": false,
+        "rejectedCount": 1,
+        "overflowCount": 0
+      }
+    }
+  },
+  "changedAssociation": {
+    "agentId": "demo:idle",
+    "event": "agent.repository-associations.changed",
+    "payloadRule": "contains only agent and revision coordinates; refetch the no-store detail and never expect repository identity in the event",
+    "reconnectRule": "subscribe before the first fetch and refetch unconditionally after every reconnect or sequence gap"
+  },
+  "hostUnsupportedRule": "a 404 for the capability endpoint means unsupported; a supported host returns an explicit per-agent unsupported state"
+}

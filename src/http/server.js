@@ -12,6 +12,10 @@ import {
 import { createApiSecurity } from "./security.js";
 import { ActionExecutor } from "./action-executor.js";
 import { SseClient } from "./sse-client.js";
+import {
+  repositoryAssociationCapabilities,
+  parseRepositoryAssociationVersion,
+} from "../core/repository-associations.js";
 import { createStaticDashboard } from "./static-dashboard.js";
 import { publicReleaseInfo } from "../release-info.js";
 
@@ -40,6 +44,11 @@ function decodeSegment(value) {
 function send(res, status, body) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
+}
+
+function sendPrivate(res, status, body) {
+  res.setHeader("cache-control", "private, no-store");
+  send(res, status, body);
 }
 
 function sendError(res, status, code, message, details) {
@@ -147,6 +156,12 @@ export function createAgentServer(registry, options) {
         });
       }
       if (!url.pathname.startsWith("/v1") && serveDashboard && await serveDashboard(req, res, url.pathname)) return;
+      if (req.method === "GET" && url.pathname === "/v1/capabilities") {
+        return sendPrivate(res, 200, {
+          apiVersion: API_VERSION,
+          capabilities: { repositoryAssociations: repositoryAssociationCapabilities() },
+        });
+      }
       if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
         return send(res, 200, {
           apiVersion: API_VERSION,
@@ -216,6 +231,24 @@ export function createAgentServer(registry, options) {
         heartbeat.unref();
         req.on("close", () => client.close());
         return;
+      }
+      const repositoryMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/repository-associations$/);
+      if (req.method === "GET" && repositoryMatch) {
+        res.setHeader("cache-control", "private, no-store");
+        let associationVersion;
+        try { associationVersion = parseRepositoryAssociationVersion(url.searchParams); }
+        catch (error) { throw new ContractError(error.code, error.message, error.status); }
+        const agentId = decodeSegment(repositoryMatch[1]);
+        const result = registry.repositoryContext(agentId);
+        return result
+          ? sendPrivate(res, 200, {
+              apiVersion: API_VERSION,
+              associationVersion,
+              revision: result.revision,
+              agentId,
+              ...result.context,
+            })
+          : sendError(res, 404, "agent_not_found", "agent not found");
       }
       const agentMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)$/);
       if (req.method === "GET" && agentMatch) {

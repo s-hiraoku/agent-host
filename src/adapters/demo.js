@@ -8,6 +8,75 @@ function capabilities(overrides = {}) {
   return { ...noCapabilities(), ...overrides };
 }
 
+function repository(name, options = {}) {
+  const host = options.host ?? "forge.example";
+  const owner = options.owner ?? "example-labs";
+  return {
+    forge: options.forge ?? "github",
+    host,
+    coordinates: { kind: "named", owner, name },
+    webUrl: `https://${host}/${owner}/${name}`,
+    visibility: options.visibility ?? "public",
+  };
+}
+
+function confirmed(name, options = {}) {
+  const association = {
+    kind: "confirmed",
+    repository: repository(name, options),
+    provenance: { source: "adapter-authoritative", confidence: "high" },
+  };
+  if (options.branch || options.worktreeId) {
+    association.checkout = {
+      ...(options.branch ? { branch: options.branch } : {}),
+      ...(options.worktreeId ? { worktree: { id: options.worktreeId } } : {}),
+    };
+  }
+  if (options.pullRequest) {
+    association.pullRequest = {
+      number: options.pullRequest,
+      webUrl: `${association.repository.webUrl}/pull/${options.pullRequest}`,
+    };
+  }
+  return association;
+}
+
+function repositoryContext(key) {
+  if (key === "idle") return { state: "ready", associations: [] };
+  if (key === "working") {
+    return { state: "ready", associations: [confirmed("orbit", {
+      branch: "feature/repository-context", worktreeId: "orbit-primary", pullRequest: 42,
+    })] };
+  }
+  if (key === "blocked") {
+    return {
+      state: "ready",
+      associations: [
+        confirmed("private-orbit", { visibility: "private", branch: "secure/review" }),
+        {
+          kind: "candidate",
+          reason: "branch_match",
+          repository: repository("orbit-tools"),
+          provenance: { source: "adapter-heuristic", confidence: "medium" },
+          checkout: { branch: "secure/review" },
+        },
+      ],
+    };
+  }
+  if (key === "done") {
+    return {
+      state: "ready",
+      freshness: "stale",
+      observedAt: "2026-01-01T00:00:03.000Z",
+      associations: [confirmed("archive", { branch: "release/1.x" })],
+    };
+  }
+  if (key === "error") {
+    return { state: "unavailable", error: { code: "demo_source_unavailable", retryable: true } };
+  }
+  return { state: "unsupported" };
+}
+
 function initialAgents() {
   return [
     ["idle", "Idle", "idle", capabilities({ prompt: true, read: true })],
@@ -33,6 +102,7 @@ function initialAgents() {
         confidence: "high",
         visibility: ACTIVE_STATUSES.has(status) ? "active" : "recent",
       },
+      repositoryContext: repositoryContext(key),
       pendingApprovals: key === "blocked" ? [{
         approvalId: "demo-approval-1",
         method: "demo/requestApproval",
@@ -134,6 +204,9 @@ export class DemoAdapter {
         ...current.discovery,
         visibility: ACTIVE_STATUSES.has(status) ? "active" : "recent",
       },
+      repositoryContext: current.id === "demo:idle" && action === "prompt"
+        ? { state: "ready", associations: [confirmed("new-context", { branch: "demo/changed" })] }
+        : current.repositoryContext,
     };
     this.#agents.set(agent.id, next);
     return {

@@ -131,3 +131,35 @@
 - Additive API v1 backend contract: allowlisted complete-snapshot sort and cursor binding; same-revision provider/status facets with opposite-facet semantics; deterministic local project IDs derived from normalized absolute cwd values; and file-change approvals correlated by connection generation/thread/turn/item with bounded context retention. Every changed path is validated as workspace-relative, control-free, non-traversing, and bounded before the approval becomes actionable; the public contract repeats validation and fails closed for any adapter.
 - Contract fixtures: `list-features.json` and `file-approval.json` provide the dashboard with language-neutral sort/facet/project and safe file-approval examples. The pinned pre-adoption dashboard still passes live conformance because the additions are optional API v1 fields.
 - Current verification: 116 local tests and `git diff --check` passed. The 41-file local integrated candidate built with SHA-256 `1feabca42d1838ee1895b1d04f516e020cb20ed908c0d93a79255328f7382e8b`; archive/release-manifest/SPDX checksums passed. The preceding extracted candidate installed with Node 24.14.0 before its stable launcher passed pinned-dashboard live conformance, and the local default Node 26.0.0 was rejected before installation as required. Issue #11 CI run 31596025732 passed Node 22/23/24 and the integrated artifact/extracted install/live conformance job; rerun those gates on the final review-fix head before merge.
+
+## Issue #23 implementation — 2026-08-15
+
+- Baseline: `npm test` passed with 108 tests before implementation.
+- Commands: `git diff --check`, `npm run check`, and `npm run conformance`.
+- Final result: pass; 113 tests, 0 failures, plus 2 conformance tests after completion review.
+- Contract fixtures: capability/version discovery; zero, one, multiple, private,
+  candidate, stale, unavailable, unsupported, partial, and changed-association cases.
+- Boundary fixtures: deterministic ordering/deduplication, 100-item public and 200-item
+  raw normalization bounds, unsafe entry rejection, local-path worktree rejection,
+  same-host credential-free HTTPS URLs, confirmed-only pull requests, and no echo of
+  rejected repository values.
+- Revision/privacy fixtures: association-only updates keep the normal snapshot stable,
+  advance the repository revision, and emit only a repository-free invalidation event.
+  Capability/detail responses are authenticated and `private, no-store`; generic event
+  views omit cwd and repository context.
+- Live conformance: a fresh real demo server is queried for capability and zero-result
+  context, then `demo:idle` is prompted, refreshed, observed through SSE, refetched with
+  one confirmed association, reconnected, and refetched again under the no-replay rule.
+- Prompt-independence coverage proves repository coordinates stay fixed when the demo
+  prompt contains a different repository-like URL; prompt content is never association evidence.
+- Design review: Adviser (`gpt-5.6-sol`, medium caller to high reviewer) identified
+  adapter-level unsupported semantics, forge neutrality, dashboard state mismatch,
+  hidden-update revisions, SSE lost-update risk, canonical URL/privacy rules, input
+  bounds, and deterministic demo risk. The implementation adopted explicit three-state
+  results with stale/partial qualifiers, separate revisions/redacted invalidation,
+  subscribe-before-fetch/refetch rules, strict normalization, and isolated demo state.
+- Completion review: a fresh Adviser on the same verified route found no blocking gaps
+  and judged the backend contract ready for a regular PR. Its non-blocking requests to
+  document authenticated-404 semantics, call out cwd omission in lifecycle SSE, and
+  prove prompt-independent demo coordinates were applied; `npm run check` and
+  `npm run conformance` passed again afterward.
