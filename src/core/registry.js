@@ -1,6 +1,10 @@
 import { AgentEventBus } from "./event-bus.js";
 import { isDeepStrictEqual } from "node:util";
 import { compareAgents, matchesView, reconcileAgents } from "./discovery.js";
+import {
+  normalizeRepositoryContext,
+  repositoryContextsEqual,
+} from "./repository-associations.js";
 
 const ACTION_CAPABILITIES = new Map([
   ["prompt", "prompt"],
@@ -39,6 +43,7 @@ function semanticAgent(agent) {
     discoveredAt: _discoveredAt,
     updatedAt: _updatedAt,
     metadata: _metadata,
+    repositoryContext: _repositoryContext,
     ...semantic
   } = agent;
   return semantic;
@@ -67,6 +72,7 @@ export class AgentRegistry {
   #initialLoading = true;
   #closed = false;
   #revision = 0;
+  #repositoryRevision = 0;
   #adapterUnsubscribers = [];
   #adapterRefreshQueued = false;
   #operations;
@@ -194,6 +200,15 @@ export class AgentRegistry {
   }
   get(id) { return this.#reconciled(true).find((agent) => agent.id === id) ?? this.#historyAgents.get(id); }
   get revision() { return this.#revision; }
+  get repositoryRevision() { return this.#repositoryRevision; }
+  repositoryContext(id) {
+    const agent = this.get(id);
+    if (!agent) return null;
+    return {
+      revision: this.#repositoryRevision,
+      context: normalizeRepositoryContext(agent.repositoryContext),
+    };
+  }
   get initialLoading() { return this.#initialLoading; }
   get refreshing() { return Boolean(this.#refreshPromise); }
   get closed() { return this.#closed; }
@@ -271,6 +286,9 @@ export class AgentRegistry {
   #applyOutcome(outcome) {
     const adapter = this.#adapters.get(outcome.adapterId);
     const previousCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
+    const previousRepositories = new Map(
+      [...this.#agents].map(([id, agent]) => [id, normalizeRepositoryContext(agent.repositoryContext)]),
+    );
     const previousRaw = this.listRaw().map(semanticAgent);
     const previousOverlay = historyOverlay(previousRaw, this.#historyAgents);
     const next = new Map(this.#agents);
@@ -283,11 +301,16 @@ export class AgentRegistry {
       for (const [id, agent] of next) {
         if (agent.source === outcome.adapterId) next.delete(id);
       }
-      for (const agent of outcome.agents) next.set(agent.id, agent);
+      for (const agent of outcome.agents) {
+        next.set(agent.id, { ...agent, repositoryContext: normalizeRepositoryContext(agent.repositoryContext) });
+      }
     } else {
       if (outcome.markStale && adapter?.markStale) {
         for (const [id, agent] of next) {
-          if (agent.source === outcome.adapterId) next.set(id, adapter.markStale(agent));
+          if (agent.source === outcome.adapterId) {
+            const stale = adapter.markStale(agent);
+            next.set(id, { ...stale, repositoryContext: normalizeRepositoryContext(stale.repositoryContext) });
+          }
         }
       }
     }
@@ -302,6 +325,8 @@ export class AgentRegistry {
       } else if (!isDeepStrictEqual(semanticAgent(previous), semanticAgent(agent))) {
         const updated = { ...agent, discoveredAt: previous.discoveredAt, updatedAt: at };
         normalized.set(id, updated);
+      } else if (!repositoryContextsEqual(previous.repositoryContext, agent.repositoryContext)) {
+        normalized.set(id, { ...previous, repositoryContext: agent.repositoryContext });
       } else {
         normalized.set(id, previous);
       }
@@ -326,6 +351,32 @@ export class AgentRegistry {
     }
     if (changes.length) this.#revision += 1;
     for (const change of changes) this.events.emit({ ...change, snapshotRevision: this.#revision });
+    const repositoryChanges = [];
+    for (const [id, agent] of this.#agents) {
+      const previous = previousRepositories.get(id);
+      const current = normalizeRepositoryContext(agent.repositoryContext);
+      if ((!previous && current.state !== "unsupported")
+        || (previous && !repositoryContextsEqual(previous, current))) {
+        repositoryChanges.push({ id, state: current.state });
+      }
+    }
+    for (const [id, previous] of previousRepositories) {
+      if (!this.#agents.has(id) && previous.state !== "unsupported") {
+        repositoryChanges.push({ id, removed: true });
+      }
+    }
+    if (repositoryChanges.length) this.#repositoryRevision += 1;
+    for (const change of repositoryChanges) {
+      this.events.emit({
+        type: "agent.repository-associations.changed",
+        agentId: change.id,
+        ...(change.state ? { state: change.state } : {}),
+        ...(change.removed ? { removed: true } : {}),
+        repositoryRevision: this.#repositoryRevision,
+        snapshotRevision: this.#revision,
+        at,
+      });
+    }
     if (healthChanged) {
       this.events.emit({
         type: "adapter.health",

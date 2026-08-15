@@ -108,3 +108,35 @@
 - Full accelerated soak: 28,800 one-second cycles with 1,000 agents passed. Final bounds were 200 recent logs, 7 metric series, 64 maximum pending SSE events, 1 maximum queued action, 0 final handles, 0 final child processes, and 1 peak child process across 43 injected restarts. Heap grew 10,462,016 bytes with a late-cycle slope of 356.83 bytes/cycle; RSS plateaued around 194–214 MiB after expansion.
 - Real service recovery: an isolated macOS LaunchAgent install/start/status/stop/restart/uninstall smoke passed with separate application and launchd console logs; the service was confirmed unloaded and temporary state removed.
 - Independent review: Adviser (`gpt-5.6-sol`, medium caller to high reviewer) recommended the component boundaries and fixed resource ceilings before implementation. Completion review found logging sink fault coverage as the only blocker; the three fault-injection cases above were added before the final check and soak reruns. Packaging, upgrade, and rollback remain explicitly scoped to Issue #10.
+
+## Issue #23 implementation — 2026-08-15
+
+- Baseline: `npm test` passed with 108 tests before implementation.
+- Commands: `git diff --check`, `npm run check`, and `npm run conformance`.
+- Final result: pass; 113 tests, 0 failures, plus 2 conformance tests after completion review.
+- Contract fixtures: capability/version discovery; zero, one, multiple, private,
+  candidate, stale, unavailable, unsupported, partial, and changed-association cases.
+- Boundary fixtures: deterministic ordering/deduplication, 100-item public and 200-item
+  raw normalization bounds, unsafe entry rejection, local-path worktree rejection,
+  same-host credential-free HTTPS URLs, confirmed-only pull requests, and no echo of
+  rejected repository values.
+- Revision/privacy fixtures: association-only updates keep the normal snapshot stable,
+  advance the repository revision, and emit only a repository-free invalidation event.
+  Capability/detail responses are authenticated and `private, no-store`; generic event
+  views omit cwd and repository context.
+- Live conformance: a fresh real demo server is queried for capability and zero-result
+  context, then `demo:idle` is prompted, refreshed, observed through SSE, refetched with
+  one confirmed association, reconnected, and refetched again under the no-replay rule.
+- Prompt-independence coverage proves repository coordinates stay fixed when the demo
+  prompt contains a different repository-like URL; prompt content is never association evidence.
+- Design review: Adviser (`gpt-5.6-sol`, medium caller to high reviewer) identified
+  adapter-level unsupported semantics, forge neutrality, dashboard state mismatch,
+  hidden-update revisions, SSE lost-update risk, canonical URL/privacy rules, input
+  bounds, and deterministic demo risk. The implementation adopted explicit three-state
+  results with stale/partial qualifiers, separate revisions/redacted invalidation,
+  subscribe-before-fetch/refetch rules, strict normalization, and isolated demo state.
+- Completion review: a fresh Adviser on the same verified route found no blocking gaps
+  and judged the backend contract ready for a regular PR. Its non-blocking requests to
+  document authenticated-404 semantics, call out cwd omission in lifecycle SSE, and
+  prove prompt-independent demo coordinates were applied; `npm run check` and
+  `npm run conformance` passed again afterward.

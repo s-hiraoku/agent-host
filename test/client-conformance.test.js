@@ -25,6 +25,8 @@ test("demo HTTP and SSE API passes the reusable client conformance suite", async
     assert.equal(report.snapshotAgentCount, 6);
     assert.ok(report.observedEvents.includes("agent.action"));
     assert.ok(report.observedEvents.includes("agent.updated"));
+    assert.ok(report.observedEvents.includes("agent.repository-associations.changed"));
+    assert.equal(report.repositoryAssociationCount, 1);
   } finally {
     await server.stop();
   }
@@ -34,7 +36,7 @@ test("client fixtures are versioned, sanitized, and schema-compatible", async ()
   const files = (await readdir(fixtureDirectory)).filter((name) => name.endsWith(".json"));
   assert.deepEqual(files.sort(), [
     "action.json", "adapter-failure.json", "approval.json", "error.json",
-    "event-reconnect.json", "large-list.json", "snapshot.json",
+    "event-reconnect.json", "large-list.json", "repository-associations.json", "snapshot.json",
   ]);
   const fixtures = [];
   for (const file of files) {
@@ -51,6 +53,13 @@ test("client fixtures are versioned, sanitized, and schema-compatible", async ()
   assert.equal(fixtures.find((fixture) => fixture.scenario === "approval").pendingApproval.approvalId, "demo-approval-1");
   assert.equal(fixtures.find((fixture) => fixture.scenario === "adapter-failure").response.adapters[0].status, "error");
   assert.match(fixtures.find((fixture) => fixture.scenario === "event-reconnect").reconnection.clientRule, /replace the local snapshot/);
+  const repositories = fixtures.find((fixture) => fixture.scenario === "repository-associations");
+  assert.equal(repositories.cases.zero.response.associations.length, 0);
+  assert.equal(repositories.cases.one.associationCount, 1);
+  assert.equal(repositories.cases.multiplePrivateCandidate.associationCount, 2);
+  assert.equal(repositories.cases.stale.freshness, "stale");
+  assert.equal(repositories.cases.partial.complete, false);
+  assert.match(repositories.changedAssociation.reconnectRule, /refetch unconditionally/);
 
   const large = JSON.parse(await readFile(fileURLToPath(new URL("large-list.json", fixtureDirectory)), "utf8"));
   assert.equal(large.agents.length, 1_000);

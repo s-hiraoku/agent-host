@@ -46,11 +46,16 @@ test("demo adapter transitions prompts, interrupts, and approvals predictably", 
   const adapter = new DemoAdapter();
   const initial = await adapter.discover();
   const idle = initial.find((agent) => agent.id === "demo:idle");
-  const prompt = await adapter.prompt(idle, "hello");
+  const prompt = await adapter.prompt(idle, "https://untrusted.example/private-owner/private-repository");
   assert.deepEqual(prompt.data.transition, { from: "idle", to: "working" });
   assert.equal(prompt.data.transitionNumber, 1);
 
   const workingIdle = (await adapter.discover()).find((agent) => agent.id === "demo:idle");
+  assert.equal(
+    workingIdle.repositoryContext.associations[0].repository.webUrl,
+    "https://forge.example/example-labs/new-context",
+  );
+  assert.equal(JSON.stringify(workingIdle.repositoryContext).includes("untrusted.example"), false);
   const interrupt = await adapter.interrupt(workingIdle);
   assert.deepEqual(interrupt.data.transition, { from: "working", to: "idle" });
   assert.equal(interrupt.data.transitionNumber, 2);

@@ -46,9 +46,11 @@ Clients only consume a stable agent model and invoke capabilities exposed by the
 GET  /health
 GET  /ready
 GET  /v1/adapters
+GET  /v1/capabilities
 GET  /v1/diagnostics                   # authenticated, sanitized, bounded operations snapshot
 GET  /v1/agents                        # bounded summaries; default limit 50, maximum 200
 GET  /v1/agents/:id
+GET  /v1/agents/:id/repository-associations?version=1
 POST /v1/refresh
 GET  /v1/events                         # Server-Sent Events
 POST /v1/agents/:id/prompt              { "text": "Fix the test" }
@@ -123,6 +125,75 @@ types may be added without changing the version; clients should ignore fields an
 events they do not understand. Removing or renaming a field, changing its meaning or
 type, or removing an existing status, capability, action, event, or error code requires
 a new API version.
+
+### Repository association contract
+
+Repository association is an independently versioned, provider-neutral extension.
+Clients first call authenticated `GET /v1/capabilities` and require version `1` in
+`capabilities.repositoryAssociations.versions`. An authenticated `404` where that
+route or capability is absent identifies an older `unsupported` host. Authentication,
+transport, timeout, and malformed-response failures are `unavailable`, not
+`unsupported`; a supporting host can still return per-agent
+`state: "unsupported"` when the selected adapter has no explicit association source.
+Call the advertised endpoint with `version=1`; unsupported requested versions return
+`406 unsupported_repository_association_version`.
+
+```json
+{
+  "apiVersion": "1",
+  "associationVersion": "1",
+  "revision": 7,
+  "agentId": "demo:working",
+  "state": "ready",
+  "freshness": "current",
+  "complete": true,
+  "associations": [{
+    "kind": "confirmed",
+    "repository": {
+      "forge": "github",
+      "host": "forge.example",
+      "coordinates": { "kind": "named", "owner": "example-labs", "name": "orbit" },
+      "webUrl": "https://forge.example/example-labs/orbit",
+      "visibility": "public"
+    },
+    "provenance": { "source": "adapter-authoritative", "confidence": "high" },
+    "checkout": { "branch": "feature/repository-context", "worktree": { "id": "orbit-primary" } },
+    "pullRequest": { "number": 42, "webUrl": "https://forge.example/example-labs/orbit/pull/42" }
+  }]
+}
+```
+
+Repository identity is `forge + host + coordinates`; an optional string
+`repositoryId` is stable enrichment, not a replacement for coordinates. Coordinates
+are either `{ "kind": "named", "owner", "name" }` (owners may contain nested
+namespaces) or `{ "kind": "opaque", "value" }`. `webUrl` is a validated HTTPS
+navigation target on the same host and is never used as identity. Associations are
+`confirmed` or `candidate`. Only a high-confidence, non-heuristic confirmed
+association may identify a pull request; candidates carry a bounded reason and
+low/medium confidence. Worktrees expose only an opaque identifier, never a local path.
+
+`state: "ready"` always includes zero to 100 deterministically ordered associations.
+`freshness: "stale"` means last-known data is usable but must be shown as stale.
+`complete: false` is a partial result and includes only machine-safe counts/code for
+invalid or overflow records. `state: "unavailable"` means a supporting source failed
+transiently and includes a machine-safe `retryable` error; it is distinct from
+`unsupported`. Invalid adapter values are dropped and never echoed in errors.
+
+Association changes advance the separate repository `revision` without advancing the
+normal agent snapshot when no public agent field changed. SSE emits
+`agent.repository-associations.changed` with only `agentId`, repository/snapshot
+revisions, state/removal, time, and sequence—never repository identity. SSE is not replayed:
+subscribe before the first association fetch and refetch unconditionally after every
+reconnect or sequence gap. Unknown event types must be ignored by older clients.
+
+The endpoint is bearer-authenticated and returns `Cache-Control: private, no-store`.
+Adapters must supply `repositoryContext` explicitly. The host never derives permanent
+associations from cwd, prompts, display names, raw metadata, or local `.git`. Repository
+coordinates are absent from generic agent list/detail, logs, diagnostics, and event
+bodies; generic agent events also omit cwd so repository identity is not disclosed by
+that path field in notification payloads. `cwd` remains available from authenticated
+snapshot/detail reads but is an optional field and is intentionally absent from agent
+lifecycle SSE payloads; event consumers that need it must refetch detail.
 
 `/health` is a liveness probe and responds as soon as the HTTP listener is running.
 `/ready` returns `503` only while the bounded initial discovery is still loading, then
@@ -371,15 +442,21 @@ above. Dashboard development commonly also needs an exact origin allowlist:
 AGENT_HOST_ALLOWED_ORIGINS=http://127.0.0.1:3000 npm run demo
 ```
 
-The demo supports predictable transitions: prompting an idle/error agent moves it
+The demo also exposes deterministic repository contexts covering zero, one, multiple,
+private, candidate, stale, unavailable, and unsupported cases. Prompting `demo:idle`
+adds one confirmed repository association so a real HTTP/SSE client can prove the
+association-change/refetch flow. The resulting coordinates are fixed adapter data and
+never depend on prompt text. The demo supports predictable state transitions:
+prompting an idle/error agent moves it
 to working, interrupting a working agent moves it to idle, and accepting or declining
 `demo-approval-1` moves the blocked agent to working or done. An action immediately
 emits `agent.action`; call `POST /v1/refresh` to publish the resulting `agent.updated`
 snapshot transition.
 
 Language-neutral fixtures live in `fixtures/client-conformance/`, including approval,
-adapter-failure, SSE reconnect, and a 1,000-agent scale case. The reusable Node runner
-in `conformance/client-suite.js` verifies snapshot, action, error, event, and reconnect
+adapter-failure, repository associations, SSE reconnect, and a 1,000-agent scale case.
+The reusable Node runner in `conformance/client-suite.js` verifies snapshot, action,
+repository capability/detail/change, error, event, and reconnect/refetch
 behavior against a fresh demo server. Regenerate the checked-in scale fixture with
 `npm run fixtures:generate`, or run only the live contract checks with
 `npm run conformance`.
@@ -469,6 +546,7 @@ src/
   core/
     types.js       unified model + capabilities
     contracts.js   versioned HTTP views, filters, pagination, errors
+    repository-associations.js  versioned repository normalization + bounds
     discovery.js   visibility ordering + process/rich reconciliation
     registry.js    merge discovery + route actions
     event-bus.js   normalized events
@@ -508,6 +586,13 @@ interface AgentAdapter {
   close?(): Promise<void>
 }
 ```
+
+An adapter that supports repository association adds an explicit `repositoryContext`
+to each returned `AgentRecord`. Omission means `unsupported`, not transient failure.
+Supporting adapters return `ready` (including an empty association array) or
+`unavailable`; stale and partial ready results retain `freshness` and `complete`.
+Adapter discovery already receives an `AbortSignal`; repository data must honor the
+same cancellation boundary and stay within the public field and item limits.
 
 This keeps client integrations provider-agnostic.
 

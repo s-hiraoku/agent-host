@@ -72,7 +72,15 @@ export function actionResult(result, agentId, action) {
 }
 
 export function eventView(event) {
-  return event.agent ? { ...event, agent: agentDetail(event.agent) } : { ...event };
+  if (!event.agent) return { ...event };
+  const { cwd: _cwd, pendingApprovals = [], ...agent } = agentDetail(event.agent);
+  return {
+    ...event,
+    agent: {
+      ...agent,
+      pendingApprovals: pendingApprovals.map(({ cwd: _approvalCwd, ...approval }) => approval),
+    },
+  };
 }
 
 export function parseAgentListQuery(searchParams, revision) {

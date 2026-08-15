@@ -57,3 +57,25 @@
 - In control mode, keep process-detected Codex records raw-only. This prevents a second
   canonical record for the configured live transport while retaining unsupported
   process evidence in the explicit raw view.
+
+# Issue #23 decisions
+
+- Publish repository association as an independently versioned authenticated extension,
+  discovered through `/v1/capabilities`, instead of adding an ambiguous optional field
+  to the generic agent response.
+- Keep the wire identity forge-neutral: `forge`, `host`, named or opaque coordinates,
+  optional stable string ID, and a validated same-host HTTPS navigation URL. The
+  dashboard adapter, not the host contract, maps supported forges to source-control clients.
+- Treat adapter omission as `unsupported`; reserve `unavailable` for a supporting source's
+  transient failure. Represent stale and partial data as ready results with explicit
+  `freshness` and `complete` fields so usable associations are not discarded.
+- Never infer an association from cwd, prompts, display names, provider metadata, or
+  local Git state. Confirmed associations require high-confidence non-heuristic evidence;
+  candidates remain explicit and cannot identify a pull request.
+- Use a separate repository revision. Association-only changes do not advance the normal
+  agent snapshot or emit an indistinguishable `agent.updated`; they emit a redacted
+  invalidation event and require an authenticated no-store refetch.
+- Keep SSE non-replayable. Clients subscribe before their first fetch and refetch after
+  every reconnect or sequence gap; repository identity never appears in event payloads.
+- Bound public results at 100, raw normalization work at 200, every public string and URL,
+  and error output to machine-safe codes/counts. Worktree coordinates are opaque IDs, not paths.

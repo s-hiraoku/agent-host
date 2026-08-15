@@ -1,13 +1,13 @@
 # Current objective
 
-Complete the remaining `agent-host` backend roadmap in dependency order: configuration and service lifecycle (#8), operational resilience and diagnostics (#9), packaging and upgrades (#10), then the backend portions of the integrated daily-driver gate (#11). Deliver each coherent issue as a focused ready-for-review pull request with local and CI verification, review follow-up, durable checkpoints, and no merge without explicit user authorization. The separately maintained dashboard remains out of scope except for versioned backend contracts and integration evidence required by #11.
+Publish Issue #23's stable, versioned, provider-neutral repository association contract as a focused ready-for-review pull request. Preserve explicit capability/state negotiation, bounded sanitized data, independent revision/SSE behavior, privacy, language-neutral fixtures, and live demo conformance. Do not merge without explicit user authorization.
 
 ## Success criteria
 
-- Issues #8 through #10 are implemented or have a concrete externally owned blocker.
-- Each coherent change is delivered through a regular ready-for-review PR.
-- Tests, documentation, CI, and review threads are complete for every delivered PR.
-- Backend evidence required by issue #11 is recorded and linked.
+- Issue #23 capability, endpoint, adapter boundary, revision, and SSE semantics are documented and tested.
+- Zero, one, multiple, private, candidate, stale, partial, unavailable, unsupported, and changed cases have sanitized fixtures.
+- The live demo conformance client proves the authenticated host contract without provider-specific imports.
+- The change is delivered through a regular ready-for-review PR with complete checks and review follow-up.
 - No PR is merged without explicit user authorization.
 
 ## Plan
@@ -18,18 +18,19 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - [x] #5 Useful discovery defaults and deduplication
 - [x] #6 Demo adapter and conformance fixtures
 - [x] #7 Supported live-session integration
-- [x] #8 Configuration and service lifecycle
-- [x] #9 Operational resilience and diagnostics
-- [ ] #10 Packaging, versioning, and updates
-- [ ] #11 Backend portion of integrated release gate
+- [x] Inspect Issue #23 and the dashboard `RepositoryContextSource` boundary
+- [x] Define the repository association v1 contract and privacy/revision rules
+- [x] Implement the contract, demo source, fixtures, conformance, tests, and documentation
+- [ ] Verify, independently review, and open the ready PR
+- [ ] Follow CI and review feedback through PR Guardian
 
 ## Current step
 
-- Branch: `codex/issue-9-operational-resilience`
-- Issue: https://github.com/s-hiraoku/agent-host/issues/9
-- Base: `main` at merge commit `443461a` (PR #18)
-- PR: https://github.com/s-hiraoku/agent-host/pull/19
-- Next: monitor PR #19 checks and review feedback, then begin Issue #10 from the verified Issue #9 head while merge remains user-gated.
+- Branch: `codex/issue-23-repository-associations`
+- Issue: https://github.com/s-hiraoku/agent-host/issues/23
+- Base: `main` at `d630a79` (PR #19 merge)
+- PR: pending
+- Next: run full verification, completion review, commit, push, open a ready PR, and audit immediate CI/review state.
 
 ## Progress notes
 
@@ -50,3 +51,5 @@ Complete the remaining `agent-host` backend roadmap in dependency order: configu
 - 2026-08-12: User merged PR #18 as `443461a`. Rebasing the Issue #9 branch onto that merge required no conflict; all in-progress #9 changes were preserved.
 - 2026-08-12: Completed Issue #9 implementation with centrally redacted bounded JSONL logging and metrics, authenticated/offline diagnostics, per-adapter circuit backoff and recovery, bounded SSE/action queues, abort-aware actions, deadline-bounded shutdown, and an eight-hour-equivalent accelerated soak. Adviser completion review identified untested logging sink failures; EACCES, ENOSPC, and rotation-rename fault injection now proves failures degrade into bounded diagnostics rather than terminating the host. The final 100-test suite and 28,800-cycle soak pass.
 - 2026-08-12: Opened regular ready-for-review PR #19 for Issue #9. Merge remains gated on explicit user authorization; packaging and upgrade work continues separately under Issue #10.
+- 2026-08-15: Oriented Issue #23 against the current host API and dashboard `RepositoryContextSource`. Adviser design review led to explicit adapter unsupported/unavailable states, forge-neutral coordinates, a separate repository revision, redacted no-replay SSE invalidation, strict bounds, no-store responses, and worktree path rejection.
+- 2026-08-15: Implemented the authenticated capability/detail contract, normalized adapter boundary, deterministic demo coverage, privacy-safe change event, language-neutral fixtures, live HTTP/SSE conformance, focused tests, and documentation. Full verification and completion review remain before PR creation.
