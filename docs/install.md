@@ -39,3 +39,5 @@ node ~/.local/share/agent-host/current/scripts/manage-installation.js uninstall
 ```
 
 The install manager rejects unsupported Node versions, concurrent install transactions, unsafe writable install roots, symlinks inside a release, mismatched package/manifest versions, and host/dashboard API incompatibility. GitHub build provenance plus the published checksum improves artifact integrity; a checksum hosted by the same release is not an independent signature.
+
+Complete stale install locks are recovered through inode-specific quarantine directories that remain as fencing tombstones. An incomplete or malformed lock fails closed; after verifying that no install, update, rollback, or uninstall process is running, remove only `.install-lock` and retry. The fencing guarantee requires every concurrently operating installer to use this protocol; do not run an older extracted installer concurrently with this version.

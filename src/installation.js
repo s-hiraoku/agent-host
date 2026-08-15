@@ -1,13 +1,14 @@
 import {
-  chmod, cp, lstat, mkdir, readFile, readdir, rename, rm, symlink, unlink, writeFile,
+  cp, lstat, mkdir, open, readFile, readdir, rename, rm, symlink, unlink, writeFile,
 } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 const STATE_FILE = "install-state.json";
+
 export async function installRelease({
   source, prefix, binDirectory, nodePath = process.execPath, beforeTransactionClear,
-  beforeLockOwnerWrite, afterStaleOwnerRead, beforeStaleLockRename,
+  beforeLockOwnerWrite, afterStaleOwnerRead, beforeStaleLockRename, afterStateRename,
 }) {
   assertSupportedNode();
   source = resolve(source);
@@ -37,6 +38,7 @@ export async function installRelease({
         await cp(source, staging, { recursive: true, verbatimSymlinks: true });
         await validateReleaseSource(staging);
         await rename(staging, releaseDirectory);
+        await syncDirectory(dirname(releaseDirectory));
       } catch (error) {
         await rm(staging, { recursive: true, force: true });
         throw error;
@@ -50,7 +52,7 @@ export async function installRelease({
     try {
       await switchCurrent(prefix, version);
       await writeLauncher({ prefix, binDirectory, nodePath });
-      await writeState(prefix, { schemaVersion: 1, current: version, previous: previous ?? null });
+      await writeState(prefix, { schemaVersion: 1, current: version, previous: previous ?? null }, afterStateRename);
     } catch (error) {
       try {
         await restorePrevious({ prefix, binDirectory, nodePath, previousState });
@@ -66,7 +68,7 @@ export async function installRelease({
   }, { beforeOwnerWrite: beforeLockOwnerWrite, afterStaleOwnerRead, beforeStaleLockRename });
 }
 
-export async function rollbackRelease({ prefix, binDirectory, nodePath = process.execPath, beforeTransactionClear }) {
+export async function rollbackRelease({ prefix, binDirectory, nodePath = process.execPath, beforeTransactionClear, afterStateRename }) {
   assertSupportedNode();
   prefix = resolve(prefix);
   binDirectory = resolve(binDirectory);
@@ -81,7 +83,7 @@ export async function rollbackRelease({ prefix, binDirectory, nodePath = process
     try {
       await switchCurrent(prefix, previousVersion);
       await writeLauncher({ prefix, binDirectory, nodePath });
-      await writeState(prefix, { schemaVersion: 1, current: previousVersion, previous: state.current });
+      await writeState(prefix, { schemaVersion: 1, current: previousVersion, previous: state.current }, afterStateRename);
     } catch (error) {
       try {
         await restorePrevious({ prefix, binDirectory, nodePath, previousState: state });
@@ -190,7 +192,9 @@ async function switchCurrent(prefix, version) {
   } catch (error) { if (error?.code !== "ENOENT") throw error; }
   const next = join(prefix, `.current-${randomUUID()}`);
   await symlink(join("releases", version), next);
+  await syncDirectory(prefix);
   await rename(next, current);
+  await syncDirectory(prefix);
 }
 
 async function writeLauncher({ prefix, binDirectory, nodePath }) {
@@ -204,11 +208,8 @@ async function writeLauncher({ prefix, binDirectory, nodePath }) {
       throw new Error(`refusing to replace unmanaged launcher: ${launcher}`);
     }
   } catch (error) { if (error?.code !== "ENOENT") throw error; }
-  const temporary = `${launcher}.tmp-${randomUUID()}`;
   const script = `#!/bin/sh\nAGENT_HOST_LAUNCHER_PATH=${shellQuote(launcher)} exec ${shellQuote(nodePath)} ${shellQuote(join(prefix, "current", "src", "cli.js"))} "$@"\n`;
-  await writeFile(temporary, script, { mode: 0o755, flag: "wx" });
-  await chmod(temporary, 0o755);
-  await rename(temporary, launcher);
+  await writeFileAtomic(launcher, script, 0o755);
 }
 
 async function prepareBinDirectory(binDirectory) {
@@ -219,23 +220,51 @@ async function prepareBinDirectory(binDirectory) {
   if ((stat.mode & 0o022) !== 0) throw new Error(`launcher directory must not be group/world writable: ${binDirectory}`);
 }
 
-async function writeState(prefix, state) {
-  await writeJsonAtomic(join(prefix, STATE_FILE), state);
+async function writeState(prefix, state, afterRename) {
+  await writeJsonAtomic(join(prefix, STATE_FILE), state, afterRename);
 }
 
 async function writeTransaction(prefix, transaction) {
   await writeJsonAtomic(join(prefix, "install-transaction.json"), transaction);
 }
 
-async function writeJsonAtomic(path, value) {
+async function writeJsonAtomic(path, value, afterRename) {
+  await writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`, 0o600, afterRename);
+}
+
+async function writeFileAtomic(path, contents, mode, afterRename) {
   const temporary = `${path}.tmp-${randomUUID()}`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  await rename(temporary, path);
+  try {
+    const file = await open(temporary, "wx", mode);
+    try {
+      await file.writeFile(contents);
+      await file.chmod(mode);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    await syncDirectory(dirname(path));
+    await rename(temporary, path);
+    await afterRename?.();
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
 }
 
 async function clearTransaction(prefix) {
-  try { await unlink(join(prefix, "install-transaction.json")); }
+  try {
+    await unlink(join(prefix, "install-transaction.json"));
+    await syncDirectory(prefix);
+  }
   catch (error) { if (error?.code !== "ENOENT") throw error; }
+}
+
+async function syncDirectory(path) {
+  const directory = await open(path, "r");
+  try { await directory.sync(); }
+  finally { await directory.close(); }
 }
 
 async function recoverTransaction({ prefix, binDirectory, nodePath }) {
@@ -269,9 +298,12 @@ async function validateRecoveryTarget(prefix, version) {
 
 async function restorePrevious({ prefix, binDirectory, nodePath, previousState }) {
   if (previousState?.current) {
+    await writeState(prefix, previousState);
     await switchCurrent(prefix, previousState.current);
     await writeLauncher({ prefix, binDirectory, nodePath });
   } else {
+    try { await unlink(join(prefix, STATE_FILE)); }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
     await removeCurrentAndLauncher(prefix, binDirectory);
   }
 }
