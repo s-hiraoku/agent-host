@@ -85,10 +85,16 @@ export function normalizeRepositoryContext(input) {
     catch { rejectedCount += 1; }
   }
 
+  let freshness = "current";
+  if (input.freshness !== undefined) {
+    if (FRESHNESS.has(input.freshness)) freshness = input.freshness;
+    else rejectedCount += 1;
+  }
+
   const complete = input.complete !== false && rejectedCount === 0 && overflowCount === 0;
   const context = {
     state: "ready",
-    freshness: FRESHNESS.has(input.freshness) ? input.freshness : "current",
+    freshness,
     complete,
     associations,
   };

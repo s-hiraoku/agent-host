@@ -102,6 +102,23 @@ test("keeps unsupported, unavailable, stale, and partial semantics explicit with
   assert.equal(partial.complete, false);
   assert.equal(partial.error.rejectedCount, 2);
   assert.equal(JSON.stringify(partial).includes("private repository name"), false);
+
+  const omitted = normalizeRepositoryContext({
+    state: "ready",
+    associations: [association("archive")],
+  });
+  assert.equal(omitted.freshness, "current");
+  assert.equal(omitted.complete, true);
+
+  const invalidFreshness = normalizeRepositoryContext({
+    state: "ready",
+    freshness: "stlae",
+    associations: [association("archive")],
+  });
+  assert.equal(invalidFreshness.freshness, "current");
+  assert.equal(invalidFreshness.complete, false);
+  assert.equal(invalidFreshness.error.rejectedCount, 1);
+  assert.equal(JSON.stringify(invalidFreshness).includes("stlae"), false);
 });
 
 test("rejects local worktree paths and unsafe repository URLs as partial input", () => {
