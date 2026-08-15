@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runCli } from "../src/cli-app.js";
 import { inspectInstanceLock } from "../src/instance-lock.js";
-import { RELEASE_COMPATIBILITY } from "../src/release-info.js";
+import { OperationsContext } from "../src/operations/context.js";
+import { RELEASE_COMPATIBILITY, publicReleaseInfo } from "../src/release-info.js";
 
 async function waitFor(predicate) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -183,4 +184,30 @@ test("offline diagnostics writes an owner-only redacted bounded JSON bundle", as
   assert.doesNotMatch(contents, /private/);
   assert.doesNotMatch(contents, new RegExp(home));
   assert.match(lines.join("\n"), /"source": "offline"/);
+  assert.equal(bundle.versions.serverVersion, publicReleaseInfo().serverVersion);
+  assert.deepEqual(bundle.versions.configSchema, publicReleaseInfo().configSchema);
+});
+
+test("online diagnostics keep the same release metadata as the offline fallback", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-cli-diagnostics-online-"));
+  t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));
+  await runCli(["init"], { homeDirectory: home, env: {}, output() {} });
+  const outputFile = join(home, "online.json");
+  const remote = new OperationsContext().snapshot();
+  const lines = [];
+
+  assert.equal(await runCli(["diagnostics", outputFile], {
+    homeDirectory: home,
+    env: {},
+    platform: "linux",
+    fetchDiagnostics: async () => remote,
+    output: (line) => lines.push(line),
+  }), 0);
+  const bundle = JSON.parse(await readFile(outputFile, "utf8"));
+  const release = publicReleaseInfo();
+  assert.match(lines.join("\n"), /"source": "running"/);
+  assert.equal(bundle.versions.serverVersion, release.serverVersion);
+  assert.deepEqual(bundle.versions.configSchema, release.configSchema);
+  assert.deepEqual(bundle.versions.apiVersions, release.apiVersions);
+  assert.deepEqual(bundle.versions.dashboard, release.dashboard);
 });

@@ -7,6 +7,7 @@ import { createRedactor } from "../src/operations/redact.js";
 import { MAX_LOG_RECORD_BYTES, StructuredLogger } from "../src/operations/logger.js";
 import { OperationalMetrics } from "../src/operations/metrics.js";
 import { OperationsContext } from "../src/operations/context.js";
+import { publicReleaseInfo } from "../src/release-info.js";
 
 test("central redaction bounds nested values and removes secrets, auth, paths, prompts, and URL credentials", () => {
   const redact = createRedactor({
@@ -177,6 +178,15 @@ test("diagnostics redaction preserves the bounded metric schema and values", () 
   assert.equal(histogram.value.count, 1);
   assert.equal(histogram.value.sum, 75);
   assert.equal(histogram.value.buckets.find((bucket) => bucket.upperBound === 100).count, 1);
+});
+
+test("diagnostics snapshot includes the same public release metadata as the offline CLI fallback", () => {
+  const snapshot = new OperationsContext().snapshot();
+  const release = publicReleaseInfo();
+  assert.equal(snapshot.versions.serverVersion, release.serverVersion);
+  assert.deepEqual(snapshot.versions.configSchema, release.configSchema);
+  assert.deepEqual(snapshot.versions.apiVersions, release.apiVersions);
+  assert.deepEqual(snapshot.versions.dashboard, release.dashboard);
 });
 
 test("diagnostics redaction preserves bounded adapter health details", () => {
