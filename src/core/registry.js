@@ -506,7 +506,36 @@ export class AgentRegistry {
       const before = [...this.#historyAgents.values()].map(semanticAgent).sort((a, b) => a.id.localeCompare(b.id));
       const after = [...next.values()].map(semanticAgent).sort((a, b) => a.id.localeCompare(b.id));
       if (!isDeepStrictEqual(before, after)) this.#historyRevision += 1;
+      const repositoryChanges = [];
+      const historicalIds = new Set([...this.#historyAgents.keys(), ...next.keys()]);
+      for (const id of historicalIds) {
+        if (this.#agents.has(id)) continue;
+        const previous = this.#historyAgents.get(id);
+        const current = next.get(id);
+        const previousContext = normalizeRepositoryContext(previous?.repositoryContext);
+        const currentContext = normalizeRepositoryContext(current?.repositoryContext);
+        if (!previous && currentContext.state !== "unsupported") {
+          repositoryChanges.push({ id, state: currentContext.state });
+        } else if (previous && !current && previousContext.state !== "unsupported") {
+          repositoryChanges.push({ id, removed: true });
+        } else if (previous && current && !repositoryContextsEqual(previousContext, currentContext)) {
+          repositoryChanges.push({ id, state: currentContext.state });
+        }
+      }
       this.#historyAgents = next;
+      if (repositoryChanges.length) this.#repositoryRevision += 1;
+      const at = new Date().toISOString();
+      for (const change of repositoryChanges) {
+        this.events.emit({
+          type: "agent.repository-associations.changed",
+          agentId: change.id,
+          ...(change.state ? { state: change.state } : {}),
+          ...(change.removed ? { removed: true } : {}),
+          repositoryRevision: this.#repositoryRevision,
+          snapshotRevision: this.#revision,
+          at,
+        });
+      }
       if (loaded || adapters.length === 0) this.#historyExpiresAt = Date.now() + this.#historyTtlMs;
     }).finally(() => { this.#historyPromise = undefined; });
     return this.#historyPromise;

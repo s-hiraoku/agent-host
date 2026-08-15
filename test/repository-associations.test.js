@@ -53,6 +53,26 @@ test("normalizes, bounds, deduplicates, and deterministically orders repository 
   );
 });
 
+test("association ordering is deterministic across every normalized field", () => {
+  const entries = [
+    association("shared", { checkout: { branch: "main", worktree: { id: "worktree-z" } } }),
+    association("shared", { checkout: { branch: "main", worktree: { id: "worktree-a" } } }),
+    {
+      ...association("shared", { kind: "candidate", checkout: { branch: "main" } }),
+      reason: "branch_match",
+    },
+    association("shared", { kind: "candidate", checkout: { branch: "main" } }),
+  ];
+  const forward = normalizeRepositoryContext({ state: "ready", associations: entries });
+  const reverse = normalizeRepositoryContext({ state: "ready", associations: [...entries].reverse() });
+
+  assert.deepEqual(forward.associations, reverse.associations);
+  assert.deepEqual(
+    forward.associations.map((item) => item.checkout?.worktree?.id ?? item.reason),
+    ["worktree-a", "worktree-z", "branch_match", "repository_match"],
+  );
+});
+
 test("keeps unsupported, unavailable, stale, and partial semantics explicit without echoing invalid input", () => {
   assert.deepEqual(normalizeRepositoryContext(undefined), {
     state: "unsupported",
@@ -159,6 +179,57 @@ test("repository-only changes use a separate revision and a redacted SSE event",
   const removal = events.find((event) => event.type === "agent.repository-associations.changed");
   assert.equal(removal.removed, true);
   assert.equal("state" in removal, false);
+});
+
+test("historical repository changes advance the repository revision and emit events", async () => {
+  let branch = "archive/one";
+  let present = true;
+  const adapter = {
+    id: "historical-repository-fixture",
+    async discover() { return []; },
+    async discoverHistory() {
+      return present ? [{
+        id: "fixture:historical-repository",
+        provider: "fixture",
+        source: "historical-repository-fixture",
+        name: "Historical repository fixture",
+        status: "done",
+        capabilities: {},
+        repositoryContext: {
+          state: "ready",
+          associations: [association("private-archive", {
+            visibility: "private",
+            checkout: { branch, worktree: { id: "historical-worktree" } },
+          })],
+        },
+      }] : [];
+    },
+  };
+  const registry = new AgentRegistry([adapter], { historyTtlMs: 1 });
+  const events = [];
+  registry.events.subscribe((event) => events.push(event));
+
+  await registry.listView("historical");
+  const firstRevision = registry.repositoryRevision;
+  assert.equal(registry.repositoryContext("fixture:historical-repository").context.associations[0].checkout.branch, "archive/one");
+  events.length = 0;
+
+  branch = "archive/two";
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await registry.listView("historical");
+  assert.equal(registry.repositoryRevision, firstRevision + 1);
+  assert.equal(registry.repositoryContext("fixture:historical-repository").revision, firstRevision + 1);
+  assert.deepEqual(events.map((event) => event.type), ["agent.repository-associations.changed"]);
+  assert.equal(events[0].agentId, "fixture:historical-repository");
+  assert.equal(JSON.stringify(events).includes("private-archive"), false);
+
+  events.length = 0;
+  present = false;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await registry.listView("historical");
+  assert.equal(registry.repositoryRevision, firstRevision + 2);
+  assert.equal(events[0].removed, true);
+  assert.equal(registry.repositoryContext("fixture:historical-repository"), null);
 });
 
 test("serves versioned, no-store repository association capabilities and demo contexts", async () => {

@@ -273,5 +273,6 @@ function associationKey(association) {
     association.kind === "confirmed" ? "0" : "1",
     association.checkout?.branch ?? "",
     String(association.pullRequest?.number ?? ""),
+    JSON.stringify(association),
   ].join("\n");
 }
