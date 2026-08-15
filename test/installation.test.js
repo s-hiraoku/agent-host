@@ -57,6 +57,52 @@ test("failed activation restores the previous release pointer and state", async 
   assert.equal(await readFile(join(prefix, "current", "package.json"), "utf8"), JSON.stringify({ version: "0.2.0" }));
 });
 
+test("state write failure after rename restores previous state before clearing the transaction", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-install-state-sync-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const prefix = join(home, "install");
+  const binDirectory = join(home, "bin");
+  const first = await fixtureRelease(home, "0.2.0");
+  const second = await fixtureRelease(home, "0.3.0");
+  await installRelease({ source: first, prefix, binDirectory });
+
+  let stateWrites = 0;
+  await assert.rejects(installRelease({
+    source: second,
+    prefix,
+    binDirectory,
+    afterStateRename() {
+      stateWrites += 1;
+      if (stateWrites === 1) throw new Error("injected state directory sync failure");
+    },
+  }), /injected state directory sync failure/);
+  assert.deepEqual(await installationStatus(prefix), {
+    installed: true, schemaVersion: 1, current: "0.2.0", previous: null,
+  });
+  assert.equal(JSON.parse(await readFile(join(prefix, "current", "package.json"), "utf8")).version, "0.2.0");
+  assert.match(await readFile(join(binDirectory, "agent-host"), "utf8"), /current\/src\/cli\.js/);
+  await assert.rejects(lstat(join(prefix, "install-transaction.json")), { code: "ENOENT" });
+});
+
+test("first-install state write failure removes the new state record", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-install-first-state-sync-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const prefix = join(home, "install");
+  const binDirectory = join(home, "bin");
+  const first = await fixtureRelease(home, "0.2.0");
+
+  await assert.rejects(installRelease({
+    source: first,
+    prefix,
+    binDirectory,
+    afterStateRename() { throw new Error("injected first-install state sync failure"); },
+  }), /injected first-install state sync failure/);
+  await assert.rejects(lstat(join(prefix, "install-state.json")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(prefix, "install-transaction.json")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(prefix, "current")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(binDirectory, "agent-host")), { code: "ENOENT" });
+});
+
 test("failed transaction recovery preserves its marker and succeeds on the next run", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "agent-host-install-recovery-"));
   t.after(() => rm(home, { recursive: true, force: true }));
