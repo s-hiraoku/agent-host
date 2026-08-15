@@ -7,7 +7,9 @@ import { createHash, randomUUID } from "node:crypto";
 const STATE_FILE = "install-state.json";
 const INCOMPLETE_LOCK_GRACE_MS = 5_000;
 
-export async function installRelease({ source, prefix, binDirectory, nodePath = process.execPath, beforeTransactionClear }) {
+export async function installRelease({
+  source, prefix, binDirectory, nodePath = process.execPath, beforeTransactionClear, beforeLockOwnerWrite,
+}) {
   assertSupportedNode();
   source = resolve(source);
   prefix = resolve(prefix);
@@ -62,7 +64,7 @@ export async function installRelease({ source, prefix, binDirectory, nodePath = 
     await beforeTransactionClear?.();
     await clearTransaction(prefix);
     return { installed: true, current: version, previous: previous ?? null, prefix };
-  });
+  }, beforeLockOwnerWrite);
 }
 
 export async function rollbackRelease({ prefix, binDirectory, nodePath = process.execPath, beforeTransactionClear }) {
@@ -287,11 +289,11 @@ async function readState(prefix) {
   catch (error) { if (error?.code === "ENOENT") return undefined; throw error; }
 }
 
-async function withInstallLock(prefix, callback) {
+async function withInstallLock(prefix, callback, beforeOwnerWrite) {
   await mkdir(prefix, { recursive: true, mode: 0o700 });
   await assertPrivateDirectory(prefix);
   const lock = join(prefix, ".install-lock");
-  const ownership = await acquireInstallLock(lock);
+  const ownership = await acquireInstallLock(lock, beforeOwnerWrite);
   try { return await callback(); }
   finally {
     await unlinkOwnedLock(lock, ownership.identity);
@@ -301,19 +303,21 @@ async function withInstallLock(prefix, callback) {
   }
 }
 
-async function acquireInstallLock(path) {
+async function acquireInstallLock(path, beforeOwnerWrite) {
   try {
     await mkdir(path, { mode: 0o700 });
+    const identity = await lstat(path);
     try {
+      await beforeOwnerWrite?.();
       await writeFile(join(path, "owner.json"), `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`, {
         mode: 0o600,
         flag: "wx",
       });
     } catch (error) {
-      await rm(path, { recursive: true, force: true });
+      await unlinkOwnedLock(path, identity);
       throw error;
     }
-    return { identity: await lstat(path), quarantines: [] };
+    return { identity, quarantines: [] };
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
     let record;
@@ -345,7 +349,7 @@ async function acquireInstallLock(path) {
     }
     const quarantineIdentity = await lstat(quarantine);
     try {
-      const ownership = await acquireInstallLock(path);
+      const ownership = await acquireInstallLock(path, beforeOwnerWrite);
       ownership.quarantines.push({ path: quarantine, identity: quarantineIdentity });
       return ownership;
     } catch (error) {

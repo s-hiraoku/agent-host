@@ -8,6 +8,12 @@ import {
   installRelease, installationStatus, rollbackRelease, uninstallRelease,
 } from "../src/installation.js";
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+
 test("versioned install updates atomically, rolls back, and preserves user state on uninstall", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "agent-host-install-"));
   t.after(() => rm(home, { recursive: true, force: true }));
@@ -97,6 +103,52 @@ test("transaction cleanup failure keeps committed state consistent and recovers 
   await lstat(join(prefix, "install-transaction.json"));
   assert.equal((await installRelease({ source: second, prefix, binDirectory })).current, "0.3.0");
   await assert.rejects(lstat(join(prefix, "install-transaction.json")), { code: "ENOENT" });
+});
+
+test("failed lock initialization never removes a replacement lock", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-install-lock-race-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const prefix = join(home, "install");
+  const source = await fixtureRelease(home, "0.3.0");
+  const firstPaused = deferred();
+  const resumeFirst = deferred();
+  const secondHolding = deferred();
+  const releaseSecond = deferred();
+  const first = installRelease({
+    source,
+    prefix,
+    binDirectory: join(home, "first-bin"),
+    async beforeLockOwnerWrite() {
+      firstPaused.resolve();
+      await resumeFirst.promise;
+    },
+  });
+  await firstPaused.promise;
+  const lock = join(prefix, ".install-lock");
+  const old = new Date(Date.now() - 10_000);
+  await utimes(lock, old, old);
+
+  const second = installRelease({
+    source,
+    prefix,
+    binDirectory: join(home, "second-bin"),
+    async beforeTransactionClear() {
+      secondHolding.resolve();
+      await releaseSecond.promise;
+    },
+  });
+  await secondHolding.promise;
+  const replacement = await lstat(lock);
+
+  resumeFirst.resolve();
+  await assert.rejects(first, /in progress/);
+  const current = await lstat(lock);
+  assert.equal(current.dev, replacement.dev);
+  assert.equal(current.ino, replacement.ino);
+  await readFile(join(lock, "owner.json"), "utf8");
+
+  releaseSecond.resolve();
+  assert.equal((await second).current, "0.3.0");
 });
 
 test("installer rejects incompatible dashboard releases, links, unsafe roots, and concurrent transactions", async (t) => {
