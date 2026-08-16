@@ -32,6 +32,7 @@ test("configuration precedence is CLI over environment over file over defaults",
   assert.equal(configuration.tokenFile, join(home, "settings", "token"));
   assert.equal(configuration.lockFile, join(home, "settings", "host.lock"));
   assert.equal(configuration.logFile, join(home, "settings", "agent-host.log"));
+  assert.equal(configuration.enabledAdapters.includes("cursor-desktop"), false);
 
   const cwdRelative = await loadConfiguration({
     cli: { configFile, tokenFile: "cli-token" },
@@ -46,6 +47,17 @@ test("configuration precedence is CLI over environment over file over defaults",
   });
   assert.equal(dashboardOnly.configuration.dashboardDirectory, join(process.cwd(), "dashboard"));
   assert.equal("dashboardDirectory" in serializableConfiguration(dashboardOnly.configuration), false);
+
+  const cursor = await loadConfiguration({
+    cli: { configFile, enabledAdapters: "cursor-desktop", cursorProjectsDirectory: "cursor-projects" },
+    env: { AGENT_HOST_CURSOR_USER_DATA_DIR: "cursor-user-data" },
+    homeDirectory: home,
+  });
+  assert.deepEqual(cursor.configuration.enabledAdapters, ["cursor-desktop"]);
+  assert.equal(cursor.configuration.cursorProjectsDirectory, join(process.cwd(), "cursor-projects"));
+  assert.equal(cursor.configuration.cursorUserDataDirectory, join(process.cwd(), "cursor-user-data"));
+  assert.equal("cursorProjectsDirectory" in serializableConfiguration(cursor.configuration), false);
+  assert.equal("cursorUserDataDirectory" in serializableConfiguration(cursor.configuration), false);
 });
 
 test("configuration rejects unknown keys and invalid boundaries", async (t) => {
@@ -84,4 +96,12 @@ test("command-line parsing preserves positional action payloads and repeated ori
     options: { allowedOrigins: ["http://localhost:3000"] },
   });
   assert.throws(() => parseCommandLine(["serve", "--unknown"]), /unknown option/);
+  assert.deepEqual(parseCommandLine([
+    "serve",
+    "--cursor-user-data-dir", "/synthetic/Cursor",
+    "--cursor-projects-dir", "/synthetic/projects",
+  ]).options, {
+    cursorUserDataDirectory: "/synthetic/Cursor",
+    cursorProjectsDirectory: "/synthetic/projects",
+  });
 });

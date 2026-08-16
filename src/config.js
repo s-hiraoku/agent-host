@@ -3,7 +3,9 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { readPrivateFile } from "./secure-state.js";
 
 export const CONFIG_SCHEMA_VERSION = 1;
-export const ADAPTER_NAMES = ["codex", "herdr", "process"];
+export const DEFAULT_ADAPTER_NAMES = ["codex", "herdr", "process"];
+export const AVAILABLE_ADAPTER_NAMES = [...DEFAULT_ADAPTER_NAMES, "cursor-desktop"];
+export const ADAPTER_NAMES = AVAILABLE_ADAPTER_NAMES;
 const LOG_LEVELS = new Set(["debug", "info", "warn", "error"]);
 const CONFIG_KEYS = new Set([
   "schemaVersion",
@@ -87,6 +89,8 @@ export function parseCommandLine(argv = []) {
       case "--enabled-adapters": options.enabledAdapters = valueFor(); break;
       case "--codex-transport": options.codexTransport = valueFor(); break;
       case "--codex-socket": options.codexSocket = valueFor(); break;
+      case "--cursor-user-data-dir": options.cursorUserDataDirectory = valueFor(); break;
+      case "--cursor-projects-dir": options.cursorProjectsDirectory = valueFor(); break;
       case "--token-file": options.tokenFile = valueFor(); break;
       case "--lock-file": options.lockFile = valueFor(); break;
       case "--log-level": options.logLevel = valueFor(); break;
@@ -131,13 +135,14 @@ export async function loadConfiguration({
   validateFileShape(fileConfig, configFile, configExists);
   const environment = environmentConfiguration(env);
   const baseDirectory = dirname(configFile);
+  const cursorPaths = defaultCursorDirectories(homeDirectory, env);
   const defaults = {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     bind: "127.0.0.1",
     port: 4777,
     refreshMs: 1_500,
     adapterTimeoutMs: 20_000,
-    enabledAdapters: [...ADAPTER_NAMES],
+    enabledAdapters: [...DEFAULT_ADAPTER_NAMES],
     codexTransport: "owned",
     codexSocket: undefined,
     tokenFile: join(baseDirectory, "token"),
@@ -146,6 +151,8 @@ export async function loadConfiguration({
     logFile: join(baseDirectory, "agent-host.log"),
     dashboardUrl: undefined,
     dashboardDirectory: undefined,
+    cursorUserDataDirectory: cursorPaths.userDataDirectory,
+    cursorProjectsDirectory: cursorPaths.projectsDirectory,
     allowedOrigins: [],
   };
   const merged = { ...defaults, ...fileConfig, ...environment, ...withoutUndefined(cli) };
@@ -160,6 +167,12 @@ export async function loadConfiguration({
   if (merged.dashboardDirectory !== undefined) {
     merged.dashboardDirectory = resolvePathBySource("dashboardDirectory", { cli, environment, fileConfig, defaults, baseDirectory });
   }
+  merged.cursorUserDataDirectory = resolvePathBySource(
+    "cursorUserDataDirectory", { cli, environment, fileConfig, defaults, baseDirectory },
+  );
+  merged.cursorProjectsDirectory = resolvePathBySource(
+    "cursorProjectsDirectory", { cli, environment, fileConfig, defaults, baseDirectory },
+  );
   const configuration = validateConfiguration(merged);
   return { configuration, configFile, configExists, paths: { ...paths, stateDirectory: dirname(configFile) } };
 }
@@ -193,6 +206,8 @@ function environmentConfiguration(env) {
   if (has("AGENT_HOST_ENABLED_ADAPTERS")) result.enabledAdapters = env.AGENT_HOST_ENABLED_ADAPTERS;
   if (has("AGENT_HOST_CODEX_TRANSPORT")) result.codexTransport = env.AGENT_HOST_CODEX_TRANSPORT;
   if (has("AGENT_HOST_CODEX_SOCKET")) result.codexSocket = env.AGENT_HOST_CODEX_SOCKET;
+  if (has("AGENT_HOST_CURSOR_USER_DATA_DIR")) result.cursorUserDataDirectory = env.AGENT_HOST_CURSOR_USER_DATA_DIR;
+  if (has("AGENT_HOST_CURSOR_PROJECTS_DIR")) result.cursorProjectsDirectory = env.AGENT_HOST_CURSOR_PROJECTS_DIR;
   if (has("AGENT_HOST_TOKEN_FILE")) result.tokenFile = env.AGENT_HOST_TOKEN_FILE;
   if (has("AGENT_HOST_LOCK_FILE")) result.lockFile = env.AGENT_HOST_LOCK_FILE;
   if (has("AGENT_HOST_LOG_LEVEL")) result.logLevel = env.AGENT_HOST_LOG_LEVEL;
@@ -252,7 +267,7 @@ function normalizeAdapters(value) {
   if (!adapters.length) throw new ConfigurationError("enabledAdapters must contain at least one adapter");
   const unique = new Set();
   for (const adapter of adapters) {
-    if (!ADAPTER_NAMES.includes(adapter)) throw new ConfigurationError(`unknown enabled adapter: ${adapter}`);
+    if (!AVAILABLE_ADAPTER_NAMES.includes(adapter)) throw new ConfigurationError(`unknown enabled adapter: ${adapter}`);
     if (unique.has(adapter)) throw new ConfigurationError(`duplicate enabled adapter: ${adapter}`);
     unique.add(adapter);
   }
@@ -286,6 +301,21 @@ function integer(value, name, minimum, maximum = Number.MAX_SAFE_INTEGER) {
 function resolveConfiguredPath(value, baseDirectory, name) {
   if (typeof value !== "string" || value === "") throw new ConfigurationError(`${name} must be a non-empty path`);
   return isAbsolute(value) ? value : resolve(baseDirectory, value);
+}
+
+function defaultCursorDirectories(homeDirectory, env) {
+  let userDataDirectory;
+  if (process.platform === "darwin") {
+    userDataDirectory = join(homeDirectory, "Library", "Application Support", "Cursor");
+  } else if (process.platform === "win32") {
+    userDataDirectory = join(env.APPDATA || join(homeDirectory, "AppData", "Roaming"), "Cursor");
+  } else {
+    userDataDirectory = join(env.XDG_CONFIG_HOME || join(homeDirectory, ".config"), "Cursor");
+  }
+  return {
+    userDataDirectory,
+    projectsDirectory: join(homeDirectory, ".cursor", "projects"),
+  };
 }
 
 function resolvePathBySource(name, { cli, environment, fileConfig, defaults, baseDirectory }) {

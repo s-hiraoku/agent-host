@@ -87,3 +87,24 @@
   every reconnect or sequence gap; repository identity never appears in event payloads.
 - Bound public results at 100, raw normalization work at 200, every public string and URL,
   and error output to machine-safe codes/counts. Worktree coordinates are opaque IDs, not paths.
+
+# Issue #28 decisions
+
+- Add `cursor-desktop` as an explicit opt-in artifact observer. Keep it out of the
+  default adapter list, use no private IPC, and advertise no mutation capabilities.
+- Read only Cursor's local-source conversation metadata plus project transcript JSONL.
+  Validate ownership, regular-file type, size, and symlink boundaries for the database,
+  WAL/SHM sidecars, project directories, and transcripts before opening them.
+- Derive the public ID from a canonical profile-path hash plus Cursor's conversation UUID.
+  Treat the profile hash as an isolation namespace, not a disclosed local path.
+- Reconcile duplicate transcripts by canonical full-record hashes. Identical and strict
+  prefix streams are readable from the longest copy; divergent, corrupt, or ambiguous
+  streams become `unknown` and disable `read`. Recheck the same rules at read time.
+- Publish only bounded user/assistant text. Omit tool inputs, tool results, provider
+  metadata, terminal details, and local paths from the action result and operational logs.
+- Infer `idle` or `error` only from a complete final terminal record. Partial streams and
+  every uncertain state remain `unknown`; artifact observation never claims `working`.
+- Expose Cursor's encoded project key only as a sanitized low-confidence
+  `workspaceCandidate`. Do not present it as a verified cwd, repository, or worktree.
+- Support one configured Cursor profile root per adapter instance in v1. Fail closed on
+  format drift, scan-budget exhaustion, ownership mismatch, or duplicate ambiguity.

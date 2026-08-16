@@ -11,9 +11,23 @@ const VIEWS = new Set(["active", "recent", "historical", "raw"]);
 const SORTS = new Set(["attention", "activity", "name", "provider", "status"]);
 const DIRECTIONS = new Set(["asc", "desc"]);
 const CAPABILITIES = ["prompt", "sendKeys", "approve", "reject", "interrupt", "focus", "read"];
+const WORKSPACE_CONFIDENCE = new Set(["low", "medium", "high"]);
 
 function compact(object) {
   return Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined));
+}
+
+function workspaceCandidateView(candidate) {
+  if (!candidate || typeof candidate.id !== "string" || !candidate.id
+    || !/^[A-Za-z0-9:._-]{1,100}$/.test(candidate.id)
+    || typeof candidate.name !== "string" || !candidate.name
+    || !WORKSPACE_CONFIDENCE.has(candidate.confidence)
+    || /[\u0000-\u001f\u007f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/u.test(candidate.name)) return undefined;
+  return {
+    id: candidate.id.slice(0, 100),
+    name: candidate.name.slice(0, 160),
+    confidence: candidate.confidence,
+  };
 }
 
 function approvalView(approval) {
@@ -101,6 +115,7 @@ export function agentSummary(agent) {
     )])),
     cwd: agent.cwd,
     project: projectView(agent.cwd),
+    workspaceCandidate: workspaceCandidateView(agent.workspaceCandidate),
     lastActivityAt: agent.lastActivityAt ?? agent.updatedAt,
     discoveredAt: agent.discoveredAt,
     updatedAt: agent.updatedAt,
