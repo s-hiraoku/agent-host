@@ -46,15 +46,15 @@ authorization.
 - [x] Add the private durable ledger, idempotency, recovery, and uncertainty handling
 - [x] Add deterministic demo launch and owned-only discovery
 - [x] Complete full verification and completion review
-- [ ] Open the ready PR for Issue #34
+- [x] Open the ready PR for Issue #34
 
 ## Current step
 
 - Branch: `codex/issue-34-launch-contract`
 - Issue: https://github.com/s-hiraoku/agent-host/issues/34
 - Base: `main` at `92fcec2` (PR #33 merge)
-- PR: not opened yet
-- Next: finish security/restart verification, completion review, and a ready PR.
+- PR: https://github.com/s-hiraoku/agent-host/pull/35
+- Next: follow PR #35 CI and review feedback; do not merge without explicit user authorization.
 
 ## Progress notes
 
@@ -91,3 +91,4 @@ authorization.
 - 2026-08-16: Inspected the published `@cursor/sdk@1.0.28` tarball and declarations without installing or executing it. The SDK exposes agent/run list, resume, replay, send, and cancel primitives, but the current host lacks an explicit launch contract and cannot prove ownership by adopting arbitrary SDK records. Added a fail-closed declaration probe, deterministic tests, and a production-adapter No-Go pending launch/ownership design.
 - 2026-08-16: Opened regular ready-for-review PR #33. CI run 31922434622 passed Node 22, 23, and 24 plus the integrated artifact and live cross-repository conformance jobs. Created Issue #34 for the provider-neutral authenticated/idempotent launch and durable ownership contract. Merge remains user-gated.
 - 2026-08-16: User merged PR #33 as `92fcec2`; started Issue #34 from that merge. Implemented the authenticated `POST /v1/launches` and launch detail/capability contracts, a private bounded durable ledger, persistent idempotency, strict requested/creating/owned/failed/uncertain transitions, restart reconciliation, exact mutation/billing acknowledgements, and a separate ledger-gated `discoverOwned` registry boundary. The deterministic demo launch adapter and language-neutral fixture prove concurrency, payload conflict, queue saturation, timeout uncertainty, invalid provider proof, client disconnect, corrupt/symlink state, restart ownership recovery, and unowned discovery rejection. Adviser completion review additionally drove a single-writer lease, uncertain-inclusive admission bound, provider exception redaction, and retention of scheduler lanes/ledger lease until non-cooperative provider promises actually settle. `npm run check` passes 171 tests and `npm run conformance` passes 2 tests; publication remains.
+- 2026-08-16: Opened regular ready-for-review PR #35 for Issue #34 after confirming the branch contains only the reviewed launch-contract change. Merge remains explicitly user-gated.
