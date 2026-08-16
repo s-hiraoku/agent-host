@@ -53,6 +53,7 @@ The package also documents important constraints:
 The repeatable declaration-only probe is:
 
 ```sh
+mkdir -p /tmp/cursor-sdk
 npm --cache /tmp/agent-host-npm-cache pack @cursor/sdk@1.0.28 --pack-destination /tmp/cursor-sdk
 tar -xzf /tmp/cursor-sdk/cursor-sdk-1.0.28.tgz -C /tmp/cursor-sdk
 node scripts/probe-cursor-sdk-package.mjs /tmp/cursor-sdk/package
