@@ -26,6 +26,10 @@ test("demo HTTP and SSE API passes the reusable client conformance suite", async
   });
   const address = await server.start();
   try {
+    assert.deepEqual(registry.adapterHealth().map((health) => health.id), ["demo"]);
+    assert.deepEqual(registry.adapterHealth({ includeInternal: true }).map((health) => health.id), [
+      "demo", "demo-launch",
+    ]);
     const report = await runClientConformance({ baseUrl: `http://127.0.0.1:${address.port}`, token: TOKEN });
     assert.equal(report.snapshotAgentCount, 6);
     assert.ok(report.observedEvents.includes("agent.action"));

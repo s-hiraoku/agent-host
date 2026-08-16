@@ -358,6 +358,26 @@ test("registry rejects owned discovery results that are not proven by the ledger
   await registry.close();
 });
 
+test("internal launch adapter health preserves public discovery compatibility and degraded readiness", async () => {
+  const registry = new AgentRegistry([{
+    id: "public",
+    async discover() { return []; },
+  }, {
+    id: "internal-launch",
+    discoveryHealth: "internal",
+    launchCapabilities: () => ({ provider: "demo", capabilityVersion: "demo-v1", targets: [] }),
+    async discover() { throw new Error("launch discovery unavailable"); },
+    async discoverOwned() { return []; },
+  }]);
+  await registry.refresh();
+  assert.deepEqual(registry.adapterHealth().map((health) => health.id), ["public"]);
+  assert.deepEqual(registry.adapterHealth({ includeInternal: true }).map((health) => health.id), [
+    "public", "internal-launch",
+  ]);
+  assert.equal(registry.readiness().degraded, true);
+  await registry.close();
+});
+
 test("HTTP disconnect does not cancel an issued launch", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-disconnect-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

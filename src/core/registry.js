@@ -214,20 +214,23 @@ export class AgentRegistry {
   get initialLoading() { return this.#initialLoading; }
   get refreshing() { return Boolean(this.#refreshPromise); }
   get closed() { return this.#closed; }
-  adapterHealth() {
-    return [...this.#adapterHealth.values()].map((health) => ({
+  adapterHealth({ includeInternal = false } = {}) {
+    return [...this.#adapterHealth.values()]
+      .filter((health) => includeInternal || this.#adapters.get(health.id)?.discoveryHealth !== "internal")
+      .map((health) => ({
       ...health,
       error: health.error ? { ...health.error } : null,
       circuit: { ...health.circuit },
-    }));
+      }));
   }
   readiness() {
     const adapters = this.adapterHealth();
+    const allAdapters = this.adapterHealth({ includeInternal: true });
     return {
       ready: !this.#initialLoading && !this.#closed,
       initialLoading: this.#initialLoading,
       refreshing: this.refreshing,
-      degraded: adapters.some((adapter) => adapter.status === "error" || adapter.status === "timeout"),
+      degraded: allAdapters.some((adapter) => adapter.status === "error" || adapter.status === "timeout"),
       adapters,
     };
   }

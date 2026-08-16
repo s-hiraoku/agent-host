@@ -221,6 +221,7 @@ export class DemoAdapter {
 
 export class DemoLaunchAdapter {
   id = "demo-launch";
+  discoveryHealth = "internal";
   #agents = new Map();
   #transition = 0;
 
