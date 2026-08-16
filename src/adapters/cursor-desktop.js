@@ -105,13 +105,14 @@ export class CursorDesktopAdapter {
     const lastActivityAt = new Date(row.updatedAt).toISOString();
     const recent = this.#now() - row.updatedAt <= this.#recentMs;
     const capabilities = noCapabilities();
-    capabilities.read = Boolean(transcript?.readable);
+    capabilities.read = !scan.truncated && Boolean(transcript?.readable);
+    const conflict = Boolean(scan.truncated || transcript?.conflict);
     return {
       id: `cursor-desktop:${this.#profileScope}:${row.id}`,
       provider: "cursor",
       source: this.id,
       name: row.title,
-      status: transcript?.status ?? "unknown",
+      status: scan.truncated ? "unknown" : transcript?.status ?? "unknown",
       capabilities,
       sessionId: row.id,
       target: row.id,
@@ -119,7 +120,7 @@ export class CursorDesktopAdapter {
       workspaceCandidate: transcript?.workspaceCandidate,
       discovery: {
         kind: "native",
-        confidence: transcript?.conflict ? "low" : "high",
+        confidence: conflict ? "low" : "high",
         provenance: "cursor-local-artifacts",
         visibility: row.archived || !recent ? "historical" : "recent",
       },
@@ -129,8 +130,8 @@ export class CursorDesktopAdapter {
           archived: row.archived,
           rootFingerprintPresent: Boolean(row.rootFingerprint),
           transcriptCount: transcript?.transcriptCount ?? 0,
-          conflict: Boolean(transcript?.conflict),
-          conflictKind: transcript?.conflictKind,
+          conflict,
+          conflictKind: scan.truncated ? "scan-truncated" : transcript?.conflictKind,
           partial: Boolean(transcript?.partial),
           scanTruncated: Boolean(scan.truncated),
           unsafeEntryCount: scan.unsafeEntries,
@@ -169,6 +170,9 @@ export class CursorDesktopAdapter {
         now: this.#now,
         signal: options.signal,
       });
+      if (scan.truncated) {
+        return failure(agent, "cursor_transcript_conflict", "Cursor transcript artifacts conflict");
+      }
       const transcripts = await this.#inspectTranscripts({
         candidatesBySession: scan.bySession,
         parseOptions: {

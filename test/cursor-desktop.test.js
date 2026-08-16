@@ -117,6 +117,47 @@ test("Cursor read returns bounded text only and rechecks conflicts after discove
   assert.equal(rediscovered.metadata.cursorDesktop.conflictKind, "divergent");
 });
 
+test("Cursor discovery and read fail closed when duplicate scanning is truncated", async (t) => {
+  const roots = await setup(t);
+  const adapter = new CursorDesktopAdapter({
+    ...roots,
+    now: () => NOW,
+    findTranscripts: async () => ({
+      bySession: new Map([[RECENT, []]]),
+      truncated: true,
+      unsafeEntries: 0,
+    }),
+    inspectTranscripts: async () => new Map([[
+      RECENT,
+      {
+        status: "idle",
+        readable: true,
+        conflict: false,
+        partial: false,
+        transcriptCount: 1,
+        messages: [{ role: "assistant", text: "Synthetic response" }],
+        messageCount: 1,
+        omittedBlocks: 0,
+        truncated: false,
+      },
+    ]]),
+  });
+
+  const agent = (await adapter.discover())[0];
+  assert.equal(agent.status, "unknown");
+  assert.equal(agent.capabilities.read, false);
+  assert.equal(agent.discovery.confidence, "low");
+  assert.equal(agent.metadata.cursorDesktop.conflict, true);
+  assert.equal(agent.metadata.cursorDesktop.conflictKind, "scan-truncated");
+  assert.deepEqual(await adapter.read(agent), {
+    ok: false,
+    code: "cursor_transcript_conflict",
+    agentId: agent.id,
+    action: "read",
+    message: "Cursor transcript artifacts conflict",
+  });
+});
+
 test("Cursor stale records disable read and all mutation capabilities", async (t) => {
   const roots = await setup(t);
   const adapter = new CursorDesktopAdapter({ ...roots, now: () => NOW });
