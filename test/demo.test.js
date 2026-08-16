@@ -5,7 +5,7 @@ import { createRuntimeAdapters } from "../src/runtime.js";
 
 test("demo mode is opt-in and replaces live adapters", () => {
   assert.deepEqual(createRuntimeAdapters().map((adapter) => adapter.id), ["codex", "herdr", "process"]);
-  assert.deepEqual(createRuntimeAdapters({ demoMode: true }).map((adapter) => adapter.id), ["demo"]);
+  assert.deepEqual(createRuntimeAdapters({ demoMode: true }).map((adapter) => adapter.id), ["demo", "demo-launch"]);
   assert.deepEqual(createRuntimeAdapters({
     codexTransport: "control",
     codexSocket: "/tmp/codex-control.sock",

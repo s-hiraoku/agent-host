@@ -7,7 +7,7 @@ const fixtureDirectory = join(dirname(dirname(fileURLToPath(import.meta.url))), 
 
 export async function loadClientConformanceFixtures() {
   const names = [
-    "snapshot", "action", "error", "approval", "adapter-failure", "event-reconnect", "repository-associations",
+    "snapshot", "action", "error", "approval", "adapter-failure", "event-reconnect", "repository-associations", "launch",
   ];
   return Object.fromEntries(await Promise.all(names.map(async (name) => [
     name,
@@ -39,6 +39,41 @@ export async function runClientConformance({ baseUrl, token, fetchImpl = fetch }
   assert.equal(capabilitiesResponse.status, 200);
   assert.ok(repositoryCapability.versions.includes(repositoryFixture.capability.version));
   assert.equal(repositoryCapability.maxItems, repositoryFixture.capability.maxItems);
+  const launchFixture = fixtures.launch;
+  const launchProvider = capabilities.capabilities.launches.providers.find(
+    (provider) => provider.provider === launchFixture.capability.provider,
+  );
+  assert.ok(launchProvider);
+  const launchTarget = launchProvider.targets.find((target) => target.id === launchFixture.capability.target);
+  assert.ok(launchTarget.profiles.includes(launchFixture.capability.profile));
+  assert.deepEqual(
+    launchTarget.modes.find((mode) => mode.id === launchFixture.capability.mode).risk,
+    launchFixture.capability.risk,
+  );
+  const launchHeaders = {
+    ...headers,
+    "content-type": "application/json",
+    "idempotency-key": "conformance-launch-0001",
+  };
+  const acceptedLaunchResponse = await fetchImpl(`${baseUrl}${launchFixture.request.path}`, {
+    method: launchFixture.request.method,
+    headers: launchHeaders,
+    body: JSON.stringify(launchFixture.request.body),
+  });
+  const acceptedLaunch = await acceptedLaunchResponse.json();
+  assert.equal(acceptedLaunchResponse.status, launchFixture.expected.acceptedStatus);
+  assert.match(acceptedLaunchResponse.headers.get("location"), /^\/v1\/launches\//);
+  const ownedLaunch = await pollLaunch(baseUrl, headers, acceptedLaunch.launch.id, fetchImpl);
+  assert.equal(ownedLaunch.state, launchFixture.expected.terminalState);
+  const replayLaunch = await (await fetchImpl(`${baseUrl}${launchFixture.request.path}`, {
+    method: launchFixture.request.method,
+    headers: launchHeaders,
+    body: JSON.stringify(launchFixture.request.body),
+  })).json();
+  assert.equal(replayLaunch.replayed, launchFixture.expected.replay);
+  assert.equal(replayLaunch.launch.id, acceptedLaunch.launch.id);
+  const launchedAgent = await pollAgent(baseUrl, headers, ownedLaunch.agentId, fetchImpl);
+  assert.equal(launchedAgent.agent.provider, launchFixture.expected.agentProvider);
   const zeroAssociationResponse = await fetchImpl(
     `${baseUrl}${repositoryPath(repositoryFixture, repositoryFixture.cases.zero.agentId)}`,
     { headers },
@@ -189,7 +224,27 @@ export async function runClientConformance({ baseUrl, token, fetchImpl = fetch }
     finalRevision: reconnectReady.data.revision,
     finalSequence: reconnectReady.data.sequence,
     repositoryAssociationCount: 1,
+    launchedAgentId: ownedLaunch.agentId,
   };
+}
+
+async function pollLaunch(baseUrl, headers, id, fetchImpl) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await fetchImpl(`${baseUrl}/v1/launches/${encodeURIComponent(id)}`, { headers });
+    const body = await response.json();
+    if (body.launch?.state === "owned") return body.launch;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("launch did not become owned");
+}
+
+async function pollAgent(baseUrl, headers, id, fetchImpl) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await fetchImpl(`${baseUrl}/v1/agents/${encodeURIComponent(id)}`, { headers });
+    if (response.status === 200) return response.json();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("owned launch agent did not enter discovery");
 }
 
 function repositoryPath(fixture, agentId) {

@@ -1,8 +1,8 @@
 # Client conformance fixtures
 
 These versioned, provider-neutral fixtures let dashboard and SDK implementations
-exercise snapshot, action, approval, adapter-failure, event-reconnect, and versioned
-repository-association behavior
+exercise snapshot, action, approval, explicit idempotent launch, adapter-failure,
+event-reconnect, and versioned repository-association behavior
 without reading private agent sessions. `large-list.json` contains exactly 1,000
 sanitized agent summaries for rendering and pagination performance tests.
 

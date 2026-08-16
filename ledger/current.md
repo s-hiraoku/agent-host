@@ -1,15 +1,19 @@
 # Current objective
 
-Complete Issue #32's feasibility spike for an opt-in Cursor SDK adapter that would manage only agents explicitly created and owned by agent-host. Keep SDK identities separate from existing Cursor desktop sessions, avoid live cloud cost and local workspace mutation, and decide the launch/ownership contract before any production dependency or adapter implementation. Do not merge without explicit user authorization.
+Complete Issue #34's provider-neutral authenticated and idempotent launch contract. Prove
+durable ownership, restart reconciliation, exact mutation/billing confirmation, and
+owned-only discovery with the deterministic demo provider. Do not add the Cursor SDK,
+run a live agent, mutate a workspace, incur charges, or merge without explicit user
+authorization.
 
 ## Success criteria
 
-- Inspect the exact published SDK manifest and declarations without adding a production dependency or executing an agent.
-- Map SDK agent/run/list/read/send/cancel semantics to the current agent-host contract.
-- Decide identity, ownership registry, restart reconciliation, credential, mutation, and cost boundaries.
-- Add a bounded declaration-only compatibility probe with synthetic drift and path-safety coverage.
-- Record a clear Go/No-Go and the next contract gate in a focused spike document.
-- Deliver the spike through a regular ready-for-review PR with repository checks.
+- Add versioned authenticated launch capability, create, and detail schemas.
+- Persist idempotency, intent, state transitions, provider proof, and ownership atomically.
+- Fail uncertain delivery closed and reconcile safely across restart without blind retry.
+- Enforce server-resolved local-mutation and external/billable confirmation rules.
+- Prove ledger-owned discovery with a deterministic demo provider and client fixtures.
+- Deliver the implementation through a regular ready-for-review PR with repository checks.
 - No PR is merged without explicit user authorization.
 
 ## Plan
@@ -38,14 +42,19 @@ Complete Issue #32's feasibility spike for an opt-in Cursor SDK adapter that wou
 - [x] Run the real package probe and full 158-test repository verification
 - [x] Complete Adviser review and open ready PR #33 for Issue #32
 - [x] Create follow-up launch-contract Issue #34
+- [x] Implement the provider-neutral launch schemas and optional adapter boundary
+- [x] Add the private durable ledger, idempotency, recovery, and uncertainty handling
+- [x] Add deterministic demo launch and owned-only discovery
+- [x] Complete full verification and completion review
+- [x] Open the ready PR for Issue #34
 
 ## Current step
 
-- Branch: `codex/issue-32-cursor-sdk-spike`
-- Issue: https://github.com/s-hiraoku/agent-host/issues/32
-- Base: `main` at `b4e4919` (PR #30 merge)
-- PR: https://github.com/s-hiraoku/agent-host/pull/33 (ready for review)
-- Next: follow PR #33 review feedback without merging; Issue #34 is the next implementation gate.
+- Branch: `codex/issue-34-launch-contract`
+- Issue: https://github.com/s-hiraoku/agent-host/issues/34
+- Base: `main` at `92fcec2` (PR #33 merge)
+- PR: https://github.com/s-hiraoku/agent-host/pull/35
+- Next: await PR #35 review and explicit user merge confirmation; do not merge automatically.
 
 ## Progress notes
 
@@ -81,3 +90,8 @@ Complete Issue #32's feasibility spike for an opt-in Cursor SDK adapter that wou
 - 2026-08-16: Created official desktop API tracker #31 and recorded that current SDK/API/CLI surfaces do not document attaching to arbitrary pre-existing desktop conversations. Created Issue #32 for the separate agent-host-owned SDK surface.
 - 2026-08-16: Inspected the published `@cursor/sdk@1.0.28` tarball and declarations without installing or executing it. The SDK exposes agent/run list, resume, replay, send, and cancel primitives, but the current host lacks an explicit launch contract and cannot prove ownership by adopting arbitrary SDK records. Added a fail-closed declaration probe, deterministic tests, and a production-adapter No-Go pending launch/ownership design.
 - 2026-08-16: Opened regular ready-for-review PR #33. CI run 31922434622 passed Node 22, 23, and 24 plus the integrated artifact and live cross-repository conformance jobs. Created Issue #34 for the provider-neutral authenticated/idempotent launch and durable ownership contract. Merge remains user-gated.
+- 2026-08-16: User merged PR #33 as `92fcec2`; started Issue #34 from that merge. Implemented the authenticated `POST /v1/launches` and launch detail/capability contracts, a private bounded durable ledger, persistent idempotency, strict requested/creating/owned/failed/uncertain transitions, restart reconciliation, exact mutation/billing acknowledgements, and a separate ledger-gated `discoverOwned` registry boundary. The deterministic demo launch adapter and language-neutral fixture prove concurrency, payload conflict, queue saturation, timeout uncertainty, invalid provider proof, client disconnect, corrupt/symlink state, restart ownership recovery, and unowned discovery rejection. Adviser completion review additionally drove a single-writer lease, uncertain-inclusive admission bound, provider exception redaction, and retention of scheduler lanes/ledger lease until non-cooperative provider promises actually settle. `npm run check` passes 171 tests and `npm run conformance` passes 2 tests; publication remains.
+- 2026-08-16: Opened regular ready-for-review PR #35 for Issue #34 after confirming the branch contains only the reviewed launch-contract change. Merge remains explicitly user-gated.
+- 2026-08-16: PR #35 CI attempt 1 failed on Node 22/23/24 because the accelerated soak estimated its late-run heap slope from only two points. Restored the unchanged fast path for adapters without launch support and made shortened soaks collect at least nine samples without changing the production interval or memory thresholds. The focused soak test, 10 repeated 2,000-cycle runs, all 171 repository tests, and both conformance tests pass locally.
+- 2026-08-16: PR #35 CI attempt 2 passed Node 22/23/24 but exposed that the pinned dashboard expects one public demo discovery-health entry. Marked the separate demo launch adapter's discovery health internal while retaining it in degraded-readiness evaluation. Focused launch/conformance coverage, all 172 repository tests, and both conformance tests pass locally.
+- 2026-08-16: PR #35 CI run 31942889888 passed Node 22, 23, and 24 plus the integrated artifact build, extracted install verification, dashboard suite, and live cross-repository conformance. CodeRabbit completed without review threads; merge remains user-gated.

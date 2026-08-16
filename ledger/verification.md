@@ -218,3 +218,44 @@
   and record the full npm integrity value was applied before publication.
 - PR CI: run 31922434622 passed Node 22, 23, and 24 plus the integrated artifact build,
   extracted verification, and live cross-repository conformance job.
+
+## Issue #34 launch and ownership contract — 2026-08-16
+
+- Baseline: PR #33 merge commit `92fcec2`; no production launch provider or SDK
+  dependency was present.
+- Commands: `npm run check`, `npm run conformance`, and `git diff --check`.
+- Final result: pass; 171 tests, 0 failures, plus 2 reusable live-conformance tests.
+- State/idempotency coverage: concurrent identical requests converge, conflicting reuse
+  returns `409`, raw keys are not persisted, intent precedes provider invocation,
+  timeout becomes uncertain, explicit reconciliation does not blind-retry, creating
+  records recover after restart, and invalid provider success cannot establish ownership.
+- Persistence/security coverage: owner-only atomic files, bounded reads/records/backlog,
+  malformed schema and symlink rejection, exact risk confirmation, unknown field/option
+  rejection, authenticated private/no-store endpoints and errors, queue saturation, a
+  race-aware single-writer lease, and safe shutdown of a non-cooperative provider flight.
+- Ownership coverage: launch-capable adapters cannot publish agents through ordinary
+  discovery; `discoverOwned` must return one exact source/provider/agent match per
+  ledger-owned record. Malicious extra, missing, duplicate, and mismatched results fail
+  the adapter refresh closed.
+- HTTP/restart coverage: `202` plus `Location`, durable detail polling, replay, missing-key
+  errors, HTTP disconnect independence, owned agent discovery/action lookup, and a fresh
+  DemoAdapter process reconstructing the same exact owned agent from the ledger.
+- Timeout/fencing coverage: the public record becomes uncertain at the deadline, but
+  the same-provider scheduler lane and writer lease remain held until the original
+  provider promise actually settles. A queued same-provider launch cannot overlap;
+  another provider can use a remaining global slot; late owned results cannot rewrite
+  uncertainty; and a replacement coordinator cannot acquire the lease prematurely.
+- Live execution: intentionally limited to the deterministic in-process demo provider.
+  No Cursor SDK code, provider credentials, arbitrary filesystem target, real workspace
+  mutation, external agent, network provider call, billable token, or cloud charge occurred.
+- Design review: Adviser (`gpt-5.6-sol`, medium caller to requested high reviewer)
+  required ledger authority rather than refresh-based ownership, server-resolved frozen
+  risk, non-cancelling HTTP disconnect behavior, strict crash transitions, fail-closed
+  ledger startup, bounded retention, and a separate owned-discovery membership layer.
+  These constraints were adopted before implementation.
+- Completion review: the same Adviser identified multi-writer lost-update risk,
+  uncertain-intent admission escape, provider exception ambiguity, and timeout lane/
+  lease fencing. The implementation added the dedicated writer lease, counted all
+  unresolved states, documented strong failed proof, retained actual provider flights,
+  and added the corresponding deterministic tests before the final full rerun. Its
+  final verdict found no remaining correctness or security blocker for a regular PR.

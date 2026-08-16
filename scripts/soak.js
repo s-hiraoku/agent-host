@@ -52,6 +52,7 @@ export async function runSoak({ cycles = 28_800, agentCount = 1_000 } = {}) {
   const actions = new ActionExecutor(registry, { operations, idempotencyNow: () => clock });
   const baselineHandles = activeHandles();
   const samples = [];
+  const sampleInterval = Math.min(1_000, Math.max(1, Math.floor(cycles / 8)));
   let maxSsePending = 0;
   let maxActionQueue = 0;
 
@@ -74,7 +75,7 @@ export async function runSoak({ cycles = 28_800, agentCount = 1_000 } = {}) {
       }
       client.close();
     }
-    if (cycle % 1_000 === 0 || cycle === cycles - 1) {
+    if (cycle % sampleInterval === 0 || cycle === cycles - 1) {
       global.gc?.();
       samples.push({ cycle, ...process.memoryUsage(), handles: activeHandles() });
     }

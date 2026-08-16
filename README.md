@@ -48,6 +48,8 @@ GET  /health
 GET  /ready
 GET  /v1/adapters
 GET  /v1/capabilities
+POST /v1/launches                       # explicit provider-owned agent creation
+GET  /v1/launches/:id                  # durable launch state
 GET  /v1/diagnostics                   # authenticated, sanitized, bounded operations snapshot
 GET  /v1/agents                        # bounded summaries; default limit 50, maximum 200
 GET  /v1/agents/:id
@@ -70,6 +72,40 @@ with the same key and payload return the original result, while conflicting reus
 returns `409 idempotency_conflict`. Mutations for one agent execute serially.
 Action queues are bounded at 32 entries per agent and 256 globally; excess work
 returns `429 queue_full` with `Retry-After: 1`.
+
+Launch-capable clients first inspect `capabilities.launches`. A launch request names
+only an advertised provider, opaque target, allowlisted profile, and enabled mode. It
+must acknowledge both server-resolved risk flags exactly:
+
+```json
+{
+  "provider": "demo",
+  "target": "demo:workspace",
+  "profile": "default",
+  "mode": "local",
+  "confirmations": { "localMutation": true, "externalBillable": false }
+}
+```
+
+`POST /v1/launches` requires the same authentication, JSON content type, and
+`Idempotency-Key` rules as actions. It returns `202 Accepted` and a `Location` for the
+durable launch resource. States are `requested`, `creating`, `owned`, `failed`, and
+`uncertain`. A timeout, shutdown, or transport loss after provider invocation becomes
+`uncertain` and is never blindly reissued. Only an `owned` ledger record can introduce
+its exact agent ID through the adapter's separate owned-discovery boundary. Idempotency
+key values are hashed before persistence; launch records are owner-only, bounded at
+1,000, and retained rather than automatically expired so an old key cannot silently
+duplicate execution or spend. The deterministic demo provider exercises local-mutation
+and external/billable confirmations without changing files or contacting a provider.
+
+Launch adapters are trusted host code. They must expose launched agents only through
+`discoverOwned`, correlate results to the supplied stable attempt ID, and return
+`failed` only when they can prove that no side effect and no in-flight operation exists
+for that attempt. Rejected promises, transport errors, timeouts, aborts, and malformed
+results are `uncertain`. A timed-out non-cooperative provider keeps its provider
+scheduler lane and the ledger's single-writer lease until the original promise really
+settles; this deliberately blocks replacement work instead of risking overlapping
+execution or lease-transfer races.
 
 `GET /v1/agents` accepts repeatable or comma-separated `provider` and `status`
 filters, plus `view`, `cwd`, free-text `q`, `sort`, `direction`, `limit`, and an opaque

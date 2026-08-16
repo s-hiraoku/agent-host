@@ -1,0 +1,34 @@
+{
+  "fixtureVersion": 1,
+  "scenario": "launch",
+  "capability": {
+    "path": "/v1/capabilities",
+    "provider": "demo",
+    "target": "demo:workspace",
+    "profile": "default",
+    "mode": "local",
+    "risk": { "localMutation": true, "externalBillable": false }
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/launches",
+    "body": {
+      "provider": "demo",
+      "target": "demo:workspace",
+      "profile": "default",
+      "mode": "local",
+      "confirmations": { "localMutation": true, "externalBillable": false }
+    }
+  },
+  "expected": {
+    "acceptedStatus": 202,
+    "terminalState": "owned",
+    "replay": true,
+    "agentProvider": "demo"
+  },
+  "semantics": {
+    "ownership": "Only an owned ledger record can introduce the launched agent into discovery.",
+    "idempotency": "The same key and normalized payload converge on one durable launch resource.",
+    "confirmation": "The server resolves effective risk and requires an exact acknowledgement before provider invocation."
+  }
+}

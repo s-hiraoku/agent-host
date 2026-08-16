@@ -15,6 +15,7 @@ test("accelerated soak keeps queues, logs, metrics, handles, and children bounde
   const result = await runSoak({ cycles: 2_000, agentCount: 250 });
   assert.equal(result.passed, true, result.failures.join("; "));
   assert.equal(result.cycles, 2_000);
+  assert.ok(result.samples.length >= 9);
   assert.ok(result.bounds.recentLogs <= 200);
   assert.ok(result.bounds.maxSsePending <= 64);
   assert.ok(result.bounds.maxActionQueue <= 256);

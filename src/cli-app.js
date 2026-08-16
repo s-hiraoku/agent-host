@@ -122,6 +122,7 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
       acquireLock: dependencies.acquireLock,
       operations: dependencies.operations,
       homeDirectory: dependencies.homeDirectory ?? homedir(),
+      stateDirectory: paths.stateDirectory,
     });
     return 0;
   }
@@ -210,6 +211,7 @@ async function initializeState({ configuration, configFile, configExists }) {
 
 async function runForeground(options) {
   const lock = await (options.acquireLock ?? acquireInstanceLock)(options.configuration.lockFile);
+  const launchLedgerFile = join(options.stateDirectory, "launches.json");
   let registry;
   let server;
   let operations;
@@ -221,7 +223,7 @@ async function runForeground(options) {
       logLevel: options.configuration.logLevel,
       homeDirectory: options.homeDirectory,
       secrets: [token],
-      paths: privatePaths(options.configuration),
+      paths: [...privatePaths(options.configuration), launchLedgerFile, `${launchLedgerFile}.writer.lock`],
     });
     registry = makeRegistry(options.configuration, options.demoMode, options.makeRegistry, operations);
     server = (options.makeServer ?? createAgentServer)(registry, {
@@ -234,6 +236,7 @@ async function runForeground(options) {
       diagnosticsConfiguration: diagnosticConfiguration(options.configuration),
       dashboardDirectory: options.configuration.dashboardDirectory
         ?? (existsSync(PACKAGED_DASHBOARD_PATH) ? PACKAGED_DASHBOARD_PATH : undefined),
+      launchLedgerFile,
     });
     await server.start();
   } catch (error) {

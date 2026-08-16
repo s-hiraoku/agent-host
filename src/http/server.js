@@ -18,6 +18,7 @@ import {
 } from "../core/repository-associations.js";
 import { createStaticDashboard } from "./static-dashboard.js";
 import { publicReleaseInfo } from "../release-info.js";
+import { DisabledLaunchCoordinator, LaunchCoordinator } from "../core/launch-coordinator.js";
 
 const MAX_BODY_BYTES = 1_000_000;
 
@@ -52,6 +53,7 @@ function sendPrivate(res, status, body) {
 }
 
 function sendError(res, status, code, message, details) {
+  res.setHeader("cache-control", "private, no-store");
   const error = { code, message };
   if (details !== undefined) error.details = details;
   send(res, status, { apiVersion: API_VERSION, error });
@@ -72,6 +74,10 @@ export function createAgentServer(registry, options) {
   const operations = options.operations;
   const security = createApiSecurity(options);
   const actionExecutor = new ActionExecutor(registry, options);
+  const launchCoordinator = options.launchCoordinator
+    ?? (options.launchLedgerFile
+      ? new LaunchCoordinator(registry, { ...options, ledgerFile: options.launchLedgerFile })
+      : new DisabledLaunchCoordinator());
   const serveDashboard = createStaticDashboard(options.dashboardDirectory);
   let stopping = false;
   const server = createServer(async (req, res) => {
@@ -106,6 +112,7 @@ export function createAgentServer(registry, options) {
         url.pathname = url.pathname.slice("/agent-host".length) || "/";
       }
       const actionMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(prompt|send-keys|approve|reject|interrupt|focus|read)$/);
+      const launchMatch = url.pathname.match(/^\/v1\/launches\/([^/]+)$/);
       const requestOrigin = security.validateHost(req, server.address());
       const origin = security.validateOrigin(req, requestOrigin);
       security.applyCors(res, origin);
@@ -159,8 +166,28 @@ export function createAgentServer(registry, options) {
       if (req.method === "GET" && url.pathname === "/v1/capabilities") {
         return sendPrivate(res, 200, {
           apiVersion: API_VERSION,
-          capabilities: { repositoryAssociations: repositoryAssociationCapabilities() },
+          capabilities: {
+            repositoryAssociations: repositoryAssociationCapabilities(),
+            launches: launchCoordinator.capabilities(),
+          },
         });
+      }
+      if (req.method === "POST" && url.pathname === "/v1/launches") {
+        if (stopping) throw new ContractError("shutting_down", "agent-host is shutting down", 503);
+        security.requireJson(req);
+        const payload = await jsonBody(req);
+        const result = await launchCoordinator.submit(payload, req.headers["idempotency-key"]);
+        res.setHeader("location", `/v1/launches/${encodeURIComponent(result.launch.id)}`);
+        return sendPrivate(res, 202, { apiVersion: API_VERSION, ...result });
+      }
+      if (req.method === "GET" && launchMatch) {
+        let launchId;
+        try { launchId = decodeURIComponent(launchMatch[1]); }
+        catch { throw new ContractError("invalid_launch_id", "launch id is not valid percent-encoded text"); }
+        const launch = launchCoordinator.get(launchId);
+        return launch
+          ? sendPrivate(res, 200, { apiVersion: API_VERSION, launch })
+          : sendError(res, 404, "launch_not_found", "launch not found");
       }
       if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
         return send(res, 200, {
@@ -283,7 +310,7 @@ export function createAgentServer(registry, options) {
     } catch (error) {
       completeAudit(false, error instanceof ContractError ? error.code : "internal_error");
       if (res.headersSent) return res.end();
-      if (error?.code === "queue_full") res.setHeader("retry-after", "1");
+      if (error?.code === "queue_full" || error?.code === "launch_queue_full") res.setHeader("retry-after", "1");
       sendError(
         res,
         error instanceof ContractError ? error.status : 500,
@@ -299,10 +326,16 @@ export function createAgentServer(registry, options) {
     get apiToken() { return security.apiToken; },
     get generatedToken() { return security.generatedToken; },
     async start() {
-      await new Promise((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(options.port, options.host, resolve);
-      });
+      await launchCoordinator.start();
+      try {
+        await new Promise((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(options.port, options.host, resolve);
+        });
+      } catch (error) {
+        await launchCoordinator.stop();
+        throw error;
+      }
       started = true;
       operations?.logger.log("info", "server.started", { component: "http", outcome: "success" });
       void registry.refresh({ force: false });
@@ -320,6 +353,7 @@ export function createAgentServer(registry, options) {
         : Promise.resolve();
       const actionState = await actionExecutor.shutdown({ graceMs: options.shutdownGraceMs });
       try {
+        await launchCoordinator.stop();
         const registryClosed = Promise.resolve().then(() => registry.close?.());
         server.closeIdleConnections?.();
         if (actionState.timedOut) server.closeAllConnections?.();
