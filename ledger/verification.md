@@ -191,3 +191,30 @@
   conditionally ready with the final full check as its only gate. The 154-test full
   check then passed. Its non-blocking notes about the residual read-time TOCTOU window
   and single-profile scope are documented in the compatibility notes.
+
+## Issue #32 Cursor SDK feasibility — 2026-08-16
+
+- Baseline: PR #30 merge commit `b4e4919`; no production SDK dependency was present.
+- Package snapshot: `@cursor/sdk@1.0.28`, Node `>=22.13`, npm SHA-1
+  `e30d9e3dda4775e644621fc2c8cbca26cb70d227`. The npm tarball was unpacked only under
+  a temporary directory and no SDK code or agent was executed.
+- Declaration probe: agent create/resume/list/run/message APIs, run replay/cancel/status,
+  local/cloud controls, idempotency/tool policy, stream event types, and local durable
+  stores were all present. The report contains booleans and package metadata only.
+- Verification: the real published declaration probe passed, `git diff --check` passed,
+  and `npm run check` passed 158 tests. The 3 new tests cover the expected synthetic
+  surface, deterministic missing-symbol drift, and symbolic-link rejection.
+- Live execution: intentionally not run. No workspace was mutated, no Cursor credential
+  was read or persisted, no cloud agent was created, and no paid token usage was incurred.
+- Decision: production adapter No-Go until an explicit provider-neutral launch contract
+  and agent-host ownership registry are designed and accepted.
+- Design review: Adviser (`gpt-5.6-sol`, medium caller to high reviewer) recommended a
+  separate SDK feasibility path under Epic #26, agent-versus-run modeling, owned-ID-only
+  discovery, explicit local/cloud risk boundaries, and a launch-contract gate before
+  production implementation. These boundaries were adopted.
+- Completion review: a fresh Adviser on the same requested route found no PR blocker and
+  confirmed that the No-Go, ownership separation, credential, mutation, and cost boundaries
+  satisfy the spike. Its request to distinguish declaration evidence from runtime guarantees
+  and record the full npm integrity value was applied before publication.
+- PR CI: run 31922434622 passed Node 22, 23, and 24 plus the integrated artifact build,
+  extracted verification, and live cross-repository conformance job.

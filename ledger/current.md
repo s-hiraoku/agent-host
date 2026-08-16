@@ -1,15 +1,15 @@
 # Current objective
 
-Implement Issue #28's opt-in Cursor desktop artifact observer as a focused ready-for-review pull request. Preserve the stock-extension No-Go boundary from #27, read local artifacts only, expose bounded user/assistant text, fail closed on ambiguity, and advertise no mutation capabilities. Do not merge without explicit user authorization.
+Complete Issue #32's feasibility spike for an opt-in Cursor SDK adapter that would manage only agents explicitly created and owned by agent-host. Keep SDK identities separate from existing Cursor desktop sessions, avoid live cloud cost and local workspace mutation, and decide the launch/ownership contract before any production dependency or adapter implementation. Do not merge without explicit user authorization.
 
 ## Success criteria
 
-- `cursor-desktop` is available but excluded from the default adapter list.
-- SQLite metadata and transcript streams are read through bounded, owner-validated, no-follow paths without private IPC.
-- Identical/prefix streams reconcile; divergent/corrupt streams become `unknown` and disable `read`.
-- `read` returns bounded user/assistant text only and rechecks stream consistency at action time.
-- Synthetic fixtures, real SQLite/WAL coverage, full repository checks, and a sanitized live Cursor smoke pass.
-- The change is delivered through a regular ready-for-review PR with complete checks and review follow-up.
+- Inspect the exact published SDK manifest and declarations without adding a production dependency or executing an agent.
+- Map SDK agent/run/list/read/send/cancel semantics to the current agent-host contract.
+- Decide identity, ownership registry, restart reconciliation, credential, mutation, and cost boundaries.
+- Add a bounded declaration-only compatibility probe with synthetic drift and path-safety coverage.
+- Record a clear Go/No-Go and the next contract gate in a focused spike document.
+- Deliver the spike through a regular ready-for-review PR with repository checks.
 - No PR is merged without explicit user authorization.
 
 ## Plan
@@ -30,15 +30,22 @@ Implement Issue #28's opt-in Cursor desktop artifact observer as a focused ready
 - [x] Verify and independently review the implementation
 - [x] Open the ready PR
 - [x] Follow the initial CI run through completion
-- [ ] Follow future review feedback through PR Guardian
+- [x] Follow PR #30 review feedback and merge confirmation
+- [x] Create official desktop API tracker #31 and record the current No-Go
+- [x] Inspect `@cursor/sdk@1.0.28` manifest and published declaration surface
+- [x] Define the SDK agent/run, identity, ownership, credential, mutation, and cost boundaries
+- [x] Add a declaration-only package probe and deterministic tests
+- [x] Run the real package probe and full 158-test repository verification
+- [x] Complete Adviser review and open ready PR #33 for Issue #32
+- [x] Create follow-up launch-contract Issue #34
 
 ## Current step
 
-- Branch: `codex/issue-28-cursor-desktop-observer`
-- Issue: https://github.com/s-hiraoku/agent-host/issues/28
-- Base: `main` at `4041c0b` (PR #29 merge)
-- PR: https://github.com/s-hiraoku/agent-host/pull/30 (ready for review)
-- Next: follow review feedback without merging; CI run 31920908133 is green.
+- Branch: `codex/issue-32-cursor-sdk-spike`
+- Issue: https://github.com/s-hiraoku/agent-host/issues/32
+- Base: `main` at `b4e4919` (PR #30 merge)
+- PR: https://github.com/s-hiraoku/agent-host/pull/33 (ready for review)
+- Next: follow PR #33 review feedback without merging; Issue #34 is the next implementation gate.
 
 ## Progress notes
 
@@ -70,3 +77,7 @@ Implement Issue #28's opt-in Cursor desktop artifact observer as a focused ready
 - 2026-08-15: Final verification passed with 113 tests, 2 live conformance tests, and a 2,000-cycle/1,000-agent quick soak. A fresh Adviser completion review found no blocker; its documentation and prompt-independence follow-ups were applied and reverified. Opened regular ready-for-review PR #25; merge remains user-gated.
 - 2026-08-16: User merged PR #29. Started Issue #28 from merge commit `4041c0b`, confirmed Cursor 3.15.19's metadata schema and transcript record shapes without outputting content values, and implemented the opt-in read-only adapter. Final verification passes with 154 tests; a sanitized live smoke detects 12 recent sessions, exposes read for 4 consistent transcripts, disables all mutation capabilities, and fails closed for 2 divergent duplicates. A fresh Adviser completion review found no PR blocker after the final full check; publication and CI follow-up remain.
 - 2026-08-16: Opened regular ready-for-review PR #30. Its initial CI run 31920908133 passed Node 22, 23, and 24 plus the integrated artifact build, extracted verification, and live cross-repository conformance. Merge remains explicitly user-gated.
+- 2026-08-16: Addressed PR #30's P1 truncated-scan finding by failing closed in discovery and action-time read; 155 tests passed and the review thread was resolved. The user merged PR #30 as `b4e4919`, closing Issue #28.
+- 2026-08-16: Created official desktop API tracker #31 and recorded that current SDK/API/CLI surfaces do not document attaching to arbitrary pre-existing desktop conversations. Created Issue #32 for the separate agent-host-owned SDK surface.
+- 2026-08-16: Inspected the published `@cursor/sdk@1.0.28` tarball and declarations without installing or executing it. The SDK exposes agent/run list, resume, replay, send, and cancel primitives, but the current host lacks an explicit launch contract and cannot prove ownership by adopting arbitrary SDK records. Added a fail-closed declaration probe, deterministic tests, and a production-adapter No-Go pending launch/ownership design.
+- 2026-08-16: Opened regular ready-for-review PR #33. CI run 31922434622 passed Node 22, 23, and 24 plus the integrated artifact and live cross-repository conformance jobs. Created Issue #34 for the provider-neutral authenticated/idempotent launch and durable ownership contract. Merge remains user-gated.

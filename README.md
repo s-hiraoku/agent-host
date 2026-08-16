@@ -356,6 +356,11 @@ Cursor records advertise only `read`. They never advertise `prompt`, `sendKeys`,
 complete stream ends in `turn_ended/success`, `error` only for `turn_ended/error`, and
 otherwise `unknown`; file activity or a running Cursor process never implies `working`.
 
+Cursor SDK-created agents are a separate integration surface and identity namespace from
+these desktop records. The current host does not ship a Cursor SDK adapter; the bounded
+feasibility result and launch/ownership gate are documented in
+[`docs/spikes/cursor-sdk.md`](docs/spikes/cursor-sdk.md).
+
 If duplicate transcript streams are identical or exact prefixes, the longest complete
 record sequence is used. A divergent or corrupt stream disables `read` for that session.
 The adapter repeats this comparison for every read so a conflict appearing after
