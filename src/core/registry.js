@@ -595,34 +595,9 @@ export class AgentRegistry {
         startedAtIso: new Date().toISOString(),
       };
       flight.promise = Promise.resolve()
-        .then(async () => {
-          const discovered = await adapter.discover({ signal: controller.signal });
-          if (!Array.isArray(discovered)) return discovered;
-          if (typeof adapter.launchCapabilities === "function" && discovered.length) {
-            throw new TypeError("launch-capable adapters must expose agents only through discoverOwned()");
-          }
-          if (typeof adapter.discoverOwned !== "function") return discovered;
-          const records = [...this.#ownedLaunches.values()].filter((record) => record.request.provider
-            === adapter.launchCapabilities()?.provider);
-          const owned = await adapter.discoverOwned(records.map((record) => structuredClone(record)), {
-            signal: controller.signal,
-          });
-          if (!Array.isArray(owned) || owned.length !== records.length) {
-            throw new TypeError("adapter discoverOwned() must return one agent per owned launch");
-          }
-          const expected = new Map(records.map((record) => [record.agentId, record]));
-          for (const agent of owned) {
-            const record = expected.get(agent?.id);
-            if (!record || agent.source !== adapter.id || agent.provider !== record.request.provider) {
-              throw new TypeError("adapter discoverOwned() returned an unproven agent");
-            }
-            expected.delete(agent.id);
-          }
-          if (expected.size || owned.some((agent) => discovered.some((entry) => entry.id === agent.id))) {
-            throw new TypeError("adapter discoverOwned() returned duplicate or missing ownership");
-          }
-          return [...discovered, ...owned];
-        })
+        .then(() => typeof adapter.launchCapabilities === "function"
+          ? this.#discoverLaunchAdapter(adapter, controller.signal)
+          : adapter.discover({ signal: controller.signal }))
         .then(
           (agents) => Array.isArray(agents)
             ? { status: "success", agents }
@@ -653,6 +628,33 @@ export class AgentRegistry {
       durationMs: Date.now() - flight.startedAt,
       ...outcome,
     };
+  }
+
+  async #discoverLaunchAdapter(adapter, signal) {
+    const discovered = await adapter.discover({ signal });
+    if (!Array.isArray(discovered)) return discovered;
+    if (discovered.length) {
+      throw new TypeError("launch-capable adapters must expose agents only through discoverOwned()");
+    }
+    if (typeof adapter.discoverOwned !== "function") return discovered;
+    const provider = adapter.launchCapabilities()?.provider;
+    const records = [...this.#ownedLaunches.values()].filter((record) => record.request.provider === provider);
+    const owned = await adapter.discoverOwned(records.map((record) => structuredClone(record)), { signal });
+    if (!Array.isArray(owned) || owned.length !== records.length) {
+      throw new TypeError("adapter discoverOwned() must return one agent per owned launch");
+    }
+    const expected = new Map(records.map((record) => [record.agentId, record]));
+    for (const agent of owned) {
+      const record = expected.get(agent?.id);
+      if (!record || agent.source !== adapter.id || agent.provider !== provider) {
+        throw new TypeError("adapter discoverOwned() returned an unproven agent");
+      }
+      expected.delete(agent.id);
+    }
+    if (expected.size) {
+      throw new TypeError("adapter discoverOwned() returned duplicate or missing ownership");
+    }
+    return owned;
   }
 
   #healthForOutcome(previous, outcome) {
