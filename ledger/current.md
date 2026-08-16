@@ -28,16 +28,17 @@ Implement Issue #28's opt-in Cursor desktop artifact observer as a focused ready
 - [x] Define bounded SQLite, path, transcript, duplicate, status, and read rules
 - [x] Implement the parser, adapter, opt-in configuration, contract field, fixtures, tests, and documentation
 - [x] Verify and independently review the implementation
-- [ ] Open the ready PR
-- [ ] Follow CI and review feedback through PR Guardian
+- [x] Open the ready PR
+- [x] Follow the initial CI run through completion
+- [ ] Follow future review feedback through PR Guardian
 
 ## Current step
 
 - Branch: `codex/issue-28-cursor-desktop-observer`
 - Issue: https://github.com/s-hiraoku/agent-host/issues/28
 - Base: `main` at `4041c0b` (PR #29 merge)
-- PR: not opened yet
-- Next: publish a regular ready-for-review PR, then follow CI and review feedback without merging.
+- PR: https://github.com/s-hiraoku/agent-host/pull/30 (ready for review)
+- Next: follow review feedback without merging; CI run 31920908133 is green.
 
 ## Progress notes
 
@@ -68,3 +69,4 @@ Implement Issue #28's opt-in Cursor desktop artifact observer as a focused ready
 - 2026-08-15: Implemented the authenticated capability/detail contract, normalized adapter boundary, deterministic demo coverage, privacy-safe change event, language-neutral fixtures, live HTTP/SSE conformance, focused tests, and documentation. Full verification and completion review remain before PR creation.
 - 2026-08-15: Final verification passed with 113 tests, 2 live conformance tests, and a 2,000-cycle/1,000-agent quick soak. A fresh Adviser completion review found no blocker; its documentation and prompt-independence follow-ups were applied and reverified. Opened regular ready-for-review PR #25; merge remains user-gated.
 - 2026-08-16: User merged PR #29. Started Issue #28 from merge commit `4041c0b`, confirmed Cursor 3.15.19's metadata schema and transcript record shapes without outputting content values, and implemented the opt-in read-only adapter. Final verification passes with 154 tests; a sanitized live smoke detects 12 recent sessions, exposes read for 4 consistent transcripts, disables all mutation capabilities, and fails closed for 2 divergent duplicates. A fresh Adviser completion review found no PR blocker after the final full check; publication and CI follow-up remain.
+- 2026-08-16: Opened regular ready-for-review PR #30. Its initial CI run 31920908133 passed Node 22, 23, and 24 plus the integrated artifact build, extracted verification, and live cross-repository conformance. Merge remains explicitly user-gated.
