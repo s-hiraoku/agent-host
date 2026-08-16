@@ -83,6 +83,7 @@ export class AgentRegistry {
   #circuitThreshold;
   #forcedProbeMinMs;
   #circuits = new Map();
+  #ownedLaunches = new Map();
   #currentRefreshForced = false;
   #forcedFollowupPromise;
   events = new AgentEventBus();
@@ -229,6 +230,39 @@ export class AgentRegistry {
       degraded: adapters.some((adapter) => adapter.status === "error" || adapter.status === "timeout"),
       adapters,
     };
+  }
+
+  launchCapabilities() {
+    return [...this.#adapters.values()].flatMap((adapter) => {
+      if (typeof adapter.launchCapabilities !== "function") return [];
+      const capabilities = adapter.launchCapabilities();
+      return capabilities ? [capabilities] : [];
+    });
+  }
+
+  async launch(provider, record, options = {}) {
+    const adapter = this.#launchAdapter(provider);
+    if (!adapter?.launch) return { status: "failed", code: "launch_provider_unavailable" };
+    return adapter.launch(record.request, { ...options, attemptId: record.attemptId, launchId: record.id });
+  }
+
+  async reconcileLaunch(provider, record, options = {}) {
+    const adapter = this.#launchAdapter(provider);
+    if (!adapter?.reconcileLaunch) return { status: "unsupported" };
+    return adapter.reconcileLaunch(record, options);
+  }
+
+  activateOwnedLaunch(record) {
+    if (record?.state !== "owned" || typeof record.id !== "string" || typeof record.agentId !== "string") {
+      throw new TypeError("owned launch record is required");
+    }
+    this.#ownedLaunches.set(record.id, structuredClone(record));
+  }
+
+  #launchAdapter(provider) {
+    return [...this.#adapters.values()].find((adapter) => (
+      typeof adapter.launchCapabilities === "function" && adapter.launchCapabilities()?.provider === provider
+    ));
   }
 
   refresh(options = {}) {
@@ -561,7 +595,34 @@ export class AgentRegistry {
         startedAtIso: new Date().toISOString(),
       };
       flight.promise = Promise.resolve()
-        .then(() => adapter.discover({ signal: controller.signal }))
+        .then(async () => {
+          const discovered = await adapter.discover({ signal: controller.signal });
+          if (!Array.isArray(discovered)) return discovered;
+          if (typeof adapter.launchCapabilities === "function" && discovered.length) {
+            throw new TypeError("launch-capable adapters must expose agents only through discoverOwned()");
+          }
+          if (typeof adapter.discoverOwned !== "function") return discovered;
+          const records = [...this.#ownedLaunches.values()].filter((record) => record.request.provider
+            === adapter.launchCapabilities()?.provider);
+          const owned = await adapter.discoverOwned(records.map((record) => structuredClone(record)), {
+            signal: controller.signal,
+          });
+          if (!Array.isArray(owned) || owned.length !== records.length) {
+            throw new TypeError("adapter discoverOwned() must return one agent per owned launch");
+          }
+          const expected = new Map(records.map((record) => [record.agentId, record]));
+          for (const agent of owned) {
+            const record = expected.get(agent?.id);
+            if (!record || agent.source !== adapter.id || agent.provider !== record.request.provider) {
+              throw new TypeError("adapter discoverOwned() returned an unproven agent");
+            }
+            expected.delete(agent.id);
+          }
+          if (expected.size || owned.some((agent) => discovered.some((entry) => entry.id === agent.id))) {
+            throw new TypeError("adapter discoverOwned() returned duplicate or missing ownership");
+          }
+          return [...discovered, ...owned];
+        })
         .then(
           (agents) => Array.isArray(agents)
             ? { status: "success", agents }
@@ -638,6 +699,7 @@ export class AgentRegistry {
     await Promise.allSettled([this.#refreshPromise, this.#historyPromise].filter(Boolean));
     this.#adapterFlights.clear();
     this.#historyControllers.clear();
+    this.#ownedLaunches.clear();
   }
 
   async action(id, action, payload, options = {}) {

@@ -1,6 +1,6 @@
 import { CodexAdapter } from "./adapters/codex.js";
 import { CursorDesktopAdapter } from "./adapters/cursor-desktop.js";
-import { DemoAdapter } from "./adapters/demo.js";
+import { DemoAdapter, DemoLaunchAdapter } from "./adapters/demo.js";
 import { HerdrAdapter } from "./adapters/herdr.js";
 import { ProcessAdapter } from "./adapters/process.js";
 import { isAbsolute } from "node:path";
@@ -13,7 +13,7 @@ export function createRuntimeAdapters({
   cursorProjectsDirectory,
   enabledAdapters = ["codex", "herdr", "process"],
 } = {}) {
-  if (demoMode) return [new DemoAdapter()];
+  if (demoMode) return [new DemoAdapter(), new DemoLaunchAdapter()];
   if (codexTransport !== "owned" && codexTransport !== "control") {
     throw new Error("AGENT_HOST_CODEX_TRANSPORT must be owned or control");
   }

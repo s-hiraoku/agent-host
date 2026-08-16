@@ -5,6 +5,10 @@ The product release, HTTP/SSE API, configuration schema, dashboard, and adapter 
 - Product releases follow SemVer. Before 1.0, a minor release may contain product-level breaking changes, but it does not silently change an existing wire API.
 - API v1 permits additive optional fields and event types. Clients ignore unknown fields/events. Removing or changing existing fields, semantics, authentication, ordering, pagination, or replay guarantees requires a new `/v2` contract.
 - API v1 list queries support allowlisted global sorting and return facet counts tied to the same opaque view revision as the page. Optional `project` associations and sanitized approval `context` are additive; clients must treat `actionable: false` approvals as display-only and never infer provider-native data.
+- API v1 includes an additive authenticated launch extension discovered through
+  `capabilities.launches`. Its request, risk-confirmation, durable state, error, and
+  `launch.updated` event meanings are part of the v1 compatibility boundary. Providers
+  and modes remain optional; clients must not infer launch support from discovery.
 - Configuration schema 1 remains unchanged in 0.3.0. Future migrations are ordered `N -> N+1` transformations, written atomically after a private backup. Rollback restores the backup only when the post-migration file hash is unchanged; otherwise it stops with manual remediation instructions.
 - A deprecated API remains available for at least two minor releases or 90 days, whichever is longer, except for urgent security removal. Deprecations appear in the changelog and response documentation.
 - The integrated dashboard is built from the exact commit in the manifest. Build and runtime discovery fail when the host and dashboard have no API version in common.
@@ -23,6 +27,8 @@ the required descriptor-relative traversal for eliminating that TOCTOU class por
 
 `@cursor/sdk@1.0.28` was evaluated separately as a public-beta surface for agents created
 and owned by agent-host; it requires Node `>=22.13`. No production SDK adapter or dependency
-is shipped. SDK agents are not correlated with existing desktop conversations, and live
-local/cloud execution remains gated on an explicit launch, ownership, mutation, credential,
-and cost contract. See `docs/spikes/cursor-sdk.md`.
+is shipped. The provider-neutral launch/ownership contract is implemented and proven only
+by the deterministic demo provider; it performs no local mutation, external execution, or
+billing. SDK agents are not correlated with existing desktop conversations. A future SDK
+adapter must use the durable owned-discovery boundary and separately configure local and
+cloud modes before advertising either. See `docs/spikes/cursor-sdk.md`.

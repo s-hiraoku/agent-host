@@ -1,5 +1,35 @@
 # Decisions
 
+## Issue #34 decisions
+
+- Keep launch creation separate from existing per-agent actions. `POST /v1/launches`
+  accepts only advertised provider options and never treats prompt or discovery as an
+  implicit create operation.
+- Make the owner-only durable launch ledger authoritative. Persist `requested` before
+  queueing and `creating` with a stable attempt ID before provider invocation; only a
+  correlated provider ID and public agent ID can transition atomically to `owned`.
+- Treat timeout, shutdown, transport loss, and restart from `creating` as `uncertain`.
+  Reconcile through the provider attempt ID when supported and never blindly reissue an
+  uncertain create. Reserve `failed` for an adapter's explicit proof of non-creation.
+- Derive effective mutation and billing risk from normalized server-side capabilities,
+  require an exact two-flag acknowledgement, and freeze the capability version and risk
+  in the ledger so configuration drift cannot change an accepted request's meaning.
+- Hash idempotency keys before persistence and retain bounded records instead of using a
+  TTL that could silently permit duplicate agents or spend. Fail closed at 1,000 records
+  or 32 unresolved `requested`, `creating`, or `uncertain` intents. Hold a separate
+  race-aware single-writer lease for the ledger even though the normal service also owns
+  its process lock.
+- Separate `discoverOwned` from ordinary discovery. Registry supplies only ledger-owned
+  records and rejects missing, duplicate, mismatched-source, or otherwise unproven agent
+  results before they enter the public registry.
+- Use a deterministic demo launch provider to prove local-mutation and external/billable
+  confirmation paths, concurrency, restart recovery, and conformance without SDK code,
+  credentials, workspace changes, external execution, or charges.
+- Treat a provider's explicit `failed` as proof that the attempt has no side effect and
+  no in-flight work, not merely as a missing lookup result. Keep a timed-out provider's
+  scheduler lane and writer lease until its original promise settles; late results never
+  rewrite the already-uncertain record.
+
 ## 2026-08-09
 
 - Deliver backend work as dependency-ordered focused PRs instead of one cross-cutting PR.

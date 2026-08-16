@@ -4,6 +4,9 @@ This project follows [Semantic Versioning](https://semver.org/). Breaking wire c
 
 ## Unreleased
 
+- Add an authenticated explicit `POST /v1/launches` contract with durable idempotency,
+  exact local-mutation/external-billing confirmations, restart reconciliation, and
+  ledger-backed owned discovery proven by the deterministic demo provider.
 - Add an opt-in, read-only `cursor-desktop` adapter for bounded discovery and safe text reads from local Cursor desktop artifacts.
 - Add fail-closed duplicate, partial, corrupt, symlink, ownership, size, and scan-limit handling; no Cursor mutation capability is advertised.
 - Add optional low-confidence `workspaceCandidate` metadata to API v1 summaries and details.

@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { AgentRegistry } from "../src/core/registry.js";
-import { DemoAdapter } from "../src/adapters/demo.js";
+import { DemoAdapter, DemoLaunchAdapter } from "../src/adapters/demo.js";
 import { createAgentServer } from "../src/http/server.js";
 import { runClientConformance } from "../conformance/client-suite.js";
 
@@ -11,13 +13,16 @@ const TOKEN = "demo-conformance-token";
 const fixtureDirectory = new URL("../fixtures/client-conformance/", import.meta.url);
 const statuses = new Set(["unknown", "idle", "working", "blocked", "done", "error"]);
 
-test("demo HTTP and SSE API passes the reusable client conformance suite", async () => {
-  const registry = new AgentRegistry([new DemoAdapter()]);
+test("demo HTTP and SSE API passes the reusable client conformance suite", async (t) => {
+  const state = await mkdtemp(join(tmpdir(), "agent-host-conformance-"));
+  t.after(() => rm(state, { recursive: true, force: true }));
+  const registry = new AgentRegistry([new DemoAdapter(), new DemoLaunchAdapter()]);
   const server = createAgentServer(registry, {
     host: "127.0.0.1",
     port: 0,
     refreshMs: 60_000,
     apiToken: TOKEN,
+    launchLedgerFile: join(state, "launches.json"),
   });
   const address = await server.start();
   try {
@@ -27,6 +32,7 @@ test("demo HTTP and SSE API passes the reusable client conformance suite", async
     assert.ok(report.observedEvents.includes("agent.updated"));
     assert.ok(report.observedEvents.includes("agent.repository-associations.changed"));
     assert.equal(report.repositoryAssociationCount, 1);
+    assert.match(report.launchedAgentId, /^demo:owned:/);
   } finally {
     await server.stop();
   }
@@ -36,7 +42,7 @@ test("client fixtures are versioned, sanitized, and schema-compatible", async ()
   const files = (await readdir(fixtureDirectory)).filter((name) => name.endsWith(".json"));
   assert.deepEqual(files.sort(), [
     "action.json", "adapter-failure.json", "approval.json", "error.json",
-    "event-reconnect.json", "file-approval.json", "large-list.json", "list-features.json",
+    "event-reconnect.json", "file-approval.json", "large-list.json", "launch.json", "list-features.json",
     "repository-associations.json", "snapshot.json",
   ]);
   const fixtures = [];
@@ -51,6 +57,7 @@ test("client fixtures are versioned, sanitized, and schema-compatible", async ()
   assert.deepEqual(fixtures.find((fixture) => fixture.scenario === "snapshot").expected.statuses.sort(), [...statuses].sort());
   assert.equal(fixtures.find((fixture) => fixture.scenario === "action").expected.transition.to, "working");
   assert.equal(fixtures.find((fixture) => fixture.scenario === "error").expected.code, "agent_not_found");
+  assert.equal(fixtures.find((fixture) => fixture.scenario === "launch").expected.terminalState, "owned");
   assert.equal(fixtures.find((fixture) => fixture.scenario === "approval").pendingApproval.approvalId, "demo-approval-1");
   const fileApproval = fixtures.find((fixture) => fixture.scenario === "file-approval").pendingApproval;
   assert.equal(fileApproval.actionable, true);

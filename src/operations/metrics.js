@@ -2,9 +2,10 @@ const HISTOGRAM_BUCKETS_MS = [10, 50, 100, 250, 500, 1_000, 5_000, 20_000, Infin
 const COUNTERS = new Set([
   "adapter_failures", "adapter_reconnects", "circuit_skips", "circuit_probes",
   "sse_connections", "sse_reconnects", "sse_overflows", "actions_rejected",
+  "launches_rejected",
 ]);
-const GAUGES = new Set(["event_subscribers", "action_queue_depth", "sse_queue_depth"]);
-const HISTOGRAMS = new Set(["refresh_duration_ms", "action_latency_ms"]);
+const GAUGES = new Set(["event_subscribers", "action_queue_depth", "launch_queue_depth", "sse_queue_depth"]);
+const HISTOGRAMS = new Set(["refresh_duration_ms", "action_latency_ms", "launch_latency_ms"]);
 const LABELS = {
   adapter_failures: ["adapter"],
   adapter_reconnects: ["adapter"],
@@ -12,12 +13,15 @@ const LABELS = {
   circuit_probes: ["adapter", "outcome"],
   sse_reconnects: ["transport"],
   actions_rejected: ["code"],
+  launches_rejected: ["code"],
   action_latency_ms: ["actionKind", "outcome"],
+  launch_latency_ms: ["provider", "outcome"],
 };
 const LABEL_VALUES = {
   adapter: new Set(["codex", "herdr", "process", "demo", "other"]),
   transport: new Set(["dashboard_sse", "codex_rpc", "other"]),
   actionKind: new Set(["prompt", "send-keys", "approve", "reject", "interrupt", "focus", "read", "other"]),
+  provider: new Set(["demo", "other"]),
   outcome: new Set(["success", "failure", "timeout", "other"]),
   code: new Set(["queue_full", "shutting_down", "other"]),
 };
