@@ -54,7 +54,7 @@ authorization.
 - Issue: https://github.com/s-hiraoku/agent-host/issues/34
 - Base: `main` at `92fcec2` (PR #33 merge)
 - PR: https://github.com/s-hiraoku/agent-host/pull/35
-- Next: follow PR #35 CI and review feedback; do not merge without explicit user authorization.
+- Next: await PR #35 review and explicit user merge confirmation; do not merge automatically.
 
 ## Progress notes
 
@@ -94,3 +94,4 @@ authorization.
 - 2026-08-16: Opened regular ready-for-review PR #35 for Issue #34 after confirming the branch contains only the reviewed launch-contract change. Merge remains explicitly user-gated.
 - 2026-08-16: PR #35 CI attempt 1 failed on Node 22/23/24 because the accelerated soak estimated its late-run heap slope from only two points. Restored the unchanged fast path for adapters without launch support and made shortened soaks collect at least nine samples without changing the production interval or memory thresholds. The focused soak test, 10 repeated 2,000-cycle runs, all 171 repository tests, and both conformance tests pass locally.
 - 2026-08-16: PR #35 CI attempt 2 passed Node 22/23/24 but exposed that the pinned dashboard expects one public demo discovery-health entry. Marked the separate demo launch adapter's discovery health internal while retaining it in degraded-readiness evaluation. Focused launch/conformance coverage, all 172 repository tests, and both conformance tests pass locally.
+- 2026-08-16: PR #35 CI run 31942889888 passed Node 22, 23, and 24 plus the integrated artifact build, extracted install verification, dashboard suite, and live cross-repository conformance. CodeRabbit completed without review threads; merge remains user-gated.
