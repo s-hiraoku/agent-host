@@ -107,6 +107,12 @@ scheduler lane and the ledger's single-writer lease until the original promise r
 settles; this deliberately blocks replacement work instead of risking overlapping
 execution or lease-transfer races.
 
+The repository also contains a dependency-free, explicitly injected Cursor SDK adapter
+boundary for contract testing. It is not registered by the normal runtime and does not
+make the currently blocked Cursor SDK a supported dependency. See
+[`docs/cursor-sdk-adapter.md`](docs/cursor-sdk-adapter.md) for its safety boundary and
+upstream gates.
+
 `GET /v1/agents` accepts repeatable or comma-separated `provider` and `status`
 filters, plus `view`, `cwd`, free-text `q`, `sort`, `direction`, `limit`, and an opaque
 `cursor`. The allowlisted sorts are `attention`, `activity`, `name`, `provider`, and
