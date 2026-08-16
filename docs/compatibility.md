@@ -20,3 +20,9 @@ One configured/default Cursor profile is supported per agent-host process. Artif
 directories, files, ownership, containment, and final-file no-follow behavior are checked,
 but same-user path replacement remains outside the threat model because Node does not expose
 the required descriptor-relative traversal for eliminating that TOCTOU class portably.
+
+`@cursor/sdk@1.0.28` was evaluated separately as a public-beta surface for agents created
+and owned by agent-host; it requires Node `>=22.13`. No production SDK adapter or dependency
+is shipped. SDK agents are not correlated with existing desktop conversations, and live
+local/cloud execution remains gated on an explicit launch, ownership, mutation, credential,
+and cost contract. See `docs/spikes/cursor-sdk.md`.

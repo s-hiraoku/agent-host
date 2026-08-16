@@ -108,3 +108,22 @@
   `workspaceCandidate`. Do not present it as a verified cwd, repository, or worktree.
 - Support one configured Cursor profile root per adapter instance in v1. Fail closed on
   format drift, scan-budget exhaustion, ownership mismatch, or duplicate ambiguity.
+
+# Issue #32 decisions
+
+- Keep `cursor-sdk:*` identities completely separate from `cursor-desktop:*`. The SDK
+  surface creates or resumes SDK agents; it does not prove control of arbitrary existing
+  Cursor IDE conversations.
+- Do not build a production SDK adapter under the current action-only host API. Introduce
+  a separately reviewed authenticated and idempotent launch contract before an adapter
+  may create and advertise an owned agent.
+- Treat the durable SDK agent as the public record and SDK runs as its turns. Bind status,
+  read, prompt, and interrupt to an exact agent/run pair and a connection generation.
+- Discover only IDs recorded in an agent-host-owned registry. Local mode must use an
+  isolated explicit SDK store; cloud mode must carry an agent-host provenance marker.
+- Keep both runtimes disabled by default. Local mode is workspace-mutating code execution;
+  cloud mode is external and potentially billable. Neither may run during discovery.
+- Never invoke interactive SDK login or persist Cursor credentials. Reapply pinned model
+  and tool restrictions on every resume because SDK 1.0.28 does not persist them.
+- Keep approve, reject, focus, arbitrary adoption, archive, and delete unavailable in an
+  initial design. Capability proof is independent and fails closed on drift or replay gaps.
