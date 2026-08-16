@@ -36,15 +36,16 @@ Complete Issue #32's feasibility spike for an opt-in Cursor SDK adapter that wou
 - [x] Define the SDK agent/run, identity, ownership, credential, mutation, and cost boundaries
 - [x] Add a declaration-only package probe and deterministic tests
 - [x] Run the real package probe and full 158-test repository verification
-- [ ] Complete Adviser review and a ready PR for Issue #32
+- [x] Complete Adviser review and open ready PR #33 for Issue #32
+- [x] Create follow-up launch-contract Issue #34
 
 ## Current step
 
 - Branch: `codex/issue-32-cursor-sdk-spike`
 - Issue: https://github.com/s-hiraoku/agent-host/issues/32
 - Base: `main` at `b4e4919` (PR #30 merge)
-- PR: not opened yet
-- Next: completion review, full verification, then open a regular ready-for-review PR without merging.
+- PR: https://github.com/s-hiraoku/agent-host/pull/33 (ready for review)
+- Next: follow PR #33 review feedback without merging; Issue #34 is the next implementation gate.
 
 ## Progress notes
 
@@ -79,3 +80,4 @@ Complete Issue #32's feasibility spike for an opt-in Cursor SDK adapter that wou
 - 2026-08-16: Addressed PR #30's P1 truncated-scan finding by failing closed in discovery and action-time read; 155 tests passed and the review thread was resolved. The user merged PR #30 as `b4e4919`, closing Issue #28.
 - 2026-08-16: Created official desktop API tracker #31 and recorded that current SDK/API/CLI surfaces do not document attaching to arbitrary pre-existing desktop conversations. Created Issue #32 for the separate agent-host-owned SDK surface.
 - 2026-08-16: Inspected the published `@cursor/sdk@1.0.28` tarball and declarations without installing or executing it. The SDK exposes agent/run list, resume, replay, send, and cancel primitives, but the current host lacks an explicit launch contract and cannot prove ownership by adopting arbitrary SDK records. Added a fail-closed declaration probe, deterministic tests, and a production-adapter No-Go pending launch/ownership design.
+- 2026-08-16: Opened regular ready-for-review PR #33. CI run 31922434622 passed Node 22, 23, and 24 plus the integrated artifact and live cross-repository conformance jobs. Created Issue #34 for the provider-neutral authenticated/idempotent launch and durable ownership contract. Merge remains user-gated.

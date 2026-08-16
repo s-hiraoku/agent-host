@@ -216,3 +216,5 @@
   confirmed that the No-Go, ownership separation, credential, mutation, and cost boundaries
   satisfy the spike. Its request to distinguish declaration evidence from runtime guarantees
   and record the full npm integrity value was applied before publication.
+- PR CI: run 31922434622 passed Node 22, 23, and 24 plus the integrated artifact build,
+  extracted verification, and live cross-repository conformance job.
