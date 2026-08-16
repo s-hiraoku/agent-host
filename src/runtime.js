@@ -1,4 +1,5 @@
 import { CodexAdapter } from "./adapters/codex.js";
+import { CursorDesktopAdapter } from "./adapters/cursor-desktop.js";
 import { DemoAdapter } from "./adapters/demo.js";
 import { HerdrAdapter } from "./adapters/herdr.js";
 import { ProcessAdapter } from "./adapters/process.js";
@@ -8,6 +9,8 @@ export function createRuntimeAdapters({
   demoMode = false,
   codexTransport = "owned",
   codexSocket,
+  cursorUserDataDirectory,
+  cursorProjectsDirectory,
   enabledAdapters = ["codex", "herdr", "process"],
 } = {}) {
   if (demoMode) return [new DemoAdapter()];
@@ -23,6 +26,10 @@ export function createRuntimeAdapters({
       : new CodexAdapter()],
     ["herdr", () => new HerdrAdapter()],
     ["process", () => new ProcessAdapter({ rawOnlyProviders: codexTransport === "control" ? ["codex"] : [] })],
+    ["cursor-desktop", () => new CursorDesktopAdapter({
+      userDataDirectory: cursorUserDataDirectory,
+      projectsDirectory: cursorProjectsDirectory,
+    })],
   ]);
   return enabledAdapters.map((name) => factories.get(name)?.()).filter(Boolean);
 }

@@ -9,4 +9,14 @@ The product release, HTTP/SSE API, configuration schema, dashboard, and adapter 
 - A deprecated API remains available for at least two minor releases or 90 days, whichever is longer, except for urgent security removal. Deprecations appear in the changelog and response documentation.
 - The integrated dashboard is built from the exact commit in the manifest. Build and runtime discovery fail when the host and dashboard have no API version in common.
 
-Supported runtime range: Node 22–24. The currently verified adapters are Codex CLI 0.144.6 and Herdr 0.7.5; the narrow manifest ranges are provisional until additional real-version smoke evidence exists. Unsupported optional adapters must not prevent the host or other adapters from operating.
+Supported runtime range: Node 22–24. The currently verified adapters are Codex CLI 0.144.6, Herdr 0.7.5, and the read-only Cursor desktop artifact schema observed in Cursor 3.15.19 on macOS. The Cursor adapter is opt-in and depends on `node:sqlite`, which was added in Node 22.5 and no longer requires the experimental flag from Node 22.13. On older Node 22 minors the optional adapter reports `cursor_sqlite_unavailable`; it does not prevent the host or other adapters from operating. Cursor's artifact format is not a public compatibility API, so schema changes may degrade sessions to `unknown`, disable `read`, or mark the adapter unavailable rather than guessing.
+
+The Cursor adapter does not attach to live IDE agent sessions and cannot claim semantic
+control. Its `workspaceCandidate` is Cursor's encoded local project key with low
+confidence, not a verified cwd or repository association. `raw` view still exposes only
+the normalized v1 agent model, never raw Cursor artifacts.
+
+One configured/default Cursor profile is supported per agent-host process. Artifact roots,
+directories, files, ownership, containment, and final-file no-follow behavior are checked,
+but same-user path replacement remains outside the threat model because Node does not expose
+the required descriptor-relative traversal for eliminating that TOCTOU class portably.

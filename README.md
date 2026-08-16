@@ -4,7 +4,7 @@ A local control plane for AI coding agents.
 
 `agent-host` discovers agents running on your machine, normalizes their state/capabilities, and exposes one local API that thin clients can use. A watch, Stream Deck, menu bar app, web UI, phone app, or another agent should not need to know whether the target is Codex, Claude Code, Herdr, or something else.
 
-> Status: early MVP. Herdr control, a host-owned Codex App Server integration, opt-in attachment to an explicitly configured Codex App Server control socket, and a macOS LaunchAgent lifecycle are implemented. Other external desktop/CLI processes remain detection-only until a reliable transport exists.
+> Status: early MVP. Herdr control, a host-owned Codex App Server integration, opt-in attachment to an explicitly configured Codex App Server control socket, an opt-in read-only Cursor desktop observer, and a macOS LaunchAgent lifecycle are implemented. Other external desktop/CLI processes remain detection-only until a reliable transport exists.
 
 ## Why
 
@@ -34,6 +34,7 @@ Clients only consume a stable agent model and invoke capabilities exposed by the
 - Track Codex thread status notifications and interrupt turns owned by this host.
 - Surface real Codex command/file approval requests and answer them semantically with `accept` / `decline`.
 - Optionally subscribe to live threads already loaded on a shared Codex App Server Unix control socket.
+- Optionally discover persisted Cursor desktop sessions and read bounded user/assistant text without exposing mutation capabilities.
 - Normalize status to `unknown | idle | working | blocked | done | error`.
 - Advertise per-agent capabilities instead of pretending every backend supports every action.
 - Control Herdr agents with prompt, key input, interrupt, focus, and read operations.
@@ -99,6 +100,10 @@ the detail endpoint for controlled fields such as pending approvals.
 `discovery.kind`, `confidence`, `visibility`, and `duplicateOf` fields. Historical
 loading has its own cursor revision and does not expand the periodic refresh workload
 or emit a burst of normal agent lifecycle events.
+
+An adapter may also publish a low-confidence `workspaceCandidate` with opaque `id`,
+display `name`, and `confidence`. It is a hint from a provider artifact, not a verified
+cwd or repository association. Clients must not use it as repository identity.
 
 Provider metadata is intentionally non-semantic and excluded from public responses
 and change detection. Adapter authors must lift every client-visible mutable value
@@ -310,7 +315,7 @@ settings are:
 | `port` | `--port` / `AGENT_HOST_PORT` | HTTP port |
 | `refreshMs` | `--refresh-ms` / `AGENT_HOST_REFRESH_MS` | periodic refresh interval |
 | `adapterTimeoutMs` | `--adapter-timeout-ms` / `AGENT_HOST_ADAPTER_TIMEOUT_MS` | per-adapter timeout |
-| `enabledAdapters` | `--enabled-adapters` / `AGENT_HOST_ENABLED_ADAPTERS` | comma-separated `codex,herdr,process` subset |
+| `enabledAdapters` | `--enabled-adapters` / `AGENT_HOST_ENABLED_ADAPTERS` | comma-separated `codex,herdr,process,cursor-desktop` subset; Cursor is excluded from the default |
 | `codexTransport` | `--codex-transport` / `AGENT_HOST_CODEX_TRANSPORT` | `owned` or `control` |
 | `codexSocket` | `--codex-socket` / `AGENT_HOST_CODEX_SOCKET` | control-mode Unix socket |
 | `tokenFile` | `--token-file` / `AGENT_HOST_TOKEN_FILE` | private bearer token file |
@@ -319,6 +324,8 @@ settings are:
 | `logFile` | `--log-file` / `AGENT_HOST_LOG_FILE` | rotating application JSONL log |
 | `dashboardUrl` | `--dashboard-url` / `AGENT_HOST_DASHBOARD_URL` | canonical dashboard origin |
 | `dashboardDirectory` | `--dashboard-dir` / `AGENT_HOST_DASHBOARD_DIR` | optional built dashboard assets served from `/`; CLI/environment only so schema-1 configs remain rollback-readable |
+| — | `--cursor-user-data-dir` / `AGENT_HOST_CURSOR_USER_DATA_DIR` | optional Cursor user-data root; CLI/environment only |
+| — | `--cursor-projects-dir` / `AGENT_HOST_CURSOR_PROJECTS_DIR` | optional Cursor projects/artifacts root; CLI/environment only |
 | `allowedOrigins` | repeatable `--allowed-origin` / `AGENT_HOST_ALLOWED_ORIGINS` | additional canonical browser origins |
 
 Relative paths in the JSON file resolve from the configuration directory. CLI and
@@ -328,6 +335,44 @@ or symbolic-link use where they are read or replaced. Dashboard assets are opene
 no-follow semantics and read through the opened file descriptor. Keep a custom
 `dashboardDirectory` and its parent directories trusted and non-writable by other
 accounts; the packaged install satisfies this boundary with its private versioned root.
+
+### Cursor desktop observer
+
+Cursor support is disabled by default. Enable it explicitly while keeping the existing
+adapters, for example:
+
+```bash
+node src/cli.js serve --enabled-adapters codex,herdr,process,cursor-desktop
+```
+
+The adapter opens Cursor's conversation-search SQLite database read-only and inspects
+bounded transcript JSONL artifacts. Normal refresh reads at most 100 non-archived local
+sessions; `historical` and `raw` views load at most 1,000 sessions on demand. `raw`
+means the unfiltered normalized agent view—it never returns raw JSONL, tool inputs,
+tool results, commands, or files.
+
+Cursor records advertise only `read`. They never advertise `prompt`, `sendKeys`,
+`approve`, `reject`, `interrupt`, or `focus`. Status is `idle` only when the selected
+complete stream ends in `turn_ended/success`, `error` only for `turn_ended/error`, and
+otherwise `unknown`; file activity or a running Cursor process never implies `working`.
+
+If duplicate transcript streams are identical or exact prefixes, the longest complete
+record sequence is used. A divergent or corrupt stream disables `read` for that session.
+The adapter repeats this comparison for every read so a conflict appearing after
+discovery fails closed. Read results contain at most 120 user/assistant messages,
+8,192 characters per message, and 64 KiB of text in total.
+
+The standard macOS paths are detected automatically. Alternate profiles can be supplied
+with the CLI/environment-only path settings above. Configured roots may be owner-controlled
+symlinks, but nested symlinks, foreign-owned entries, non-regular transcript files, and
+oversized artifacts are rejected. Errors and adapter health contain fixed codes rather
+than titles, transcript content, or raw paths.
+
+One configured/default profile is observed per host process; profiles are not
+auto-discovered or merged. Path validation prevents cross-owner and nested-symlink
+traversal, but ordinary Node path APIs cannot eliminate a malicious same-user directory
+replacement between validation and open. The adapter therefore treats the local account
+as its trust boundary and still opens the final transcript with no-follow semantics.
 
 ### Service lifecycle
 

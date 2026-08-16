@@ -273,6 +273,8 @@ function makeRegistry(configuration, demoMode, factory, operations) {
     demoMode,
     codexTransport: configuration.codexTransport,
     codexSocket: configuration.codexSocket,
+    cursorUserDataDirectory: configuration.cursorUserDataDirectory,
+    cursorProjectsDirectory: configuration.cursorProjectsDirectory,
     enabledAdapters: configuration.enabledAdapters,
   }), { adapterTimeoutMs: configuration.adapterTimeoutMs, operations });
 }

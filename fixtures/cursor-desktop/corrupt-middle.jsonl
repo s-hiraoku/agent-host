@@ -1,0 +1,3 @@
+{"role":"user","message":{"content":[{"type":"text","text":"SYNTHETIC_BEFORE_CORRUPTION"}]}}
+{not-json}
+{"type":"turn_ended","status":"success"}

@@ -163,3 +163,31 @@
   document authenticated-404 semantics, call out cwd omission in lifecycle SSE, and
   prove prompt-independent demo coordinates were applied; `npm run check` and
   `npm run conformance` passed again afterward.
+
+## Issue #28 implementation — 2026-08-16
+
+- Baseline: PR #29 merge commit `4041c0b`; Cursor 3.15.19 artifact structure was
+  inspected by schema and record shape without printing conversation content values.
+- Commands: `git diff --check`, targeted Cursor adapter tests, and `npm run check`.
+- Final result: pass; 154 tests, 0 failures.
+- Synthetic fixtures: complete success, strict prefix duplicates, divergent duplicates,
+  partial streams, and corrupt middle records. Tests also create a real read-only SQLite
+  database with WAL/SHM sidecars and exercise archived/recent filtering.
+- Safety fixtures: root and nested symlinks, foreign ownership, non-regular files,
+  oversized database/sidecars/transcripts/lines, entry and scan budgets, malformed
+  records, UUID/path traversal, action-time replacement, and secret/path-free logging.
+- Read fixtures: canonical JSON hashing ignores formatting/key-order differences but
+  includes tool-bearing records for conflict detection; output includes only bounded
+  user/assistant text and omits tool inputs/results and provider metadata.
+- Sanitized live smoke: 12 recent sessions were detected, 4 consistent transcripts
+  exposed `read`, 2 divergent duplicates failed closed, 0 sessions exposed mutation,
+  and the configured scan completed without truncation. No title, UUID, path, workspace,
+  or message content was printed.
+- Design review: Adviser (`gpt-5.6-sol`, medium caller to high reviewer) required
+  canonical full-record hashes, action-time reconciliation, complete resource bounds,
+  real SQLite/WAL coverage, database-row validation, and secret-free log verification;
+  all were incorporated before completion review.
+- Completion review: a fresh Adviser on the same requested route judged the change
+  conditionally ready with the final full check as its only gate. The 154-test full
+  check then passed. Its non-blocking notes about the residual read-time TOCTOU window
+  and single-profile scope are documented in the compatibility notes.
