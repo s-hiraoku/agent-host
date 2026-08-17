@@ -9,6 +9,7 @@ import { acquireInstanceLock } from "../instance-lock.js";
 const STATE_SCHEMA_VERSION = 1;
 const MAX_STATE_BYTES = 1_000_000;
 const MAX_RECORDS = 1_000;
+const DISCOVERY_CONCURRENCY = 8;
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const ATTEMPT_ID = /^attempt:[0-9a-f-]{36}$/;
 const LAUNCH_ID = /^launch:[0-9a-f-]{36}$/;
@@ -38,15 +39,15 @@ export class CursorSdkAdapter {
     }
     this.#storeDirectory = absolutePath(options.storeDirectory, "storeDirectory");
     this.#targets = normalizeTargets(options.targets);
+    this.#now = options.now ?? Date.now;
     const provenanceFile = absolutePath(options.provenanceFile, "provenanceFile");
     for (const target of this.#targets.values()) {
       if (pathsOverlap(target.cwd, this.#storeDirectory) || pathWithin(target.cwd, provenanceFile)) {
         throw new Error("Cursor SDK private state must be outside configured workspaces");
       }
     }
-    this.#state = new CursorSdkProvenanceStore(provenanceFile, options.fs);
+    this.#state = new CursorSdkProvenanceStore(provenanceFile, options.fs, this.#now);
     this.#scope = createHash("sha256").update(this.#storeDirectory).digest("base64url").slice(0, 16);
-    this.#now = options.now ?? Date.now;
   }
 
   launchCapabilities() {
@@ -116,8 +117,9 @@ export class CursorSdkAdapter {
 
   async discoverOwned(records, { signal } = {}) {
     this.#assertReady();
-    return Promise.all(records.map(async (record) => {
-      const provenance = await this.#verifiedProvenance(record);
+    const provenanceByAttempt = await this.#state.snapshot();
+    return mapConcurrent(records, DISCOVERY_CONCURRENCY, async (record) => {
+      const provenance = this.#verifiedProvenance(provenanceByAttempt.get(record.attemptId), record);
       const target = this.#targets.get(provenance.target);
       const result = await this.#bridge.getLocal({
         agentId: provenance.providerAgentId,
@@ -126,8 +128,9 @@ export class CursorSdkAdapter {
         signal,
       });
       if (!result) throw new Error("Cursor SDK owned agent is not present in the dedicated store");
+      assertProviderAgent(result, provenance.providerAgentId);
       return this.#agent(record, provenance, result);
-    }));
+    });
   }
 
   markStale(agent) {
@@ -139,13 +142,10 @@ export class CursorSdkAdapter {
     await this.#state.close();
   }
 
-  async #verifiedProvenance(record) {
-    const provenance = await this.#state.get(record.attemptId);
+  #verifiedProvenance(provenance, record) {
     if (!provenance || provenance.state !== "owned" || provenance.launchId !== record.id
       || provenance.agentId !== record.agentId || provenance.providerAgentId !== record.providerAgentId
-      || provenance.sdkVersion !== this.#sdkVersion || provenance.bridgeNamespace !== this.#bridge.namespace
-      || provenance.storeScope !== this.#scope || !this.#targets.has(provenance.target)
-      || provenance.targetDigest !== digest(this.#targets.get(provenance.target).cwd)) {
+      || !this.#matchesConfiguration(provenance, record)) {
       throw new Error("Cursor SDK ownership provenance does not match the launch ledger");
     }
     return provenance;
@@ -200,14 +200,16 @@ export class CursorSdkProvenanceStore {
   #read;
   #write;
   #acquireLock;
+  #now;
   #lease;
   #tail = Promise.resolve();
 
-  constructor(file, fs = {}) {
+  constructor(file, fs = {}, now = Date.now) {
     this.#file = file;
     this.#read = fs.readPrivateFileBounded ?? readPrivateFileBounded;
     this.#write = fs.writePrivateFileAtomic ?? writePrivateFileAtomic;
     this.#acquireLock = fs.acquireInstanceLock ?? acquireInstanceLock;
+    this.#now = now;
   }
 
   async open() {
@@ -245,7 +247,9 @@ export class CursorSdkProvenanceStore {
       const state = await this.#load();
       const index = state.records.findIndex((record) => record.attemptId === attemptId);
       if (index < 0) throw new Error("Cursor SDK provenance intent is missing");
-      state.records[index] = validateRecord({ ...state.records[index], state: "owned", updatedAt: new Date().toISOString() });
+      state.records[index] = validateRecord({
+        ...state.records[index], state: "owned", updatedAt: timestamp(this.#now),
+      });
       await this.#save(state);
       return structuredClone(state.records[index]);
     });
@@ -256,6 +260,14 @@ export class CursorSdkProvenanceStore {
       await this.#open();
       const record = (await this.#load()).records.find((entry) => entry.attemptId === attemptId);
       return record && structuredClone(record);
+    });
+  }
+
+  async snapshot() {
+    return this.#exclusive(async () => {
+      await this.#open();
+      const records = (await this.#load()).records;
+      return new Map(records.map((record) => [record.attemptId, structuredClone(record)]));
     });
   }
 
@@ -400,6 +412,22 @@ function sameIntent(left, right) {
     "bridgeNamespace", "storeScope", "targetDigest",
   ]
     .every((key) => left[key] === right[key]);
+}
+async function mapConcurrent(values, concurrency, mapper) {
+  const results = new Array(values.length);
+  let next = 0;
+  let firstError;
+  const worker = async () => {
+    while (!firstError && next < values.length) {
+      const index = next;
+      next += 1;
+      try { results[index] = await mapper(values[index], index); }
+      catch (error) { firstError ??= error; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+  if (firstError) throw firstError;
+  return results;
 }
 function pathWithin(parent, candidate) {
   const path = relative(parent, candidate);

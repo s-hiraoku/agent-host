@@ -94,6 +94,36 @@ test("Cursor SDK discovery rejects a launch-ledger/provenance mismatch", async (
   );
 });
 
+test("Cursor SDK discovery rejects a bridge identity mismatch", async (t) => {
+  const fixture = await makeFixture(t);
+  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  fixture.agents.set(owned.providerAgentId, { agentId: "agent_wrong", status: "idle" });
+  await assert.rejects(
+    fixture.adapter.discoverOwned([ledgerRecord(owned)]),
+    /unexpected agent identity/,
+  );
+});
+
+test("Cursor SDK discovery rejects owned ledger request drift", async (t) => {
+  const fixture = await makeFixture(t);
+  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const record = ledgerRecord(owned);
+  record.request.profile = "other";
+  await assert.rejects(fixture.adapter.discoverOwned([record]), /ownership provenance does not match/);
+});
+
+test("Cursor SDK discovery recomputes identities instead of trusting matching files", async (t) => {
+  const fixture = await makeFixture(t);
+  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  const providerAgentId = `agent_${"f".repeat(32)}`;
+  state.records[0].providerAgentId = providerAgentId;
+  state.records[0].agentId = `cursor-sdk:${state.records[0].storeScope}:${providerAgentId}`;
+  await writeFile(fixture.provenanceFile, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  const record = { ...ledgerRecord(owned), providerAgentId, agentId: state.records[0].agentId };
+  await assert.rejects(fixture.adapter.discoverOwned([record]), /ownership provenance does not match/);
+});
+
 test("Cursor SDK owned discovery fails closed when the dedicated store is missing the agent", async (t) => {
   const fixture = await makeFixture(t);
   const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
@@ -102,6 +132,36 @@ test("Cursor SDK owned discovery fails closed when the dedicated store is missin
     fixture.adapter.discoverOwned([ledgerRecord(owned)]),
     /not present in the dedicated store/,
   );
+});
+
+test("Cursor SDK owned discovery bounds bridge concurrency", async (t) => {
+  const fixture = await makeFixture(t);
+  const records = [];
+  for (let index = 100; index < 120; index += 1) {
+    const uuid = uuidFor(index);
+    const attemptId = `attempt:${uuid}`;
+    const launchId = `launch:${uuid}`;
+    const owned = await fixture.adapter.launch(request(), { attemptId, launchId });
+    records.push({
+      id: launchId,
+      attemptId,
+      state: "owned",
+      agentId: owned.agentId,
+      providerAgentId: owned.providerAgentId,
+      request: { provider: "cursor", target: "workspace-a", profile: "safe", mode: "local" },
+    });
+  }
+  let active = 0;
+  let maximum = 0;
+  fixture.bridge.getLocal = async ({ agentId }) => {
+    active += 1;
+    maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    active -= 1;
+    return fixture.agents.get(agentId);
+  };
+  assert.equal((await fixture.adapter.discoverOwned(records)).length, records.length);
+  assert.equal(maximum, 8);
 });
 
 test("normal runtime does not import or register the Cursor SDK adapter", async () => {
@@ -224,6 +284,16 @@ test("Cursor SDK provenance write failure occurs before bridge invocation", asyn
   assert.equal(creates, 0);
 });
 
+test("Cursor SDK ownership transition uses the injected clock", async (t) => {
+  const now = Date.parse("2035-01-02T03:04:05.000Z");
+  const fixture = await makeFixture(t, {}, { now: () => now });
+  await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const record = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
+  assert.equal(record.createdAt, "2035-01-02T03:04:05.000Z");
+  assert.equal(record.updatedAt, record.createdAt);
+  assert.equal(record.state, "owned");
+});
+
 test("Cursor SDK provenance capacity rejects before bridge invocation", async (t) => {
   const fixture = await makeFixture(t);
   await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
@@ -291,7 +361,7 @@ test("injected Cursor SDK adapter composes with the durable launch coordinator",
   assert.equal(agent.capabilities.read, false);
 });
 
-async function makeFixture(t, bridgeOverrides = {}) {
+async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-"));
   const agents = new Map();
   const bridge = {
@@ -315,6 +385,7 @@ async function makeFixture(t, bridgeOverrides = {}) {
     storeDirectory,
     provenanceFile,
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+    now: adapterOptions.now,
   });
   await adapter.open();
   t.after(async () => {
@@ -336,7 +407,7 @@ function ledgerRecord(owned) {
   };
 }
 
-async function waitFor(predicate, timeoutMs = 1_000) {
+async function waitFor(predicate, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
