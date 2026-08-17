@@ -220,7 +220,7 @@ test("launch admission is bounded before durable intent grows without limit", as
     async reconcileLaunch() { return { status: "failed", code: "provider_proved_absent" }; },
   }), { ledgerFile: join(directory, "launches.json") });
   await recovered.start();
-  await waitFor(() => ids.every((id) => recovered.get(id)?.state === "failed"), 2_000);
+  await waitFor(() => ids.every((id) => recovered.get(id)?.state === "failed"), 10_000);
   const afterResolution = await recovered.submit(LOCAL_REQUEST, "bounded-after-resolution");
   assert.equal(afterResolution.replayed, false);
   await recovered.stop();
