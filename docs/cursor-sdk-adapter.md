@@ -32,7 +32,7 @@ When directly composed with `AgentRegistry`, the adapter:
   absent. Read remains gated on durable exact-run provenance rather than agent ID alone.
 
 The private provenance file contains opaque target/profile identifiers, exact SDK
-version, bridge/store namespace hashes, canonical-target digest, launch and attempt IDs,
+version, the bridge namespace, a hash-derived store scope, canonical-target digest, launch and attempt IDs,
 and derived agent IDs. It does not contain workspace or store paths, prompts, messages,
 credentials, or provider responses.
 

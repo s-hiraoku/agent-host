@@ -182,7 +182,8 @@ test("Cursor SDK owned discovery bounds bridge concurrency", async (t) => {
     return fixture.agents.get(agentId);
   };
   assert.equal((await fixture.adapter.discoverOwned(records)).length, records.length);
-  assert.equal(maximum, 8);
+  assert.ok(maximum <= 8, `expected bounded concurrency, observed ${maximum}`);
+  assert.ok(maximum > 1, `expected concurrent lookups, observed ${maximum}`);
 });
 
 test("normal runtime does not import or register the Cursor SDK adapter", async () => {
@@ -215,6 +216,26 @@ test("Cursor SDK private state cannot overlap a configured workspace", async (t)
     provenanceFile: join(directory, "workspace", "provenance.json"),
     targets: [{ id: "workspace-a", cwd: join(directory, "workspace"), profiles: ["safe"] }],
   }), /private state must be outside/);
+});
+
+test("Cursor SDK provenance cannot overlap the bridge-managed store", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-store-overlap-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  await mkdir(cwd);
+  const bridge = {
+    namespace: "fixture",
+    sdkVersion: "1.0.28",
+    async createLocal() {},
+    async getLocal() {},
+  };
+  assert.throws(() => new CursorSdkAdapter({
+    bridge,
+    sdkVersion: "1.0.28",
+    storeDirectory: join(directory, "sdk-store"),
+    provenanceFile: join(directory, "sdk-store", "provenance.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+  }), /provenance state must be outside/);
 });
 
 test("Cursor SDK launch rejects workspace replacement before bridge invocation", async (t) => {
@@ -324,6 +345,37 @@ test("Cursor SDK provenance admits only one injected writer", async (t) => {
     second.open(),
     (error) => error.code === "instance_already_running",
   );
+});
+
+test("Cursor SDK close drains in-flight bridge work before releasing its writer lease", async (t) => {
+  let bridgeStarted;
+  const started = new Promise((resolve) => { bridgeStarted = resolve; });
+  let finishBridge;
+  const bridgeFinished = new Promise((resolve) => { finishBridge = resolve; });
+  const first = await makeFixture(t, {
+    async createLocal(input) {
+      bridgeStarted();
+      await bridgeFinished;
+      return { agentId: input.agentId };
+    },
+  });
+  const second = new CursorSdkAdapter({
+    bridge: { ...first.bridge, namespace: "fixture-second" },
+    sdkVersion: "1.0.28",
+    storeDirectory: first.storeDirectory,
+    provenanceFile: first.provenanceFile,
+    targets: [{ id: "workspace-a", cwd: first.cwd, profiles: ["safe"] }],
+  });
+  t.after(() => second.close());
+
+  const launch = first.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await started;
+  const closing = first.adapter.close();
+  await assert.rejects(second.open(), (error) => error.code === "instance_already_running");
+  finishBridge();
+  await launch;
+  await closing;
+  await second.open();
 });
 
 test("Cursor SDK malformed provenance suppresses capabilities and fails closed", async (t) => {

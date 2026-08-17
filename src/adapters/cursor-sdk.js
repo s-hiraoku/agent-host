@@ -30,6 +30,9 @@ export class CursorSdkAdapter {
   #scope;
   #sdkVersion;
   #now;
+  #activeOperations = new Set();
+  #closing;
+  #lifecycleGeneration = 0;
   #ready = false;
 
   constructor(options = {}) {
@@ -42,6 +45,9 @@ export class CursorSdkAdapter {
     this.#targets = normalizeTargets(options.targets);
     this.#now = options.now ?? Date.now;
     const provenanceFile = absolutePath(options.provenanceFile, "provenanceFile");
+    if (pathsOverlap(this.#storeDirectory, provenanceFile)) {
+      throw new Error("Cursor SDK provenance state must be outside the bridge-managed store");
+    }
     for (const target of this.#targets.values()) {
       if (pathsOverlap(target.cwd, this.#storeDirectory) || pathWithin(target.cwd, provenanceFile)) {
         throw new Error("Cursor SDK private state must be outside configured workspaces");
@@ -67,6 +73,8 @@ export class CursorSdkAdapter {
   async discover() { return []; }
 
   async open() {
+    const generation = this.#lifecycleGeneration;
+    await this.#closing;
     await ensurePrivateDirectory(this.#storeDirectory);
     this.#storeIdentity = await directoryIdentity(this.#storeDirectory, "store");
     for (const target of this.#targets.values()) {
@@ -75,62 +83,48 @@ export class CursorSdkAdapter {
       }
     }
     await this.#state.open();
+    if (generation !== this.#lifecycleGeneration) {
+      await this.#state.close();
+      throw new Error("Cursor SDK adapter opening was interrupted by close");
+    }
     this.#ready = true;
   }
 
   async launch(request, { attemptId, launchId, signal } = {}) {
-    this.#assertReady();
-    const target = this.#target(request);
-    await assertDirectoryIdentity(target.cwd, target.identity, "target");
-    const providerAgentId = providerId(attemptId);
-    const agentId = publicId(this.#scope, providerAgentId);
-    const reserved = await this.#state.reserve({
-      attemptId, launchId, providerAgentId, agentId, target: target.id, profile: request.profile,
-      sdkVersion: this.#sdkVersion, bridgeNamespace: this.#bridge.namespace, storeScope: this.#scope,
-      targetDigest: digest(target.cwd), createdAt: timestamp(this.#now),
+    return this.#run(async () => {
+      const target = this.#target(request);
+      await assertDirectoryIdentity(target.cwd, target.identity, "target");
+      const providerAgentId = providerId(attemptId);
+      const agentId = publicId(this.#scope, providerAgentId);
+      const reserved = await this.#state.reserve({
+        attemptId, launchId, providerAgentId, agentId, target: target.id, profile: request.profile,
+        sdkVersion: this.#sdkVersion, bridgeNamespace: this.#bridge.namespace, storeScope: this.#scope,
+        targetDigest: digest(target.cwd), createdAt: timestamp(this.#now),
+      });
+      if (!reserved.created) throw new Error("Cursor SDK launch attempt already has durable provenance");
+      await this.#assertBridgeDirectories(target);
+      const result = await this.#bridge.createLocal({
+        agentId: providerAgentId,
+        attemptId,
+        cwd: target.cwd,
+        storeDirectory: this.#storeDirectory,
+        profile: request.profile,
+        signal,
+      });
+      assertProviderAgent(result, providerAgentId);
+      await this.#state.markOwned(attemptId);
+      return { status: "owned", providerAgentId, agentId };
     });
-    if (!reserved.created) throw new Error("Cursor SDK launch attempt already has durable provenance");
-    await this.#assertBridgeDirectories(target);
-    const result = await this.#bridge.createLocal({
-      agentId: providerAgentId,
-      attemptId,
-      cwd: target.cwd,
-      storeDirectory: this.#storeDirectory,
-      profile: request.profile,
-      signal,
-    });
-    assertProviderAgent(result, providerAgentId);
-    await this.#state.markOwned(attemptId);
-    return { status: "owned", providerAgentId, agentId };
   }
 
   async reconcileLaunch(record, { signal } = {}) {
-    this.#assertReady();
-    const provenance = await this.#state.get(record.attemptId);
-    if (!this.#matchesConfiguration(provenance, record)) {
-      return { status: "uncertain", code: "cursor_ownership_unproven" };
-    }
-    const target = this.#targets.get(provenance.target);
-    if (!target) return { status: "uncertain", code: "cursor_target_unavailable" };
-    await this.#assertBridgeDirectories(target);
-    const result = await this.#bridge.getLocal({
-      agentId: provenance.providerAgentId,
-      cwd: target.cwd,
-      storeDirectory: this.#storeDirectory,
-      signal,
-    });
-    if (!result) return { status: "uncertain", code: "cursor_agent_unconfirmed" };
-    assertProviderAgent(result, provenance.providerAgentId);
-    if (provenance.state !== "owned") await this.#state.markOwned(record.attemptId);
-    return { status: "owned", providerAgentId: provenance.providerAgentId, agentId: provenance.agentId };
-  }
-
-  async discoverOwned(records, { signal } = {}) {
-    this.#assertReady();
-    const provenanceByAttempt = await this.#state.snapshot();
-    return mapConcurrent(records, DISCOVERY_CONCURRENCY, async (record) => {
-      const provenance = this.#verifiedProvenance(provenanceByAttempt.get(record.attemptId), record);
+    return this.#run(async () => {
+      const provenance = await this.#state.get(record.attemptId);
+      if (!this.#matchesConfiguration(provenance, record)) {
+        return { status: "uncertain", code: "cursor_ownership_unproven" };
+      }
       const target = this.#targets.get(provenance.target);
+      if (!target) return { status: "uncertain", code: "cursor_target_unavailable" };
       await this.#assertBridgeDirectories(target);
       const result = await this.#bridge.getLocal({
         agentId: provenance.providerAgentId,
@@ -138,9 +132,30 @@ export class CursorSdkAdapter {
         storeDirectory: this.#storeDirectory,
         signal,
       });
-      if (!result) throw new Error("Cursor SDK owned agent is not present in the dedicated store");
+      if (!result) return { status: "uncertain", code: "cursor_agent_unconfirmed" };
       assertProviderAgent(result, provenance.providerAgentId);
-      return this.#agent(record, provenance, result);
+      if (provenance.state !== "owned") await this.#state.markOwned(record.attemptId);
+      return { status: "owned", providerAgentId: provenance.providerAgentId, agentId: provenance.agentId };
+    });
+  }
+
+  async discoverOwned(records, { signal } = {}) {
+    return this.#run(async () => {
+      const provenanceByAttempt = await this.#state.snapshot();
+      return mapConcurrent(records, DISCOVERY_CONCURRENCY, async (record) => {
+        const provenance = this.#verifiedProvenance(provenanceByAttempt.get(record.attemptId), record);
+        const target = this.#targets.get(provenance.target);
+        await this.#assertBridgeDirectories(target);
+        const result = await this.#bridge.getLocal({
+          agentId: provenance.providerAgentId,
+          cwd: target.cwd,
+          storeDirectory: this.#storeDirectory,
+          signal,
+        });
+        if (!result) throw new Error("Cursor SDK owned agent is not present in the dedicated store");
+        assertProviderAgent(result, provenance.providerAgentId);
+        return this.#agent(record, provenance, result);
+      });
     });
   }
 
@@ -149,8 +164,16 @@ export class CursorSdkAdapter {
   }
 
   async close() {
+    if (this.#closing) return this.#closing;
+    this.#lifecycleGeneration += 1;
     this.#ready = false;
-    await this.#state.close();
+    const closing = (async () => {
+      await Promise.allSettled([...this.#activeOperations]);
+      await this.#state.close();
+    })();
+    this.#closing = closing;
+    try { await closing; }
+    finally { if (this.#closing === closing) this.#closing = undefined; }
   }
 
   #verifiedProvenance(provenance, record) {
@@ -172,6 +195,14 @@ export class CursorSdkAdapter {
 
   #assertReady() {
     if (!this.#ready) throw new Error("Cursor SDK adapter must be opened before use");
+  }
+
+  async #run(operation) {
+    this.#assertReady();
+    const active = Promise.resolve().then(operation);
+    this.#activeOperations.add(active);
+    try { return await active; }
+    finally { this.#activeOperations.delete(active); }
   }
 
   async #assertBridgeDirectories(target) {
