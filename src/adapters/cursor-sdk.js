@@ -82,6 +82,7 @@ export class CursorSdkAdapter {
       targetDigest: digest(target.cwd), createdAt: timestamp(this.#now),
     });
     if (!reserved.created) throw new Error("Cursor SDK launch attempt already has durable provenance");
+    await assertCanonicalDirectory(target.cwd);
     const result = await this.#bridge.createLocal({
       agentId: providerAgentId,
       attemptId,
@@ -166,12 +167,16 @@ export class CursorSdkAdapter {
   #matchesConfiguration(provenance, record) {
     if (!provenance || provenance.launchId !== record.id || provenance.sdkVersion !== this.#sdkVersion
       || provenance.bridgeNamespace !== this.#bridge.namespace || provenance.storeScope !== this.#scope
+      || (record.providerAgentId !== undefined && provenance.providerAgentId !== record.providerAgentId)
+      || (record.agentId !== undefined && provenance.agentId !== record.agentId)
       || provenance.providerAgentId !== providerId(record.attemptId)
       || provenance.agentId !== publicId(this.#scope, provenance.providerAgentId)) return false;
     const target = this.#targets.get(provenance.target);
     return Boolean(target && provenance.targetDigest === digest(target.cwd)
       && provenance.target === record.request?.target && provenance.profile === record.request?.profile
-      && record.request?.mode === "local" && record.request?.provider === "cursor");
+      && record.request?.mode === "local" && record.request?.provider === "cursor"
+      && record.request?.capabilityVersion === `cursor-sdk-local-${this.#sdkVersion}`
+      && record.request?.risk?.localMutation === true && record.request?.risk?.externalBillable === true);
   }
 
   #agent(record, provenance, result) {
@@ -247,8 +252,13 @@ export class CursorSdkProvenanceStore {
       const state = await this.#load();
       const index = state.records.findIndex((record) => record.attemptId === attemptId);
       if (index < 0) throw new Error("Cursor SDK provenance intent is missing");
+      const updatedAt = timestamp(this.#now);
       state.records[index] = validateRecord({
-        ...state.records[index], state: "owned", updatedAt: timestamp(this.#now),
+        ...state.records[index],
+        state: "owned",
+        updatedAt: Date.parse(updatedAt) < Date.parse(state.records[index].updatedAt)
+          ? state.records[index].updatedAt
+          : updatedAt,
       });
       await this.#save(state);
       return structuredClone(state.records[index]);
