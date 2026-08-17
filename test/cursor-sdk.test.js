@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { CursorSdkAdapter } from "../src/adapters/cursor-sdk.js";
@@ -251,6 +251,62 @@ test("Cursor SDK launch rechecks workspace after persisting intent", async (t) =
     /target changed after configuration/,
   );
   assert.equal(creates, 0);
+});
+
+test("Cursor SDK launch rejects a plain-directory workspace replacement", async (t) => {
+  let creates = 0;
+  let replaced = false;
+  const fixture = await makeFixture(t, {
+    async createLocal() { creates += 1; },
+  }, {
+    async afterProvenanceWrite({ cwd }) {
+      if (replaced) return;
+      replaced = true;
+      await rename(cwd, `${cwd}-moved`);
+      await mkdir(cwd);
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    /target changed after configuration/,
+  );
+  assert.equal(creates, 0);
+});
+
+test("Cursor SDK creates a private store and rejects replacement before bridge access", async (t) => {
+  let gets = 0;
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) {
+      gets += 1;
+      return fixture.agents.get(agentId) ?? null;
+    },
+  });
+  assert.equal((await lstat(fixture.storeDirectory)).mode & 0o077, 0);
+  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await rename(fixture.storeDirectory, `${fixture.storeDirectory}-moved`);
+  await symlink(fixture.cwd, fixture.storeDirectory);
+  await assert.rejects(
+    fixture.adapter.discoverOwned([ledgerRecord(owned)]),
+    /store changed after configuration/,
+  );
+  assert.equal(gets, 0);
+});
+
+test("Cursor SDK rejects a store that becomes accessible to other users", async (t) => {
+  let gets = 0;
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) {
+      gets += 1;
+      return fixture.agents.get(agentId) ?? null;
+    },
+  });
+  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await chmod(fixture.storeDirectory, 0o755);
+  await assert.rejects(
+    fixture.adapter.discoverOwned([ledgerRecord(owned)]),
+    /store changed after configuration/,
+  );
+  assert.equal(gets, 0);
 });
 
 test("Cursor SDK provenance admits only one injected writer", async (t) => {

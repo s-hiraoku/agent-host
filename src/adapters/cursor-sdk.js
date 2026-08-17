@@ -3,7 +3,7 @@ import { lstatSync, realpathSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { noCapabilities } from "../core/types.js";
-import { readPrivateFileBounded, writePrivateFileAtomic } from "../secure-state.js";
+import { ensurePrivateDirectory, readPrivateFileBounded, writePrivateFileAtomic } from "../secure-state.js";
 import { acquireInstanceLock } from "../instance-lock.js";
 
 const STATE_SCHEMA_VERSION = 1;
@@ -26,6 +26,7 @@ export class CursorSdkAdapter {
   #targets;
   #state;
   #storeDirectory;
+  #storeIdentity;
   #scope;
   #sdkVersion;
   #now;
@@ -66,6 +67,13 @@ export class CursorSdkAdapter {
   async discover() { return []; }
 
   async open() {
+    await ensurePrivateDirectory(this.#storeDirectory);
+    this.#storeIdentity = await directoryIdentity(this.#storeDirectory, "store");
+    for (const target of this.#targets.values()) {
+      if (pathsOverlap(target.cwd, this.#storeDirectory)) {
+        throw new Error("Cursor SDK private state must be outside configured workspaces");
+      }
+    }
     await this.#state.open();
     this.#ready = true;
   }
@@ -73,7 +81,7 @@ export class CursorSdkAdapter {
   async launch(request, { attemptId, launchId, signal } = {}) {
     this.#assertReady();
     const target = this.#target(request);
-    await assertCanonicalDirectory(target.cwd);
+    await assertDirectoryIdentity(target.cwd, target.identity, "target");
     const providerAgentId = providerId(attemptId);
     const agentId = publicId(this.#scope, providerAgentId);
     const reserved = await this.#state.reserve({
@@ -82,7 +90,7 @@ export class CursorSdkAdapter {
       targetDigest: digest(target.cwd), createdAt: timestamp(this.#now),
     });
     if (!reserved.created) throw new Error("Cursor SDK launch attempt already has durable provenance");
-    await assertCanonicalDirectory(target.cwd);
+    await this.#assertBridgeDirectories(target);
     const result = await this.#bridge.createLocal({
       agentId: providerAgentId,
       attemptId,
@@ -104,6 +112,7 @@ export class CursorSdkAdapter {
     }
     const target = this.#targets.get(provenance.target);
     if (!target) return { status: "uncertain", code: "cursor_target_unavailable" };
+    await this.#assertBridgeDirectories(target);
     const result = await this.#bridge.getLocal({
       agentId: provenance.providerAgentId,
       cwd: target.cwd,
@@ -122,6 +131,7 @@ export class CursorSdkAdapter {
     return mapConcurrent(records, DISCOVERY_CONCURRENCY, async (record) => {
       const provenance = this.#verifiedProvenance(provenanceByAttempt.get(record.attemptId), record);
       const target = this.#targets.get(provenance.target);
+      await this.#assertBridgeDirectories(target);
       const result = await this.#bridge.getLocal({
         agentId: provenance.providerAgentId,
         cwd: target.cwd,
@@ -162,6 +172,11 @@ export class CursorSdkAdapter {
 
   #assertReady() {
     if (!this.#ready) throw new Error("Cursor SDK adapter must be opened before use");
+  }
+
+  async #assertBridgeDirectories(target) {
+    await assertDirectoryIdentity(target.cwd, target.identity, "target");
+    await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
   }
 
   #matchesConfiguration(provenance, record) {
@@ -333,7 +348,8 @@ function normalizeTargets(targets) {
     if (!profiles.length || profiles.length > 20 || profiles.some((profile) => !SAFE_ID.test(profile))) {
       throw new TypeError("Cursor SDK target profiles must be safe identifiers");
     }
-    result.set(target.id, { id: target.id, cwd: canonicalDirectory(target.cwd), profiles });
+    const directory = canonicalDirectory(target.cwd);
+    result.set(target.id, { id: target.id, cwd: directory.path, identity: directory.identity, profiles });
   }
   return result;
 }
@@ -378,18 +394,37 @@ function absolutePath(value, name) {
 function canonicalDirectory(value) {
   if (typeof value !== "string" || !isAbsolute(value)) throw new TypeError("target cwd must be an absolute path");
   const configured = resolve(value);
-  const stat = lstatSync(configured);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+  const before = lstatSync(configured);
+  if (!before.isDirectory() || before.isSymbolicLink()) {
     throw new Error("Cursor SDK target must be a canonical real directory");
   }
-  return realpathSync(configured);
+  const path = realpathSync(configured);
+  const after = lstatSync(configured);
+  if (!sameStatIdentity(before, after)) {
+    throw new Error("Cursor SDK target must be a stable canonical real directory");
+  }
+  return { path, identity: statIdentity(after) };
 }
-async function assertCanonicalDirectory(path) {
-  const stat = await lstat(path);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || await realpath(path) !== path) {
-    throw new Error("Cursor SDK target changed after configuration");
+async function directoryIdentity(path, kind) {
+  const before = await lstat(path);
+  if (!before.isDirectory() || before.isSymbolicLink() || await realpath(path) !== path) {
+    throw new Error(`Cursor SDK ${kind} changed after configuration`);
+  }
+  const after = await lstat(path);
+  if (!after.isDirectory() || after.isSymbolicLink() || !sameStatIdentity(before, after)
+    || (kind === "store" && ((process.getuid && after.uid !== process.getuid()) || (after.mode & 0o077) !== 0))) {
+    throw new Error(`Cursor SDK ${kind} changed after configuration`);
+  }
+  return statIdentity(after);
+}
+async function assertDirectoryIdentity(path, expected, kind) {
+  const actual = await directoryIdentity(path, kind);
+  if (!expected || actual.dev !== expected.dev || actual.ino !== expected.ino) {
+    throw new Error(`Cursor SDK ${kind} changed after configuration`);
   }
 }
+function statIdentity(stat) { return { dev: stat.dev, ino: stat.ino }; }
+function sameStatIdentity(left, right) { return left.dev === right.dev && left.ino === right.ino; }
 function canonicalPotentialPath(value) {
   let current = resolve(value);
   const suffix = [];

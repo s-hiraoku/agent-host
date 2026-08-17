@@ -12,8 +12,11 @@ responsible for supplying a separately reviewed bridge and credentials; the adap
 not perform interactive login or read Cursor's default credentials or stores.
 
 Trusted composition must call `open()` successfully before registering the adapter. That
-step acquires the private provenance writer lease and validates the complete bounded state;
-capabilities remain absent if opening fails.
+step creates or validates the owner-only dedicated store, pins its directory identity,
+acquires the private provenance writer lease, and validates the complete bounded state;
+capabilities remain absent if opening fails. Every bridge invocation rechecks both the
+configured workspace and store identities and fails closed after replacement, symlink, or
+store-permission drift.
 
 When directly composed with `AgentRegistry`, the adapter:
 
