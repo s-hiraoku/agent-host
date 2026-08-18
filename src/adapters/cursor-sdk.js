@@ -3,11 +3,14 @@ import { lstatSync, realpathSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { noCapabilities } from "../core/types.js";
+import { createRedactor } from "../operations/redact.js";
 
 const STATE_SCHEMA_VERSION = 1;
 const MAX_STATE_BYTES = 1_000_000;
 const MAX_RECORDS = 1_000;
 const DISCOVERY_CONCURRENCY = 8;
+const MIN_CREDENTIAL_BYTES = 8;
+const MAX_CREDENTIAL_BYTES = 16_384;
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const ATTEMPT_ID = /^attempt:[0-9a-f-]{36}$/;
 const LAUNCH_ID = /^launch:[0-9a-f-]{36}$/;
@@ -16,11 +19,57 @@ const RECORD_KEYS = new Set([
   "bridgeNamespace", "storeScope", "targetDigest", "state", "createdAt", "updatedAt",
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
+const CREDENTIAL_SOURCE = Symbol("CursorSdkCredentialSource");
+
+export function createCursorSdkCredentialSource(secretOrCallback) {
+  if (typeof secretOrCallback !== "string" && typeof secretOrCallback !== "function") {
+    throw new TypeError("Cursor SDK credential source requires an explicit secret or secret callback");
+  }
+  const retained = typeof secretOrCallback === "string"
+    ? credentialBytes(secretOrCallback)
+    : undefined;
+  const callback = typeof secretOrCallback === "function" ? secretOrCallback : undefined;
+  let closed = false;
+  let claimed = false;
+  const source = {
+    claim() {
+      if (claimed) throw new TypeError("Cursor SDK credential source is already assigned to an adapter");
+      claimed = true;
+      return source;
+    },
+    async use(operation, signal) {
+      if (closed) throw new Error("Cursor SDK credential source is closed");
+      if (signal?.aborted) throw credentialCancellation();
+      let bytes;
+      try {
+        bytes = callback
+          ? credentialBytes(await callback({ signal }))
+          : Buffer.from(retained);
+      } catch (error) {
+        if (signal?.aborted) throw credentialCancellation();
+        if (error?.code === "cursor_credential_invalid") throw error;
+        throw credentialFailure();
+      }
+      try {
+        if (signal?.aborted) throw credentialCancellation();
+        return await operation(bytes);
+      } finally {
+        bytes.fill(0);
+      }
+    },
+    close() {
+      closed = true;
+      retained?.fill(0);
+    },
+  };
+  return Object.freeze(Object.defineProperty({}, CREDENTIAL_SOURCE, { value: source }));
+}
 
 export class CursorSdkAdapter {
   id = "cursor-sdk";
   discoveryHealth = "internal";
   #bridge;
+  #credentialSource;
   #targets;
   #state;
   #storeDirectory;
@@ -55,6 +104,7 @@ export class CursorSdkAdapter {
     }
     this.#state = new CursorSdkProvenanceStore(provenanceFile, options.fs, this.#now);
     this.#scope = createHash("sha256").update(this.#storeDirectory).digest("base64url").slice(0, 16);
+    this.#credentialSource = validateCredentialSource(options.credentialSource);
   }
 
   launchCapabilities() {
@@ -102,14 +152,13 @@ export class CursorSdkAdapter {
       });
       if (!reserved.created) throw new Error("Cursor SDK launch attempt already has durable provenance");
       await this.#assertBridgeDirectories(target);
-      const result = await this.#bridge.createLocal({
+      const result = await this.#callBridge("createLocal", {
         agentId: providerAgentId,
         attemptId,
         cwd: target.cwd,
         storeDirectory: this.#storeDirectory,
         profile: request.profile,
-        signal,
-      });
+      }, signal);
       assertProviderAgent(result, providerAgentId);
       await this.#state.markOwned(attemptId);
       return { status: "owned", providerAgentId, agentId };
@@ -125,12 +174,11 @@ export class CursorSdkAdapter {
       const target = this.#targets.get(provenance.target);
       if (!target) return { status: "uncertain", code: "cursor_target_unavailable" };
       await this.#assertBridgeDirectories(target);
-      const result = await this.#bridge.getLocal({
+      const result = await this.#callBridge("getLocal", {
         agentId: provenance.providerAgentId,
         cwd: target.cwd,
         storeDirectory: this.#storeDirectory,
-        signal,
-      });
+      }, signal);
       if (!result) return { status: "uncertain", code: "cursor_agent_unconfirmed" };
       assertProviderAgent(result, provenance.providerAgentId);
       if (provenance.state !== "owned") await this.#state.markOwned(record.attemptId);
@@ -163,12 +211,11 @@ export class CursorSdkAdapter {
         }
         let result;
         try {
-          result = await this.#bridge.getLocal({
+          result = await this.#callBridge("getLocal", {
             agentId: provenance.providerAgentId,
             cwd: target.cwd,
             storeDirectory: this.#storeDirectory,
-            signal,
-          });
+          }, signal);
           throwIfAborted(signal);
         }
         catch (error) {
@@ -192,7 +239,8 @@ export class CursorSdkAdapter {
     this.#ready = false;
     const closing = (async () => {
       await Promise.allSettled([...this.#activeOperations]);
-      await this.#state.close();
+      try { await this.#state.close(); }
+      finally { this.#credentialSource.close(); }
     })();
     this.#closing = closing;
     try { await closing; }
@@ -235,6 +283,25 @@ export class CursorSdkAdapter {
     await this.#state.assertCurrent();
     await assertDirectoryIdentity(target.cwd, target.identity, "target");
     await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
+  }
+
+  async #callBridge(operation, input, signal) {
+    try {
+      return await this.#credentialSource.use(
+        async (credential) => {
+          const redact = createRedactor({ secrets: [credential.toString("utf8")] });
+          return redact(await this.#bridge[operation]({ ...input, credential, signal }));
+        },
+        signal,
+      );
+    } catch (error) {
+      if (error?.code === "cursor_credential_invalid"
+        || error?.code === "cursor_credential_unavailable"
+        || error?.code === "cursor_operation_cancelled") throw error;
+      const failure = new Error(`Cursor SDK bridge ${operation} failed`);
+      failure.code = "cursor_bridge_failed";
+      throw failure;
+    }
   }
 
   #matchesConfiguration(provenance, record) {
@@ -495,6 +562,41 @@ function validateBridge(bridge) {
     throw new TypeError("Cursor SDK adapter requires an explicitly injected bridge");
   }
   return bridge;
+}
+
+function validateCredentialSource(source) {
+  if (!source || typeof source[CREDENTIAL_SOURCE]?.claim !== "function") {
+    throw new TypeError("Cursor SDK adapter requires an explicitly injected credential source");
+  }
+  return source[CREDENTIAL_SOURCE].claim();
+}
+
+function credentialBytes(value) {
+  if (typeof value !== "string") throw invalidCredential();
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length < MIN_CREDENTIAL_BYTES || bytes.length > MAX_CREDENTIAL_BYTES) {
+    bytes.fill(0);
+    throw invalidCredential();
+  }
+  return bytes;
+}
+
+function invalidCredential() {
+  const error = new Error("Cursor SDK credential source returned an invalid credential");
+  error.code = "cursor_credential_invalid";
+  return error;
+}
+
+function credentialFailure() {
+  const error = new Error("Cursor SDK credential source is unavailable");
+  error.code = "cursor_credential_unavailable";
+  return error;
+}
+
+function credentialCancellation() {
+  const error = new Error("Cursor SDK operation was cancelled");
+  error.code = "cursor_operation_cancelled";
+  return error;
 }
 
 function normalizeTargets(targets) {

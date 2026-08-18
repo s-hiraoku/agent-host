@@ -11,6 +11,28 @@ exact ID in a dedicated store. The integration owner is
 responsible for supplying a separately reviewed bridge and credentials; the adapter does
 not perform interactive login or read Cursor's default credentials or stores.
 
+## Credential source contract
+
+Construct an opaque source with `createCursorSdkCredentialSource(secretOrCallback)` and
+pass it as `credentialSource`. The argument must be either an explicit UTF-8 secret or a
+callback that returns one. Credentials shorter than 8 bytes, larger than 16 KiB, empty,
+missing, or represented by any other value are rejected. A callback receives only the
+operation's abort signal and is invoked once per bridge call; there is no environment,
+Cursor state, interactive-login, or default-profile fallback. Each source is single-owner
+and can be assigned to only one adapter so one adapter cannot erase another's credential.
+
+The adapter supplies the bridge a transient `Buffer` in `input.credential`. A bridge may
+materialize the SDK's required string only inside that call and must not retain or log it.
+The per-call buffer is zero-filled in a `finally` block, and a fixed source's retained
+buffer is zero-filled when the adapter closes. JavaScript strings cannot be reliably
+zeroed, so callers should prefer a callback backed by a secret provider when practical.
+
+Credential sources have no enumerable properties and serialize as `{}`. The adapter
+uses the shared redactor on bridge results, replaces bridge and callback exceptions with
+bounded credential-free errors, and never writes credentials to launch provenance or
+agent metadata. Trusted composition must still keep the source and bridge out of generic
+configuration, diagnostic, and structured logging.
+
 Trusted composition must pre-create the dedicated store and provenance parent as
 owner-only canonical directories, inject bounded private-state read, atomic write, and
 writer-lock capabilities, and call `open()` successfully before registering the adapter.
@@ -32,6 +54,8 @@ When directly composed with `AgentRegistry`, the adapter:
 - reconciles observationally and never recreates an unconfirmed attempt;
 - requires exact agreement among the launch ledger, private provenance, and injected
   dedicated-store bridge;
+- requires an opaque, explicit credential source for every create or reconciliation
+  bridge call and never exposes that source through launch capabilities;
 - discovers no ordinary or pre-existing Cursor agents;
 - leaves read, prompt, interrupt, approval, focus, archive, delete, and cloud operations
   absent. Read remains gated on durable exact-run provenance rather than agent ID alone.
