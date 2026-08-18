@@ -33,7 +33,7 @@ test("Cursor SDK launch persists intent before invocation and proves owned disco
       return fixture.agents.get(input.agentId);
     },
   });
-  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   assert.equal(stateObserved.records[0].state, "intent");
   assert.equal(stateObserved.records[0].target, "workspace-a");
   assert.equal(JSON.stringify(stateObserved).includes(fixture.cwd), false);
@@ -57,7 +57,7 @@ test("Cursor SDK reconciliation never recreates an unconfirmed intent", async (t
     },
   });
   await assert.rejects(
-    fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
     /transport lost/,
   );
   const result = await fixture.adapter.reconcileLaunch({
@@ -78,17 +78,41 @@ test("Cursor SDK launch refuses to invoke a bridge twice for one durable attempt
       return fixture.agents.get(input.agentId);
     },
   });
-  await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   await assert.rejects(
-    fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
     /already has durable provenance/,
   );
   assert.equal(creates, 1);
 });
 
+test("Cursor SDK rejects stale launch contracts before reserving provenance", async (t) => {
+  let creates = 0;
+  const fixture = await makeFixture(t, {
+    async createLocal(input) {
+      creates += 1;
+      return { agentId: input.agentId };
+    },
+  });
+  const requests = [
+    { ...resolvedRequest(), provider: "other" },
+    { ...resolvedRequest(), capabilityVersion: "cursor-sdk-local-old" },
+    { ...resolvedRequest(), risk: { localMutation: false, externalBillable: true } },
+    { ...resolvedRequest(), risk: { localMutation: true, externalBillable: false } },
+  ];
+  for (const stale of requests) {
+    await assert.rejects(
+      fixture.adapter.launch(stale, { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+      /does not match the injected adapter configuration/,
+    );
+  }
+  assert.equal(creates, 0);
+  await assert.rejects(readFile(fixture.provenanceFile, "utf8"), { code: "ENOENT" });
+});
+
 test("Cursor SDK discovery rejects a launch-ledger/provenance mismatch", async (t) => {
   const fixture = await makeFixture(t);
-  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   await assert.rejects(
     fixture.adapter.discoverOwned([{ ...ledgerRecord(owned), providerAgentId: "agent_tampered" }]),
     /ownership provenance does not match/,
@@ -97,7 +121,7 @@ test("Cursor SDK discovery rejects a launch-ledger/provenance mismatch", async (
 
 test("Cursor SDK discovery rejects a bridge identity mismatch", async (t) => {
   const fixture = await makeFixture(t);
-  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   fixture.agents.set(owned.providerAgentId, { agentId: "agent_wrong", status: "idle" });
   await assert.rejects(
     fixture.adapter.discoverOwned([ledgerRecord(owned)]),
@@ -107,7 +131,7 @@ test("Cursor SDK discovery rejects a bridge identity mismatch", async (t) => {
 
 test("Cursor SDK discovery rejects owned ledger request drift", async (t) => {
   const fixture = await makeFixture(t);
-  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   const record = ledgerRecord(owned);
   record.request.profile = "other";
   await assert.rejects(fixture.adapter.discoverOwned([record]), /ownership provenance does not match/);
@@ -115,7 +139,7 @@ test("Cursor SDK discovery rejects owned ledger request drift", async (t) => {
 
 test("Cursor SDK ownership checks reject risk, capability, and agent identity drift", async (t) => {
   const fixture = await makeFixture(t);
-  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
 
   const riskDrift = ledgerRecord(owned);
   riskDrift.request.risk.localMutation = false;
@@ -135,7 +159,7 @@ test("Cursor SDK ownership checks reject risk, capability, and agent identity dr
 
 test("Cursor SDK discovery recomputes identities instead of trusting matching files", async (t) => {
   const fixture = await makeFixture(t);
-  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   const providerAgentId = `agent_${"f".repeat(32)}`;
   state.records[0].providerAgentId = providerAgentId;
@@ -147,7 +171,7 @@ test("Cursor SDK discovery recomputes identities instead of trusting matching fi
 
 test("Cursor SDK owned discovery fails closed when the dedicated store is missing the agent", async (t) => {
   const fixture = await makeFixture(t);
-  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   fixture.agents.clear();
   await assert.rejects(
     fixture.adapter.discoverOwned([ledgerRecord(owned)]),
@@ -162,7 +186,7 @@ test("Cursor SDK owned discovery bounds bridge concurrency", async (t) => {
     const uuid = uuidFor(index);
     const attemptId = `attempt:${uuid}`;
     const launchId = `launch:${uuid}`;
-    const owned = await fixture.adapter.launch(request(), { attemptId, launchId });
+    const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId, launchId });
     records.push({
       id: launchId,
       attemptId,
@@ -247,6 +271,13 @@ test("Cursor SDK target configuration rejects invalid profile values", async (t)
     provenanceFile: join(directory, "private", "provenance.json"),
     targets: [{ id: "workspace-a", cwd, profiles: [123] }],
   }), /profiles must be safe identifiers/);
+  assert.throws(() => new CursorSdkAdapter({
+    bridge,
+    sdkVersion: "1.0.28",
+    storeDirectory: join(directory, "sdk-store"),
+    provenanceFile: join(directory, "private", "provenance.json"),
+    targets: [{ id: 123, cwd, profiles: ["safe"] }],
+  }), /target IDs must be unique safe identifiers/);
 });
 
 test("Cursor SDK provenance cannot overlap the bridge-managed store", async (t) => {
@@ -342,7 +373,7 @@ test("Cursor SDK launch rejects workspace replacement before bridge invocation",
   await rename(fixture.cwd, moved);
   await symlink(moved, fixture.cwd);
   await assert.rejects(
-    fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
     /target changed after configuration/,
   );
   assert.equal(creates, 0);
@@ -363,7 +394,7 @@ test("Cursor SDK launch rechecks workspace after persisting intent", async (t) =
     },
   });
   await assert.rejects(
-    fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
     /target changed after configuration/,
   );
   assert.equal(creates, 0);
@@ -383,7 +414,7 @@ test("Cursor SDK launch rejects a plain-directory workspace replacement", async 
     },
   });
   await assert.rejects(
-    fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
     /target changed after configuration/,
   );
   assert.equal(creates, 0);
@@ -398,7 +429,7 @@ test("Cursor SDK validates its pre-created private store and rejects replacement
     },
   });
   assert.equal((await lstat(fixture.storeDirectory)).mode & 0o077, 0);
-  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   await rename(fixture.storeDirectory, `${fixture.storeDirectory}-moved`);
   await symlink(fixture.cwd, fixture.storeDirectory);
   await assert.rejects(
@@ -416,7 +447,7 @@ test("Cursor SDK rejects a store that becomes accessible to other users", async 
       return fixture.agents.get(agentId) ?? null;
     },
   });
-  const owned = await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   await chmod(fixture.storeDirectory, 0o755);
   await assert.rejects(
     fixture.adapter.discoverOwned([ledgerRecord(owned)]),
@@ -436,7 +467,7 @@ test("Cursor SDK provenance admits only one injected writer", async (t) => {
     fs: fixtureFileSystem(),
   });
   t.after(() => second.close());
-  await first.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await first.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   await assert.rejects(
     second.open(),
     (error) => error.code === "instance_already_running",
@@ -451,7 +482,7 @@ test("Cursor SDK rejects provenance directory replacement before another bridge 
       return { agentId: input.agentId };
     },
   });
-  await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   const privateDirectory = join(fixture.directory, "private");
   const movedDirectory = `${privateDirectory}-moved`;
   await rename(privateDirectory, movedDirectory);
@@ -461,7 +492,7 @@ test("Cursor SDK rejects provenance directory replacement before another bridge 
     `${fixture.provenanceFile}.writer.lock`,
   );
   await assert.rejects(
-    fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
     /provenance.*changed after configuration/,
   );
   assert.equal(creates, 1);
@@ -489,7 +520,7 @@ test("Cursor SDK close drains in-flight bridge work before releasing its writer 
     targets: [{ id: "workspace-a", cwd: first.cwd, profiles: ["safe"] }],
     fs: fixtureFileSystem(),
   });
-  const launch = first.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const launch = first.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   await started;
   const closing = first.adapter.close();
   await assert.rejects(second.open(), (error) => error.code === "instance_already_running");
@@ -558,7 +589,7 @@ test("Cursor SDK provenance write failure occurs before bridge invocation", asyn
   });
   await adapter.open();
   await assert.rejects(
-    adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
     /synthetic atomic write failure/,
   );
   assert.equal(creates, 0);
@@ -567,7 +598,7 @@ test("Cursor SDK provenance write failure occurs before bridge invocation", asyn
 test("Cursor SDK ownership transition uses the injected clock", async (t) => {
   const now = Date.parse("2035-01-02T03:04:05.000Z");
   const fixture = await makeFixture(t, {}, { now: () => now });
-  await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   const record = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
   assert.equal(record.createdAt, "2035-01-02T03:04:05.000Z");
   assert.equal(record.updatedAt, record.createdAt);
@@ -582,7 +613,7 @@ test("Cursor SDK ownership transition remains monotonic when the clock moves bac
       return { agentId: input.agentId };
     },
   }, { now: () => now });
-  await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   const record = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
   assert.equal(record.updatedAt, record.createdAt);
   assert.equal(record.state, "owned");
@@ -592,7 +623,7 @@ test("Cursor SDK provenance capacity rejects before bridge invocation", async (t
   let adapter;
   t.after(() => adapter?.close());
   const fixture = await makeFixture(t);
-  await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   const template = state.records[0];
   state.records = Array.from({ length: 1_000 }, (_, index) => {
@@ -625,7 +656,7 @@ test("Cursor SDK provenance capacity rejects before bridge invocation", async (t
   });
   await adapter.open();
   await assert.rejects(
-    adapter.launch(request(), {
+    adapter.launch(resolvedRequest(), {
       attemptId: "attempt:00000000-0000-4000-8000-ffffffffffff",
       launchId: "launch:00000000-0000-4000-8000-ffffffffffff",
     }),

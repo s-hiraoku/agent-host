@@ -186,7 +186,10 @@ export class CursorSdkAdapter {
 
   #target(request) {
     const target = this.#targets.get(request?.target);
-    if (!target || request?.mode !== "local" || !target.profiles.includes(request?.profile)) {
+    if (!target || request?.provider !== "cursor" || request?.mode !== "local"
+      || request?.capabilityVersion !== `cursor-sdk-local-${this.#sdkVersion}`
+      || request?.risk?.localMutation !== true || request?.risk?.externalBillable !== true
+      || !target.profiles.includes(request?.profile)) {
       throw new Error("Cursor SDK launch request does not match the injected adapter configuration");
     }
     return target;
@@ -446,7 +449,9 @@ function normalizeTargets(targets) {
   if (!Array.isArray(targets) || targets.length === 0 || targets.length > 20) throw new TypeError("targets must contain 1-20 entries");
   const result = new Map();
   for (const target of targets) {
-    if (!SAFE_ID.test(target?.id ?? "") || result.has(target.id)) throw new TypeError("Cursor SDK target IDs must be unique safe identifiers");
+    if (typeof target?.id !== "string" || !SAFE_ID.test(target.id) || result.has(target.id)) {
+      throw new TypeError("Cursor SDK target IDs must be unique safe identifiers");
+    }
     if (!Array.isArray(target.profiles)) {
       throw new TypeError("Cursor SDK target profiles must be an array of safe identifiers");
     }
