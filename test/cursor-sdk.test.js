@@ -285,6 +285,48 @@ test("Cursor SDK does not create its store through a replaced ancestor", async (
   await assert.rejects(lstat(join(cwd, "nested")), { code: "ENOENT" });
 });
 
+test("Cursor SDK does not follow a symlink inserted below its pinned store ancestor", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-store-component-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  const storeAncestor = join(directory, "private");
+  await mkdir(cwd);
+  await mkdir(storeAncestor, { mode: 0o700 });
+  const adapter = new CursorSdkAdapter({
+    bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
+    sdkVersion: "1.0.28",
+    storeDirectory: join(storeAncestor, "nested", "sdk-store"),
+    provenanceFile: join(directory, "provenance", "cursor-sdk.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+  });
+  t.after(() => adapter.close());
+  await symlink(cwd, join(storeAncestor, "nested"));
+  await assert.rejects(adapter.open(), /store path changed after configuration/);
+  await assert.rejects(lstat(join(cwd, "sdk-store")), { code: "ENOENT" });
+});
+
+test("Cursor SDK does not acquire its provenance lock through an inserted symlink", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-provenance-component-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  const storeDirectory = join(directory, "sdk-store");
+  const provenanceAncestor = join(directory, "private");
+  await mkdir(cwd);
+  await mkdir(storeDirectory, { mode: 0o700 });
+  await mkdir(provenanceAncestor, { mode: 0o700 });
+  const adapter = new CursorSdkAdapter({
+    bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
+    sdkVersion: "1.0.28",
+    storeDirectory,
+    provenanceFile: join(provenanceAncestor, "nested", "cursor-sdk.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+  });
+  t.after(() => adapter.close());
+  await symlink(cwd, join(provenanceAncestor, "nested"));
+  await assert.rejects(adapter.open(), /provenance path changed after configuration/);
+  await assert.rejects(lstat(join(cwd, "cursor-sdk.json.writer.lock")), { code: "ENOENT" });
+});
+
 test("Cursor SDK launch rejects workspace replacement before bridge invocation", async (t) => {
   let creates = 0;
   const fixture = await makeFixture(t, {

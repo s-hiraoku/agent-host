@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
-import { lstat, realpath } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { lstat, mkdir, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { noCapabilities } from "../core/types.js";
-import { ensurePrivateDirectory, readPrivateFileBounded, writePrivateFileAtomic } from "../secure-state.js";
+import { readPrivateFileBounded, writePrivateFileAtomic } from "../secure-state.js";
 import { acquireInstanceLock } from "../instance-lock.js";
 
 const STATE_SCHEMA_VERSION = 1;
@@ -80,10 +80,12 @@ export class CursorSdkAdapter {
   async open() {
     const generation = this.#lifecycleGeneration;
     await this.#closing;
-    await assertDirectoryIdentity(this.#storeAncestor, this.#storeAncestorIdentity, "store ancestor");
-    await ensurePrivateDirectory(this.#storeDirectory);
-    await assertDirectoryIdentity(this.#storeAncestor, this.#storeAncestorIdentity, "store ancestor");
-    this.#storeIdentity = await directoryIdentity(this.#storeDirectory, "store");
+    this.#storeIdentity = await ensurePinnedPrivateDirectory(
+      this.#storeDirectory,
+      this.#storeAncestor,
+      this.#storeAncestorIdentity,
+      "store",
+    );
     for (const target of this.#targets.values()) {
       if (pathsOverlap(target.cwd, this.#storeDirectory)) {
         throw new Error("Cursor SDK private state must be outside configured workspaces");
@@ -257,6 +259,8 @@ export class CursorSdkAdapter {
 export class CursorSdkProvenanceStore {
   #file;
   #directory;
+  #directoryAncestor;
+  #directoryAncestorIdentity;
   #lockFile;
   #read;
   #write;
@@ -268,9 +272,12 @@ export class CursorSdkProvenanceStore {
   #tail = Promise.resolve();
 
   constructor(file, fs = {}, now = Date.now) {
-    this.#file = file;
-    this.#directory = dirname(file);
-    this.#lockFile = `${file}.writer.lock`;
+    const directory = canonicalPotentialDirectory(dirname(file), "provenance directory");
+    this.#directory = directory.path;
+    this.#directoryAncestor = directory.ancestor;
+    this.#directoryAncestorIdentity = directory.identity;
+    this.#file = join(this.#directory, basename(file));
+    this.#lockFile = `${this.#file}.writer.lock`;
     this.#read = fs.readPrivateFileBounded ?? readPrivateFileBounded;
     this.#write = fs.writePrivateFileAtomic ?? writePrivateFileAtomic;
     this.#acquireLock = fs.acquireInstanceLock ?? acquireInstanceLock;
@@ -390,6 +397,12 @@ export class CursorSdkProvenanceStore {
       await this.#assertOpenIdentity();
       return;
     }
+    await ensurePinnedPrivateDirectory(
+      this.#directory,
+      this.#directoryAncestor,
+      this.#directoryAncestorIdentity,
+      "provenance",
+    );
     this.#lease = await this.#acquireLock(this.#lockFile);
     try {
       const before = await directoryIdentity(this.#directory, "provenance");
@@ -535,7 +548,7 @@ async function directoryIdentity(path, kind) {
   }
   const after = await lstat(path);
   if (!after.isDirectory() || after.isSymbolicLink() || !sameStatIdentity(before, after)
-    || (["store", "provenance"].includes(kind)
+    || ((kind === "store" || kind === "provenance" || kind.endsWith(" path"))
       && ((process.getuid && after.uid !== process.getuid()) || (after.mode & 0o077) !== 0))) {
     throw new Error(`Cursor SDK ${kind} changed after configuration`);
   }
@@ -546,6 +559,29 @@ async function assertDirectoryIdentity(path, expected, kind) {
   if (!expected || !sameIdentity(actual, expected)) {
     throw new Error(`Cursor SDK ${kind} changed after configuration`);
   }
+}
+async function ensurePinnedPrivateDirectory(path, ancestor, expectedAncestor, kind) {
+  await assertDirectoryIdentity(ancestor, expectedAncestor, `${kind} ancestor`);
+  const suffix = relative(ancestor, path);
+  if (suffix.startsWith("..") || isAbsolute(suffix)) {
+    throw new Error(`Cursor SDK ${kind} path escaped its pinned ancestor`);
+  }
+  let current = ancestor;
+  let expected = expectedAncestor;
+  for (const component of suffix.split(/[/\\]/).filter(Boolean)) {
+    await assertDirectoryIdentity(current, expected, `${kind} path`);
+    const next = join(current, component);
+    try { await mkdir(next, { mode: 0o700 }); }
+    catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    const nextIdentity = await directoryIdentity(next, `${kind} path`);
+    await assertDirectoryIdentity(current, expected, `${kind} path`);
+    current = next;
+    expected = nextIdentity;
+  }
+  await assertDirectoryIdentity(ancestor, expectedAncestor, `${kind} ancestor`);
+  return directoryIdentity(path, kind);
 }
 async function fileIdentity(path, kind) {
   let stat;
