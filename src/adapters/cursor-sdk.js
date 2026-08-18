@@ -206,6 +206,7 @@ export class CursorSdkAdapter {
   }
 
   async #assertBridgeDirectories(target) {
+    await this.#state.assertCurrent();
     await assertDirectoryIdentity(target.cwd, target.identity, "target");
     await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
   }
@@ -248,15 +249,21 @@ export class CursorSdkAdapter {
 
 export class CursorSdkProvenanceStore {
   #file;
+  #directory;
+  #lockFile;
   #read;
   #write;
   #acquireLock;
   #now;
   #lease;
+  #directoryIdentity;
+  #lockIdentity;
   #tail = Promise.resolve();
 
   constructor(file, fs = {}, now = Date.now) {
     this.#file = file;
+    this.#directory = dirname(file);
+    this.#lockFile = `${file}.writer.lock`;
     this.#read = fs.readPrivateFileBounded ?? readPrivateFileBounded;
     this.#write = fs.writePrivateFileAtomic ?? writePrivateFileAtomic;
     this.#acquireLock = fs.acquireInstanceLock ?? acquireInstanceLock;
@@ -327,16 +334,26 @@ export class CursorSdkProvenanceStore {
     });
   }
 
+  async assertCurrent() {
+    return this.#exclusive(async () => {
+      await this.#assertOpenIdentity();
+    });
+  }
+
   async close() {
     return this.#exclusive(async () => {
       await this.#lease?.release();
       this.#lease = undefined;
+      this.#directoryIdentity = undefined;
+      this.#lockIdentity = undefined;
     });
   }
 
   async #load() {
+    await this.#assertOpenIdentity();
     try {
       const parsed = JSON.parse(await this.#read(this.#file, MAX_STATE_BYTES));
+      await this.#assertOpenIdentity();
       if (parsed?.schemaVersion !== STATE_SCHEMA_VERSION || Object.keys(parsed).some((key) => !STATE_KEYS.has(key))
         || !Array.isArray(parsed.records)
         || parsed.records.length > MAX_RECORDS) throw new Error("invalid Cursor SDK provenance state");
@@ -348,13 +365,50 @@ export class CursorSdkProvenanceStore {
       }
       return { schemaVersion: STATE_SCHEMA_VERSION, records };
     } catch (error) {
-      if (error?.code === "ENOENT") return { schemaVersion: STATE_SCHEMA_VERSION, records: [] };
+      if (error?.code === "ENOENT") {
+        await this.#assertOpenIdentity();
+        return { schemaVersion: STATE_SCHEMA_VERSION, records: [] };
+      }
       throw error;
     }
   }
 
-  async #save(state) { await this.#write(this.#file, `${JSON.stringify(state)}\n`); }
-  async #open() { this.#lease ??= await this.#acquireLock(`${this.#file}.writer.lock`); }
+  async #save(state) {
+    await this.#assertOpenIdentity();
+    await this.#write(this.#file, `${JSON.stringify(state)}\n`);
+    await this.#assertOpenIdentity();
+  }
+  async #open() {
+    if (this.#lease) {
+      await this.#assertOpenIdentity();
+      return;
+    }
+    this.#lease = await this.#acquireLock(this.#lockFile);
+    try {
+      const before = await directoryIdentity(this.#directory, "provenance");
+      const lock = await fileIdentity(this.#lockFile, "provenance writer lock");
+      const after = await directoryIdentity(this.#directory, "provenance");
+      if (!sameIdentity(before, after)) throw new Error("Cursor SDK provenance changed after configuration");
+      this.#directoryIdentity = after;
+      this.#lockIdentity = lock;
+    } catch (error) {
+      await this.#lease.release().catch(() => {});
+      this.#lease = undefined;
+      throw error;
+    }
+  }
+  async #assertOpenIdentity() {
+    if (!this.#lease || !this.#directoryIdentity || !this.#lockIdentity) {
+      throw new Error("Cursor SDK provenance store is not open");
+    }
+    const before = await directoryIdentity(this.#directory, "provenance");
+    const lock = await fileIdentity(this.#lockFile, "provenance writer lock");
+    const after = await directoryIdentity(this.#directory, "provenance");
+    if (!sameIdentity(before, this.#directoryIdentity) || !sameIdentity(after, this.#directoryIdentity)
+      || !sameIdentity(lock, this.#lockIdentity)) {
+      throw new Error("Cursor SDK provenance changed after configuration");
+    }
+  }
   #exclusive(operation) {
     const next = this.#tail.then(operation, operation);
     this.#tail = next.catch(() => {});
@@ -379,7 +433,8 @@ function normalizeTargets(targets) {
       throw new TypeError("Cursor SDK target profiles must be an array of safe identifiers");
     }
     const profiles = [...new Set(target.profiles)];
-    if (!profiles.length || profiles.length > 20 || profiles.some((profile) => !SAFE_ID.test(profile))) {
+    if (!profiles.length || profiles.length > 20
+      || profiles.some((profile) => typeof profile !== "string" || !SAFE_ID.test(profile))) {
       throw new TypeError("Cursor SDK target profiles must be safe identifiers");
     }
     const directory = canonicalDirectory(target.cwd);
@@ -446,18 +501,33 @@ async function directoryIdentity(path, kind) {
   }
   const after = await lstat(path);
   if (!after.isDirectory() || after.isSymbolicLink() || !sameStatIdentity(before, after)
-    || (kind === "store" && ((process.getuid && after.uid !== process.getuid()) || (after.mode & 0o077) !== 0))) {
+    || (["store", "provenance"].includes(kind)
+      && ((process.getuid && after.uid !== process.getuid()) || (after.mode & 0o077) !== 0))) {
     throw new Error(`Cursor SDK ${kind} changed after configuration`);
   }
   return statIdentity(after);
 }
 async function assertDirectoryIdentity(path, expected, kind) {
   const actual = await directoryIdentity(path, kind);
-  if (!expected || actual.dev !== expected.dev || actual.ino !== expected.ino) {
+  if (!expected || !sameIdentity(actual, expected)) {
     throw new Error(`Cursor SDK ${kind} changed after configuration`);
   }
 }
+async function fileIdentity(path, kind) {
+  let stat;
+  try { stat = await lstat(path); }
+  catch (error) {
+    if (error?.code === "ENOENT") throw new Error(`Cursor SDK ${kind} changed after configuration`);
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())
+    || (stat.mode & 0o077) !== 0) {
+    throw new Error(`Cursor SDK ${kind} changed after configuration`);
+  }
+  return statIdentity(stat);
+}
 function statIdentity(stat) { return { dev: stat.dev, ino: stat.ino }; }
+function sameIdentity(left, right) { return left.dev === right.dev && left.ino === right.ino; }
 function sameStatIdentity(left, right) { return left.dev === right.dev && left.ino === right.ino; }
 function canonicalPotentialPath(value) {
   let current = resolve(value);

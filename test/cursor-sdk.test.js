@@ -218,7 +218,7 @@ test("Cursor SDK private state cannot overlap a configured workspace", async (t)
   }), /private state must be outside/);
 });
 
-test("Cursor SDK target configuration rejects scalar profile values", async (t) => {
+test("Cursor SDK target configuration rejects invalid profile values", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-profiles-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const cwd = join(directory, "workspace");
@@ -236,6 +236,13 @@ test("Cursor SDK target configuration rejects scalar profile values", async (t) 
     provenanceFile: join(directory, "private", "provenance.json"),
     targets: [{ id: "workspace-a", cwd, profiles: "safe" }],
   }), /profiles must be an array/);
+  assert.throws(() => new CursorSdkAdapter({
+    bridge,
+    sdkVersion: "1.0.28",
+    storeDirectory: join(directory, "sdk-store"),
+    provenanceFile: join(directory, "private", "provenance.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: [123] }],
+  }), /profiles must be safe identifiers/);
 });
 
 test("Cursor SDK provenance cannot overlap the bridge-managed store", async (t) => {
@@ -367,6 +374,30 @@ test("Cursor SDK provenance admits only one injected writer", async (t) => {
   );
 });
 
+test("Cursor SDK rejects provenance directory replacement before another bridge invocation", async (t) => {
+  let creates = 0;
+  const fixture = await makeFixture(t, {
+    async createLocal(input) {
+      creates += 1;
+      return { agentId: input.agentId };
+    },
+  });
+  await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const privateDirectory = join(fixture.directory, "private");
+  const movedDirectory = `${privateDirectory}-moved`;
+  await rename(privateDirectory, movedDirectory);
+  await mkdir(privateDirectory, { mode: 0o700 });
+  await rename(
+    join(movedDirectory, "cursor-sdk-provenance.json.writer.lock"),
+    `${fixture.provenanceFile}.writer.lock`,
+  );
+  await assert.rejects(
+    fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    /provenance.*changed after configuration/,
+  );
+  assert.equal(creates, 1);
+});
+
 test("Cursor SDK close drains in-flight bridge work before releasing its writer lease", async (t) => {
   let bridgeStarted;
   const started = new Promise((resolve) => { bridgeStarted = resolve; });
@@ -440,7 +471,6 @@ test("Cursor SDK provenance write failure occurs before bridge invocation", asyn
     provenanceFile: join(directory, "private", "provenance.json"),
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
     fs: {
-      async acquireInstanceLock() { return { async release() {} }; },
       async readPrivateFileBounded() { throw missing; },
       async writePrivateFileAtomic() { throw new Error("synthetic atomic write failure"); },
     },
