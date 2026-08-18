@@ -375,7 +375,10 @@ function normalizeTargets(targets) {
   const result = new Map();
   for (const target of targets) {
     if (!SAFE_ID.test(target?.id ?? "") || result.has(target.id)) throw new TypeError("Cursor SDK target IDs must be unique safe identifiers");
-    const profiles = [...new Set(target.profiles ?? [])];
+    if (!Array.isArray(target.profiles)) {
+      throw new TypeError("Cursor SDK target profiles must be an array of safe identifiers");
+    }
+    const profiles = [...new Set(target.profiles)];
     if (!profiles.length || profiles.length > 20 || profiles.some((profile) => !SAFE_ID.test(profile))) {
       throw new TypeError("Cursor SDK target profiles must be safe identifiers");
     }

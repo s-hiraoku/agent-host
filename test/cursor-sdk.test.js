@@ -218,6 +218,26 @@ test("Cursor SDK private state cannot overlap a configured workspace", async (t)
   }), /private state must be outside/);
 });
 
+test("Cursor SDK target configuration rejects scalar profile values", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-profiles-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  await mkdir(cwd);
+  const bridge = {
+    namespace: "fixture",
+    sdkVersion: "1.0.28",
+    async createLocal() {},
+    async getLocal() {},
+  };
+  assert.throws(() => new CursorSdkAdapter({
+    bridge,
+    sdkVersion: "1.0.28",
+    storeDirectory: join(directory, "sdk-store"),
+    provenanceFile: join(directory, "private", "provenance.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: "safe" }],
+  }), /profiles must be an array/);
+});
+
 test("Cursor SDK provenance cannot overlap the bridge-managed store", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-store-overlap-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

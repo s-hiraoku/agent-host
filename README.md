@@ -399,7 +399,8 @@ complete stream ends in `turn_ended/success`, `error` only for `turn_ended/error
 otherwise `unknown`; file activity or a running Cursor process never implies `working`.
 
 Cursor SDK-created agents are a separate integration surface and identity namespace from
-these desktop records. The current host does not ship a Cursor SDK adapter; the bounded
+these desktop records. The repository ships a dependency-free injected adapter
+foundation, but the normal runtime does not register or support it. The bounded
 feasibility result and launch/ownership gate are documented in
 [`docs/spikes/cursor-sdk.md`](docs/spikes/cursor-sdk.md).
 
