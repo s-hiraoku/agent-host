@@ -20,6 +20,24 @@ This does not change the desktop decision. `cursor-sdk:*` agents are a separate 
 surface from the observer's `cursor-desktop:*` records and must never be deduplicated or
 presented as control of pre-existing Cursor IDE conversations.
 
+## 2026-08-17 dependency gate
+
+The launch contract now exists, but the latest inspected SDK release remains blocked from
+the supported runtime. `@cursor/sdk@1.0.28` resolves through
+`@connectrpc/connect-node@1.7.0` to `undici@5.29.0`. That transport version is affected by
+the High-severity [GHSA-vxpw-j846-p89q](https://github.com/advisories/GHSA-vxpw-j846-p89q)
+and [GHSA-v9p9-hfj2-hcw8](https://github.com/advisories/GHSA-v9p9-hfj2-hcw8), plus
+[GHSA-2mjp-6q6p-2qxm](https://github.com/advisories/GHSA-2mjp-6q6p-2qxm). npm reports no
+supported fix for the SDK dependency graph. Forcing Undici across its major-version
+boundary is not an accepted compatibility or security remedy.
+
+Consequently agent-host does not declare, dynamically discover, or package the Cursor
+SDK. The dependency-free `CursorSdkAdapter` is only an explicit bridge-injection boundary
+for deterministic contract tests and separately risk-accepted integrations. Normal
+runtime construction never registers it. A supported provider remains blocked until an
+upstream SDK release has an acceptable audited transport graph and its license/TOS and
+release-distribution requirements are approved.
+
 ## Evidence snapshot
 
 Inspected the published npm tarball for `@cursor/sdk@1.0.28` on 2026-08-16 without

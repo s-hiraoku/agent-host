@@ -107,6 +107,12 @@ scheduler lane and the ledger's single-writer lease until the original promise r
 settles; this deliberately blocks replacement work instead of risking overlapping
 execution or lease-transfer races.
 
+The repository also contains a dependency-free, explicitly injected Cursor SDK adapter
+boundary for contract testing. It is not registered by the normal runtime and does not
+make the currently blocked Cursor SDK a supported dependency. See
+[`docs/cursor-sdk-adapter.md`](docs/cursor-sdk-adapter.md) for its safety boundary and
+upstream gates.
+
 `GET /v1/agents` accepts repeatable or comma-separated `provider` and `status`
 filters, plus `view`, `cwd`, free-text `q`, `sort`, `direction`, `limit`, and an opaque
 `cursor`. The allowlisted sorts are `attention`, `activity`, `name`, `provider`, and
@@ -393,7 +399,8 @@ complete stream ends in `turn_ended/success`, `error` only for `turn_ended/error
 otherwise `unknown`; file activity or a running Cursor process never implies `working`.
 
 Cursor SDK-created agents are a separate integration surface and identity namespace from
-these desktop records. The current host does not ship a Cursor SDK adapter; the bounded
+these desktop records. The repository ships a dependency-free injected adapter
+foundation, but the normal runtime does not register or support it. The bounded
 feasibility result and launch/ownership gate are documented in
 [`docs/spikes/cursor-sdk.md`](docs/spikes/cursor-sdk.md).
 

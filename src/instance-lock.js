@@ -13,7 +13,7 @@ export class InstanceAlreadyRunningError extends Error {
 }
 
 export async function acquireInstanceLock(path, options = {}) {
-  await ensurePrivateDirectory(dirname(path));
+  if (options.prepareDirectory !== false) await ensurePrivateDirectory(dirname(path));
   const pid = options.pid ?? process.pid;
   const instanceId = options.instanceId ?? randomUUID();
   const isProcessAlive = options.isProcessAlive ?? processAlive;

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { acquireInstanceLock, inspectInstanceLock } from "../src/instance-lock.js";
@@ -32,4 +32,15 @@ test("lock release never removes a replacement file", async (t) => {
   await writeFile(path, `${JSON.stringify({ schemaVersion: 1, pid: 202, instanceId: "replacement" })}\n`);
   await lock.release();
   assert.equal(JSON.parse(await readFile(path, "utf8")).instanceId, "replacement");
+});
+
+test("instance lock can require an already-prepared directory", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-lock-prepared-"));
+  t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));
+  const directory = join(home, "missing");
+  await assert.rejects(
+    acquireInstanceLock(join(directory, "host.lock"), { prepareDirectory: false }),
+    { code: "ENOENT" },
+  );
+  await assert.rejects(lstat(directory), { code: "ENOENT" });
 });
