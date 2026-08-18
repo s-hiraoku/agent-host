@@ -81,6 +81,13 @@ class AnchoredPrivateState {
     const tracked = trackChild(child);
     const ready = await waitForReady(child, tracked);
     if (!ready) throw new Error("anchored writer lock did not become ready");
+    try {
+      await this.assertCurrent();
+    } catch (error) {
+      if (!child.stdin.destroyed) child.stdin.end();
+      await tracked.result;
+      throw error;
+    }
     let released = false;
     const record = {
       invalid: undefined,

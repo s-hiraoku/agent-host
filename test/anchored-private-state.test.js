@@ -68,6 +68,49 @@ test("directory replacement receives no descriptor-relative write or lock mutati
   await assert.rejects(lstat(join(directory, "writer.lock")), { code: "ENOENT" });
 });
 
+test("writer acquisition rechecks the configured pathname after helper readiness", async (t) => {
+  const gateDirectory = await realpath(await mkdtemp(join(tmpdir(), "agent-host-lock-gate-")));
+  const spawned = join(gateDirectory, "spawned");
+  const proceed = join(gateDirectory, "proceed");
+  const wrapper = join(gateDirectory, "anchored-private-state-wrapper");
+  await writeFile(wrapper, `#!/bin/sh
+if [ "$1" = "lock" ]; then
+  : > ${shellQuote(spawned)}
+  while [ ! -e ${shellQuote(proceed)} ]; do :; done
+fi
+exec ${shellQuote(helperPath)} "$@"
+`, { mode: 0o500 });
+  await chmod(wrapper, 0o500);
+
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "agent-host-anchored-state-")));
+  const captured = `${directory}-captured`;
+  const replacement = `${directory}-replacement`;
+  const state = await openAnchoredPrivateState(directory, { helperPath: wrapper });
+  t.after(async () => {
+    await state.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(captured, { recursive: true, force: true });
+    await rm(replacement, { recursive: true, force: true });
+    await rm(gateDirectory, { recursive: true, force: true });
+  });
+
+  const acquisition = state.acquireWriterLock("writer.lock");
+  await waitFor(() => lstat(spawned).then(() => true, () => false));
+  await rename(directory, captured);
+  await mkdir(directory, { mode: 0o700 });
+  await writeFile(proceed, "go");
+  await assert.rejects(acquisition, /pathname changed/);
+  await assert.rejects(lstat(join(directory, "writer.lock")), { code: "ENOENT" });
+
+  await rename(directory, replacement);
+  await rename(captured, directory);
+  const lease = await Promise.race([
+    state.acquireWriterLock("writer.lock"),
+    delay(1_000).then(() => { throw new Error("reacquisition timed out"); }),
+  ]);
+  await lease.release();
+});
+
 test("writer locks serialize helpers and release never unlinks a replacement", async (t) => {
   const { directory, state } = await fixture(t);
   const second = await openAnchoredPrivateState(directory, { helperPath });
@@ -160,3 +203,5 @@ async function waitFor(predicate, timeoutMs = 2_000) {
   }
   throw new Error("condition was not met before timeout");
 }
+
+function shellQuote(value) { return `'${value.replaceAll("'", `'"'"'`)}'`; }
