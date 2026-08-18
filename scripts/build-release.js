@@ -1,11 +1,16 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  assertDisabledCursorSdkArtifactPaths,
+  assertDisabledCursorSdkSourceManifest,
+  verifyDisabledCursorSdkArchive,
+} from "./release-artifact-policy.js";
 
 const run = promisify(execFile);
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -17,6 +22,7 @@ const dashboardDirectory = resolve(args["--dashboard-dir"]);
 const outputDirectory = resolve(args["--output"] ?? join(repository, "dist"));
 const packageJson = JSON.parse(await readFile(join(repository, "package.json"), "utf8"));
 const compatibility = JSON.parse(await readFile(join(repository, "release-compatibility.json"), "utf8"));
+assertDisabledCursorSdkSourceManifest(packageJson);
 if (packageJson.version !== compatibility.productVersion) throw new Error("package and release compatibility versions differ");
 if (!compatibility.apiVersions.some((version) => compatibility.dashboard.apiVersions.includes(version))) {
   throw new Error("pinned dashboard has no compatible agent-host API version");
@@ -31,10 +37,13 @@ try {
   for (const entry of ["LICENSE", "README.md", "CHANGELOG.md", "package.json", "release-compatibility.json", "src", "docs"]) {
     await cp(join(repository, entry), join(root, entry), { recursive: true });
   }
+  assertDisabledCursorSdkSourceManifest(JSON.parse(await readFile(join(root, "package.json"), "utf8")));
   await mkdir(join(root, "scripts"));
   await cp(join(repository, "scripts", "manage-installation.js"), join(root, "scripts", "manage-installation.js"));
   await cp(dashboardDirectory, join(root, "dashboard"), { recursive: true });
-  const files = await collectFiles(root);
+  const entries = await collectEntries(root);
+  assertDisabledCursorSdkArtifactPaths(entries.map((entry) => entry.path), "staged release tree");
+  const files = entries.filter((entry) => entry.type === "file").map((entry) => entry.path);
   await scanArtifact(root, files);
   const fileManifest = [];
   for (const path of files) {
@@ -45,10 +54,17 @@ try {
   await writeFile(join(root, "sbom.spdx.json"), `${JSON.stringify(spdx(packageJson, compatibility), null, 2)}\n`);
   await mkdir(outputDirectory, { recursive: true });
   const archive = join(outputDirectory, `${name}.tar.gz`);
+  const pendingArchive = join(outputDirectory, `.${name}-${randomUUID()}.tar.gz.tmp`);
   const tarArgs = process.platform === "linux"
-    ? ["--sort=name", "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner", "-czf", archive, "-C", temporary, name]
-    : ["-czf", archive, "-C", temporary, name];
-  await run("tar", tarArgs);
+    ? ["--sort=name", "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner", "-czf", pendingArchive, "-C", temporary, name]
+    : ["-czf", pendingArchive, "-C", temporary, name];
+  try {
+    await run("tar", tarArgs);
+    await verifyDisabledCursorSdkArchive(pendingArchive);
+    await rename(pendingArchive, archive);
+  } finally {
+    await rm(pendingArchive, { force: true });
+  }
   const releaseManifest = join(outputDirectory, `${name}-release-manifest.json`);
   const sbom = join(outputDirectory, `${name}.spdx.json`);
   await cp(join(repository, "release-compatibility.json"), releaseManifest);
@@ -63,16 +79,17 @@ try {
   await rm(temporary, { recursive: true, force: true });
 }
 
-async function collectFiles(root, directory = root) {
+async function collectEntries(root, directory = root) {
   const result = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
     if (entry.isSymbolicLink()) throw new Error(`artifact input contains symlink: ${path}`);
-    if (entry.isDirectory()) result.push(...await collectFiles(root, path));
-    else if (entry.isFile()) result.push(path.slice(root.length + 1));
+    const relativePath = path.slice(root.length + 1);
+    if (entry.isDirectory()) result.push({ path: relativePath, type: "directory" }, ...await collectEntries(root, path));
+    else if (entry.isFile()) result.push({ path: relativePath, type: "file" });
     else throw new Error(`artifact input contains unsupported entry: ${path}`);
   }
-  return result.sort();
+  return result.sort((left, right) => left.path === right.path ? 0 : left.path < right.path ? -1 : 1);
 }
 
 async function scanArtifact(root, files) {

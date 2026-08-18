@@ -50,3 +50,11 @@ SDK's transport dependency currently has unremediated High-severity advisories, 
 artifacts do not package dependencies, and SDK redistribution still requires explicit
 license/TOS review. A production integration must also supply and validate the anchored
 private-state capability; this repository intentionally provides only fixture plumbing.
+
+Release builds enforce disabled-policy schema v1 at three independent boundaries: the
+source `package.json`, the complete staged tree, and the contents of the final tar archive
+after extraction. The policy rejects `@cursor/sdk`, `@cursor/sdk-*`, Cursor SDK bridge
+bundles, and every `node_modules` entry. Enabling a provider therefore requires an
+explicit reviewed policy-version change. This negative artifact proof only establishes
+absence from a disabled release; it does not approve the SDK's license/TOS, dependency
+risk, credentials, transport, or redistribution.
