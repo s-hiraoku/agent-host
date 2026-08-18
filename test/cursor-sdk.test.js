@@ -95,6 +95,28 @@ test("Cursor SDK supplies credentials transiently and redacts bridge results", a
   assert.equal(JSON.stringify(owned).includes(secret), false);
 });
 
+test("Cursor SDK redacts accepted multibyte credentials shorter than eight characters", async (t) => {
+  const secret = "\u79d8\u5bc6\u9375";
+  assert.ok(Buffer.byteLength(secret, "utf8") >= 8);
+  assert.ok(secret.length < 8);
+  const fixture = await makeFixture(t, {
+    async createLocal(input) {
+      return { agentId: input.agentId, name: `created with ${secret}` };
+    },
+    async getLocal({ agentId }) {
+      return { agentId, status: "idle", name: `owned with ${secret}` };
+    },
+  }, { credentialSource: createCursorSdkCredentialSource(secret) });
+
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  const agents = await fixture.adapter.discoverOwned([ledgerRecord(owned)]);
+  assert.equal(agents[0].name, "owned with [REDACTED]");
+  assert.equal(JSON.stringify(agents).includes(secret), false);
+});
+
 test("Cursor SDK redacts creation, reconciliation, discovery, and cancellation failures", async (t) => {
   const secret = "cursor-fixture-secret";
   let observedCredential;
@@ -160,6 +182,45 @@ test("Cursor SDK masks credential callback failures without fallback", async (t)
   assert.equal((await readFile(fixture.provenanceFile, "utf8")).includes(secret), false);
 });
 
+test("Cursor SDK rejects spoofed public credential error codes", async (t) => {
+  const secret = "cursor-fixture-secret";
+  for (const code of [
+    "cursor_credential_invalid",
+    "cursor_credential_unavailable",
+    "cursor_operation_cancelled",
+  ]) {
+    const callbackError = new Error(`callback leaked ${secret}`);
+    callbackError.code = code;
+    const callbackFixture = await makeFixture(t, {}, {
+      credentialSource: createCursorSdkCredentialSource(() => { throw callbackError; }),
+    });
+    await assert.rejects(
+      callbackFixture.adapter.launch(resolvedRequest(), {
+        attemptId: `attempt:${uuidFor(910 + code.length)}`,
+        launchId: `launch:${uuidFor(910 + code.length)}`,
+      }),
+      (error) => error.code === "cursor_credential_unavailable"
+        && error.message === "Cursor SDK credential source is unavailable"
+        && !error.message.includes(secret),
+    );
+
+    const bridgeError = new Error(`bridge leaked ${secret}`);
+    bridgeError.code = code;
+    const bridgeFixture = await makeFixture(t, {
+      async createLocal() { throw bridgeError; },
+    }, { credentialSource: createCursorSdkCredentialSource(secret) });
+    await assert.rejects(
+      bridgeFixture.adapter.launch(resolvedRequest(), {
+        attemptId: `attempt:${uuidFor(920 + code.length)}`,
+        launchId: `launch:${uuidFor(920 + code.length)}`,
+      }),
+      (error) => error.code === "cursor_bridge_failed"
+        && error.message === "Cursor SDK bridge createLocal failed"
+        && !error.message.includes(secret),
+    );
+  }
+});
+
 test("Cursor SDK close is reopenable and destroy is terminal", async (t) => {
   const secret = "cursor-fixture-secret";
   let observedCredential;
@@ -197,6 +258,35 @@ test("Cursor SDK close is reopenable and destroy is terminal", async (t) => {
   await fixture.adapter.destroy();
   await fixture.adapter.destroy();
   assert.equal(fixture.adapter.launchCapabilities(), null);
+  await assert.rejects(fixture.adapter.open(), /adapter is destroyed/);
+});
+
+test("Cursor SDK concurrent destroy callers share the in-flight destruction", async (t) => {
+  let finishCreate;
+  const createBlocked = new Promise((resolve) => { finishCreate = resolve; });
+  const fixture = await makeFixture(t, {
+    async createLocal(input) {
+      await createBlocked;
+      return { agentId: input.agentId, status: "idle" };
+    },
+  });
+  const launch = fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const first = fixture.adapter.destroy();
+  const second = fixture.adapter.destroy();
+  assert.equal(second, first);
+  let secondSettled = false;
+  void second.finally(() => { secondSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondSettled, false);
+
+  finishCreate();
+  await Promise.all([launch, first, second]);
+  assert.equal(secondSettled, true);
   await assert.rejects(fixture.adapter.open(), /adapter is destroyed/);
 });
 

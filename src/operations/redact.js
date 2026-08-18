@@ -4,7 +4,8 @@ const BEARER = /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi;
 
 export function createRedactor(options = {}) {
   const homeDirectory = options.homeDirectory?.replace(/\/+$/, "");
-  const secrets = [...new Set((options.secrets ?? []).filter((value) => typeof value === "string" && value.length >= 8))]
+  const secrets = [...new Set((options.secrets ?? []).filter((value) => typeof value === "string"
+    && Buffer.byteLength(value, "utf8") >= 8))]
     .sort((left, right) => right.length - left.length);
   const paths = [...new Set((options.paths ?? []).filter((value) => typeof value === "string" && value.startsWith("/")))]
     .sort((left, right) => right.length - left.length);

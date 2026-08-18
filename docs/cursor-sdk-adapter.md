@@ -26,15 +26,17 @@ materialize the SDK's required string only inside that call and must not retain 
 The per-call buffer is zero-filled in a `finally` block, and a fixed source's retained
 buffer is zero-filled by terminal `destroy()`. Ordinary `close()` remains reversible and
 retains the source so `open()` can safely restore the adapter; `destroy()` closes active
-work, disposes the source, and permanently rejects another `open()`. JavaScript strings
+work, disposes the source, and permanently rejects another `open()`. Concurrent
+`destroy()` calls share the same in-flight shutdown. JavaScript strings
 cannot be reliably zeroed, so callers should prefer a callback backed by a secret provider
 when practical and must call `destroy()` when the composition is permanently discarded.
 
 Credential sources have no enumerable properties and serialize as `{}`. The adapter
 uses the shared redactor on bridge results, replaces bridge and callback exceptions with
-bounded credential-free errors, and never writes credentials to launch provenance or
-agent metadata. Trusted composition must still keep the source and bridge out of generic
-configuration, diagnostic, and structured logging.
+bounded credential-free errors, and never trusts a public error `code` as proof that an
+exception originated inside the credential boundary. It never writes credentials to launch
+provenance or agent metadata. Trusted composition must still keep the source and bridge out
+of generic configuration, diagnostic, and structured logging.
 
 Result redaction runs before identity validation and preserves the adapter's bounded
 bridge fields (`agentId`, `status`, `name`, and `lastActivityAt`); a credential-bearing

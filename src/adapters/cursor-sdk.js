@@ -20,6 +20,7 @@ const RECORD_KEYS = new Set([
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
 const CREDENTIAL_SOURCE = Symbol("CursorSdkCredentialSource");
+const INTERNAL_CREDENTIAL_ERROR = Symbol("CursorSdkCredentialError");
 
 export function createCursorSdkCredentialSource(secretOrCallback) {
   if (typeof secretOrCallback !== "string" && typeof secretOrCallback !== "function") {
@@ -47,7 +48,7 @@ export function createCursorSdkCredentialSource(secretOrCallback) {
           : Buffer.from(retained);
       } catch (error) {
         if (signal?.aborted) throw credentialCancellation();
-        if (error?.code === "cursor_credential_invalid") throw error;
+        if (isInternalCredentialError(error)) throw error;
         throw credentialFailure();
       }
       try {
@@ -79,6 +80,7 @@ export class CursorSdkAdapter {
   #now;
   #activeOperations = new Set();
   #closing;
+  #destroying;
   #destroyed = false;
   #lifecycleGeneration = 0;
   #ready = false;
@@ -249,11 +251,15 @@ export class CursorSdkAdapter {
     finally { if (this.#closing === closing) this.#closing = undefined; }
   }
 
-  async destroy() {
-    if (this.#destroyed) return;
+  destroy() {
+    if (this.#destroying) return this.#destroying;
+    if (this.#destroyed) return Promise.resolve();
     this.#destroyed = true;
-    try { await this.close(); }
-    finally { this.#credentialSource.destroy(); }
+    this.#destroying = (async () => {
+      try { await this.close(); }
+      finally { this.#credentialSource.destroy(); }
+    })();
+    return this.#destroying;
   }
 
   #verifiedProvenance(provenance, record) {
@@ -304,9 +310,7 @@ export class CursorSdkAdapter {
         signal,
       );
     } catch (error) {
-      if (error?.code === "cursor_credential_invalid"
-        || error?.code === "cursor_credential_unavailable"
-        || error?.code === "cursor_operation_cancelled") throw error;
+      if (isInternalCredentialError(error)) throw error;
       const failure = new Error(`Cursor SDK bridge ${operation} failed`);
       failure.code = "cursor_bridge_failed";
       throw failure;
@@ -591,21 +595,35 @@ function credentialBytes(value) {
 }
 
 function invalidCredential() {
-  const error = new Error("Cursor SDK credential source returned an invalid credential");
-  error.code = "cursor_credential_invalid";
-  return error;
+  return internalCredentialError(
+    "cursor_credential_invalid",
+    "Cursor SDK credential source returned an invalid credential",
+  );
 }
 
 function credentialFailure() {
-  const error = new Error("Cursor SDK credential source is unavailable");
-  error.code = "cursor_credential_unavailable";
-  return error;
+  return internalCredentialError(
+    "cursor_credential_unavailable",
+    "Cursor SDK credential source is unavailable",
+  );
 }
 
 function credentialCancellation() {
-  const error = new Error("Cursor SDK operation was cancelled");
-  error.code = "cursor_operation_cancelled";
+  return internalCredentialError(
+    "cursor_operation_cancelled",
+    "Cursor SDK operation was cancelled",
+  );
+}
+
+function internalCredentialError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  Object.defineProperty(error, INTERNAL_CREDENTIAL_ERROR, { value: true });
   return error;
+}
+
+function isInternalCredentialError(error) {
+  return error?.[INTERNAL_CREDENTIAL_ERROR] === true;
 }
 
 function normalizeTargets(targets) {
