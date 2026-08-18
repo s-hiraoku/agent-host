@@ -24,8 +24,11 @@ and can be assigned to only one adapter so one adapter cannot erase another's cr
 The adapter supplies the bridge a transient `Buffer` in `input.credential`. A bridge may
 materialize the SDK's required string only inside that call and must not retain or log it.
 The per-call buffer is zero-filled in a `finally` block, and a fixed source's retained
-buffer is zero-filled when the adapter closes. JavaScript strings cannot be reliably
-zeroed, so callers should prefer a callback backed by a secret provider when practical.
+buffer is zero-filled by terminal `destroy()`. Ordinary `close()` remains reversible and
+retains the source so `open()` can safely restore the adapter; `destroy()` closes active
+work, disposes the source, and permanently rejects another `open()`. JavaScript strings
+cannot be reliably zeroed, so callers should prefer a callback backed by a secret provider
+when practical and must call `destroy()` when the composition is permanently discarded.
 
 Credential sources have no enumerable properties and serialize as `{}`. The adapter
 uses the shared redactor on bridge results, replaces bridge and callback exceptions with

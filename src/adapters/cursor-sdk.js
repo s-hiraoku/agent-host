@@ -57,7 +57,7 @@ export function createCursorSdkCredentialSource(secretOrCallback) {
         bytes.fill(0);
       }
     },
-    close() {
+    destroy() {
       closed = true;
       retained?.fill(0);
     },
@@ -79,6 +79,7 @@ export class CursorSdkAdapter {
   #now;
   #activeOperations = new Set();
   #closing;
+  #destroyed = false;
   #lifecycleGeneration = 0;
   #ready = false;
 
@@ -123,8 +124,10 @@ export class CursorSdkAdapter {
   async discover() { return []; }
 
   async open() {
+    if (this.#destroyed) throw new Error("Cursor SDK adapter is destroyed");
     const generation = this.#lifecycleGeneration;
     await this.#closing;
+    if (this.#destroyed) throw new Error("Cursor SDK adapter is destroyed");
     await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
     for (const target of this.#targets.values()) {
       if (pathsOverlap(target.cwd, this.#storeDirectory)) {
@@ -239,12 +242,18 @@ export class CursorSdkAdapter {
     this.#ready = false;
     const closing = (async () => {
       await Promise.allSettled([...this.#activeOperations]);
-      try { await this.#state.close(); }
-      finally { this.#credentialSource.close(); }
+      await this.#state.close();
     })();
     this.#closing = closing;
     try { await closing; }
     finally { if (this.#closing === closing) this.#closing = undefined; }
+  }
+
+  async destroy() {
+    if (this.#destroyed) return;
+    this.#destroyed = true;
+    try { await this.close(); }
+    finally { this.#credentialSource.destroy(); }
   }
 
   #verifiedProvenance(provenance, record) {

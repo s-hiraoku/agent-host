@@ -160,6 +160,46 @@ test("Cursor SDK masks credential callback failures without fallback", async (t)
   assert.equal((await readFile(fixture.provenanceFile, "utf8")).includes(secret), false);
 });
 
+test("Cursor SDK close is reopenable and destroy is terminal", async (t) => {
+  const secret = "cursor-fixture-secret";
+  let observedCredential;
+  const fixture = await makeFixture(t, {
+    async createLocal(input) {
+      observedCredential = input.credential;
+      const agent = { agentId: input.agentId, status: "idle" };
+      fixture.agents.set(input.agentId, agent);
+      return agent;
+    },
+    async getLocal({ agentId, credential }) {
+      observedCredential = credential;
+      return fixture.agents.get(agentId) ?? null;
+    },
+  }, { credentialSource: createCursorSdkCredentialSource(secret) });
+
+  await fixture.adapter.close();
+  assert.equal(fixture.adapter.launchCapabilities(), null);
+  await fixture.adapter.open();
+  assert.ok(fixture.adapter.launchCapabilities());
+  const attemptId = `attempt:${uuidFor(901)}`;
+  const launchId = `launch:${uuidFor(901)}`;
+  const launched = await fixture.adapter.launch(resolvedRequest(), { attemptId, launchId });
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+  assert.deepEqual(await fixture.adapter.reconcileLaunch({
+    id: launchId,
+    attemptId,
+    state: "owned",
+    agentId: launched.agentId,
+    providerAgentId: launched.providerAgentId,
+    request: resolvedRequest(),
+  }), launched);
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+
+  await fixture.adapter.destroy();
+  await fixture.adapter.destroy();
+  assert.equal(fixture.adapter.launchCapabilities(), null);
+  await assert.rejects(fixture.adapter.open(), /adapter is destroyed/);
+});
+
 test("Cursor SDK launch persists intent before invocation and proves owned discovery", async (t) => {
   let stateObserved;
   const fixture = await makeFixture(t, {
@@ -1059,7 +1099,7 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
   });
   await adapter.open();
   t.after(async () => {
-    try { await adapter.close(); }
+    try { await adapter.destroy(); }
     finally { await rm(directory, { recursive: true, force: true }); }
   });
   return { adapter, bridge, agents, cwd, directory, storeDirectory, provenanceFile };
