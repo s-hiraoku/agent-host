@@ -8,7 +8,9 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   assertDisabledCursorSdkArtifactPaths,
+  assertDisabledCursorSdkDependencyMetadata,
   assertDisabledCursorSdkSourceManifest,
+  verifyDashboardArtifactAttestation,
   verifyDisabledCursorSdkArchive,
 } from "./release-artifact-policy.js";
 
@@ -19,10 +21,21 @@ if (!args["--dashboard-dir"]) {
   throw new Error("--dashboard-dir is required; run npm run release:build -- --dashboard-dir=/path/to/dashboard/dist");
 }
 const dashboardDirectory = resolve(args["--dashboard-dir"]);
+const dashboardSourceDirectory = resolve(args["--dashboard-source-dir"] ?? dirname(dashboardDirectory));
 const outputDirectory = resolve(args["--output"] ?? join(repository, "dist"));
 const packageJson = JSON.parse(await readFile(join(repository, "package.json"), "utf8"));
-const compatibility = JSON.parse(await readFile(join(repository, "release-compatibility.json"), "utf8"));
+const compatibilityBytes = await readFile(join(repository, "release-compatibility.json"));
+const compatibility = JSON.parse(compatibilityBytes);
 assertDisabledCursorSdkSourceManifest(packageJson);
+const dashboardPackageBytes = await readFile(join(dashboardSourceDirectory, "package.json"));
+const dashboardLockBytes = await readFile(join(dashboardSourceDirectory, "package-lock.json"));
+const dashboardPackage = JSON.parse(dashboardPackageBytes);
+const dashboardLock = JSON.parse(dashboardLockBytes);
+assertDisabledCursorSdkSourceManifest(dashboardPackage);
+assertDisabledCursorSdkDependencyMetadata(dashboardPackage, "dashboard package manifest");
+assertDisabledCursorSdkDependencyMetadata(dashboardLock, "dashboard dependency lockfile");
+verifyDashboardBuildInput("package.json", dashboardPackageBytes, compatibility.dashboard.buildInputs?.packageJsonSha256);
+verifyDashboardBuildInput("package-lock.json", dashboardLockBytes, compatibility.dashboard.buildInputs?.packageLockSha256);
 if (packageJson.version !== compatibility.productVersion) throw new Error("package and release compatibility versions differ");
 if (!compatibility.apiVersions.some((version) => compatibility.dashboard.apiVersions.includes(version))) {
   throw new Error("pinned dashboard has no compatible agent-host API version");
@@ -41,6 +54,7 @@ try {
   await mkdir(join(root, "scripts"));
   await cp(join(repository, "scripts", "manage-installation.js"), join(root, "scripts", "manage-installation.js"));
   await cp(dashboardDirectory, join(root, "dashboard"), { recursive: true });
+  await verifyDashboardArtifactAttestation(join(root, "dashboard"), compatibility);
   const entries = await collectEntries(root);
   assertDisabledCursorSdkArtifactPaths(entries.map((entry) => entry.path), "staged release tree");
   const files = entries.filter((entry) => entry.type === "file").map((entry) => entry.path);
@@ -60,7 +74,7 @@ try {
     : ["-czf", pendingArchive, "-C", temporary, name];
   try {
     await run("tar", tarArgs);
-    await verifyDisabledCursorSdkArchive(pendingArchive);
+    await verifyDisabledCursorSdkArchive(pendingArchive, compatibilityBytes);
     await rename(pendingArchive, archive);
   } finally {
     await rm(pendingArchive, { force: true });
@@ -104,6 +118,12 @@ async function scanArtifact(root, files) {
 }
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
+
+function verifyDashboardBuildInput(name, contents, expectedSha256) {
+  if (!/^[a-f0-9]{64}$/.test(expectedSha256 ?? "") || sha256(contents) !== expectedSha256) {
+    throw new Error(`pinned dashboard ${name} does not match release compatibility`);
+  }
+}
 
 function spdx(packageJson, compatibility) {
   return {

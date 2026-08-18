@@ -54,7 +54,13 @@ private-state capability; this repository intentionally provides only fixture pl
 Release builds enforce disabled-policy schema v1 at three independent boundaries: the
 source `package.json`, the complete staged tree, and the contents of the final tar archive
 after extraction. The policy rejects `@cursor/sdk`, `@cursor/sdk-*`, Cursor SDK bridge
-bundles, and every `node_modules` entry. Enabling a provider therefore requires an
-explicit reviewed policy-version change. This negative artifact proof only establishes
-absence from a disabled release; it does not approve the SDK's license/TOS, dependency
-risk, credentials, transport, or redistribution.
+bundles, dependency aliases that resolve to those packages, and every `node_modules`
+entry. Generic minified dashboard bundles are not identified by filename: the release
+compatibility record pins the dashboard package and lockfile hashes plus the exact sorted
+set of built files, byte lengths, and SHA-256 hashes. Both staging and final archive
+verification enforce that attestation, and final verification compares the embedded
+compatibility record byte-for-byte with the trusted source record before using it.
+Updating dashboard inputs or output therefore requires an explicit reviewed compatibility
+change; enabling a provider also requires a reviewed policy-version change. This negative
+artifact proof only establishes absence from a disabled release; it does not approve the
+SDK's license/TOS, dependency risk, credentials, transport, or redistribution.
