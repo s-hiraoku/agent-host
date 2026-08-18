@@ -141,17 +141,29 @@ export class CursorSdkAdapter {
   async discoverOwned(records, { signal } = {}) {
     return this.#run(async () => {
       const provenanceByAttempt = await this.#state.snapshot();
+      await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
       return mapConcurrent(records, DISCOVERY_CONCURRENCY, async (record) => {
         const provenance = this.#verifiedProvenance(provenanceByAttempt.get(record.attemptId), record);
         const target = this.#targets.get(provenance.target);
-        await this.#assertBridgeDirectories(target);
-        const result = await this.#bridge.getLocal({
-          agentId: provenance.providerAgentId,
-          cwd: target.cwd,
-          storeDirectory: this.#storeDirectory,
-          signal,
-        });
-        if (!result) throw new Error("Cursor SDK owned agent is not present in the dedicated store");
+        try { await assertDirectoryIdentity(target.cwd, target.identity, "target"); }
+        catch (error) {
+          if (signal?.aborted) throw signal.reason ?? error;
+          return this.#agent(record, provenance);
+        }
+        let result;
+        try {
+          result = await this.#bridge.getLocal({
+            agentId: provenance.providerAgentId,
+            cwd: target.cwd,
+            storeDirectory: this.#storeDirectory,
+            signal,
+          });
+        }
+        catch (error) {
+          if (signal?.aborted) throw signal.reason ?? error;
+          return this.#agent(record, provenance);
+        }
+        if (!result) return this.#agent(record, provenance);
         assertProviderAgent(result, provenance.providerAgentId);
         return this.#agent(record, provenance, result);
       });
@@ -351,10 +363,13 @@ export class CursorSdkProvenanceStore {
 
   async close() {
     return this.#exclusive(async () => {
-      await this.#lease?.release();
-      this.#lease = undefined;
-      this.#directoryIdentity = undefined;
-      this.#lockIdentity = undefined;
+      const lease = this.#lease;
+      try { await lease?.release(); }
+      finally {
+        this.#lease = undefined;
+        this.#directoryIdentity = undefined;
+        this.#lockIdentity = undefined;
+      }
     });
   }
 

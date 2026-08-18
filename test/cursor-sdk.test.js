@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { CursorSdkAdapter } from "../src/adapters/cursor-sdk.js";
 import { AgentRegistry } from "../src/core/registry.js";
 import { LaunchCoordinator } from "../src/core/launch-coordinator.js";
+import { noCapabilities } from "../src/core/types.js";
 import { readPrivateFileBounded, writePrivateFileAtomic } from "../src/secure-state.js";
 import { acquireInstanceLock } from "../src/instance-lock.js";
 
@@ -169,13 +170,58 @@ test("Cursor SDK discovery recomputes identities instead of trusting matching fi
   await assert.rejects(fixture.adapter.discoverOwned([record]), /ownership provenance does not match/);
 });
 
-test("Cursor SDK owned discovery fails closed when the dedicated store is missing the agent", async (t) => {
+test("Cursor SDK owned discovery returns a non-actionable stale record when the dedicated store is missing the agent", async (t) => {
   const fixture = await makeFixture(t);
   const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   fixture.agents.clear();
+  const [agent] = await fixture.adapter.discoverOwned([ledgerRecord(owned)]);
+  assert.equal(agent.status, "unknown");
+  assert.deepEqual(agent.capabilities, noCapabilities());
+  assert.equal(agent.discovery.confidence, "low");
+});
+
+test("Cursor SDK owned discovery preserves healthy records when one bridge lookup fails", async (t) => {
+  const fixture = await makeFixture(t);
+  const records = [];
+  for (let index = 1; index <= 2; index += 1) {
+    const uuid = uuidFor(index);
+    const attemptId = `attempt:${uuid}`;
+    const launchId = `launch:${uuid}`;
+    const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId, launchId });
+    records.push({
+      id: launchId,
+      attemptId,
+      state: "owned",
+      agentId: owned.agentId,
+      providerAgentId: owned.providerAgentId,
+      request: resolvedRequest(),
+    });
+  }
+  const failedAgentId = records[0].providerAgentId;
+  fixture.bridge.getLocal = async ({ agentId }) => {
+    if (agentId === failedAgentId) throw new Error("synthetic per-agent lookup failure");
+    return fixture.agents.get(agentId) ?? null;
+  };
+
+  const agents = await fixture.adapter.discoverOwned(records);
+  assert.equal(agents.length, 2);
+  assert.equal(agents[0].status, "unknown");
+  assert.deepEqual(agents[0].capabilities, noCapabilities());
+  assert.equal(agents[0].discovery.confidence, "low");
+  assert.equal(agents[1].status, "idle");
+  assert.equal(agents[1].discovery.confidence, "high");
+});
+
+test("Cursor SDK owned discovery propagates cancellation instead of returning stale", async (t) => {
+  const fixture = await makeFixture(t);
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  fixture.bridge.getLocal = async () => { throw new Error("synthetic bridge cancellation"); };
+  const controller = new AbortController();
+  controller.abort(new Error("synthetic discovery abort"));
+
   await assert.rejects(
-    fixture.adapter.discoverOwned([ledgerRecord(owned)]),
-    /not present in the dedicated store/,
+    fixture.adapter.discoverOwned([ledgerRecord(owned)], { signal: controller.signal }),
+    /synthetic discovery abort/,
   );
 });
 
@@ -303,7 +349,11 @@ test("Cursor SDK provenance cannot overlap the bridge-managed store", async (t) 
 
 test("Cursor SDK accepts pre-created private state below an ordinary ancestor", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-precreated-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  let adapter;
+  t.after(async () => {
+    try { await adapter?.close(); }
+    finally { await rm(directory, { recursive: true, force: true }); }
+  });
   const cwd = join(directory, "workspace");
   const ordinary = join(directory, "ordinary");
   const storeDirectory = join(ordinary, "sdk-store");
@@ -312,7 +362,7 @@ test("Cursor SDK accepts pre-created private state below an ordinary ancestor", 
   await mkdir(ordinary, { mode: 0o755 });
   await mkdir(storeDirectory, { mode: 0o700 });
   await mkdir(provenanceDirectory, { mode: 0o700 });
-  const adapter = new CursorSdkAdapter({
+  adapter = new CursorSdkAdapter({
     bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
     sdkVersion: "1.0.28",
     storeDirectory,
@@ -320,7 +370,6 @@ test("Cursor SDK accepts pre-created private state below an ordinary ancestor", 
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
     fs: fixtureFileSystem(),
   });
-  t.after(() => adapter.close());
   await adapter.open();
   assert.ok(adapter.launchCapabilities());
 });
@@ -498,6 +547,49 @@ test("Cursor SDK rejects provenance directory replacement before another bridge 
   assert.equal(creates, 1);
 });
 
+test("Cursor SDK fixture capabilities never mutate a replaced provenance directory", async (t) => {
+  const fixture = await makeFixture(t);
+  await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  const privateDirectory = join(fixture.directory, "private");
+  await rename(privateDirectory, `${privateDirectory}-moved`);
+  await mkdir(privateDirectory, { mode: 0o700 });
+
+  await assert.rejects(
+    fixture.adapter.launch(resolvedRequest(), {
+      attemptId: "attempt:00000000-0000-4000-8000-000000000003",
+      launchId: "launch:00000000-0000-4000-8000-000000000003",
+    }),
+    /changed|identity/,
+  );
+  await assert.rejects(lstat(fixture.provenanceFile), { code: "ENOENT" });
+  await assert.rejects(lstat(`${fixture.provenanceFile}.writer.lock`), { code: "ENOENT" });
+});
+
+test("Cursor SDK provenance reopen reacquires its lease after release fails", async (t) => {
+  let acquisitions = 0;
+  const fixture = await makeFixture(t, {}, {
+    fs: fixtureFileSystem({
+      async acquireInstanceLock(path, options) {
+        await assertAnchoredPrivateState(options);
+        acquisitions += 1;
+        const lease = await acquireInstanceLock(path, { prepareDirectory: false });
+        if (acquisitions !== 1) return lease;
+        return {
+          ...lease,
+          async release() {
+            await lease.release();
+            throw new Error("synthetic release failure");
+          },
+        };
+      },
+    }),
+  });
+
+  await assert.rejects(fixture.adapter.close(), /synthetic release failure/);
+  await fixture.adapter.open();
+  assert.equal(acquisitions, 2);
+});
+
 test("Cursor SDK close drains in-flight bridge work before releasing its writer lease", async (t) => {
   let second;
   t.after(() => second?.close());
@@ -666,14 +758,20 @@ test("Cursor SDK provenance capacity rejects before bridge invocation", async (t
 });
 
 test("injected Cursor SDK adapter composes with the durable launch coordinator", async (t) => {
-  const fixture = await makeFixture(t);
-  const registry = new AgentRegistry([fixture.adapter]);
-  const coordinator = new LaunchCoordinator(registry, { ledgerFile: join(fixture.directory, "launches.json") });
-  await coordinator.start();
+  let coordinator;
+  let registry;
   t.after(async () => {
-    await coordinator.stop();
-    await registry.close();
+    let failure;
+    try { await coordinator?.stop(); }
+    catch (error) { failure = error; }
+    try { await registry?.close(); }
+    catch (error) { failure ??= error; }
+    if (failure) throw failure;
   });
+  const fixture = await makeFixture(t);
+  registry = new AgentRegistry([fixture.adapter]);
+  coordinator = new LaunchCoordinator(registry, { ledgerFile: join(fixture.directory, "launches.json") });
+  await coordinator.start();
   const accepted = await coordinator.submit({
     ...request(),
     confirmations: { localMutation: true, externalBillable: true },
@@ -708,6 +806,13 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
   const provenanceFile = join(directory, "private", "cursor-sdk-provenance.json");
   await mkdir(storeDirectory, { mode: 0o700 });
   await mkdir(join(directory, "private"), { mode: 0o700 });
+  const fileSystem = adapterOptions.fs ?? fixtureFileSystem(adapterOptions.afterProvenanceWrite ? {
+    async writePrivateFileAtomic(...args) {
+      await assertAnchoredPrivateState(args[2]);
+      await writePrivateFileAtomic(args[0], args[1]);
+      await adapterOptions.afterProvenanceWrite({ cwd });
+    },
+  } : {});
   const adapter = new CursorSdkAdapter({
     bridge,
     sdkVersion: "1.0.28",
@@ -715,17 +820,12 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
     provenanceFile,
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
     now: adapterOptions.now,
-    fs: fixtureFileSystem(adapterOptions.afterProvenanceWrite ? {
-      async writePrivateFileAtomic(...args) {
-        await writePrivateFileAtomic(...args);
-        await adapterOptions.afterProvenanceWrite({ cwd });
-      },
-    } : {}),
+    fs: fileSystem,
   });
   await adapter.open();
   t.after(async () => {
-    await adapter.close();
-    await rm(directory, { recursive: true, force: true });
+    try { await adapter.close(); }
+    finally { await rm(directory, { recursive: true, force: true }); }
   });
   return { adapter, bridge, agents, cwd, directory, storeDirectory, provenanceFile };
 }
@@ -733,15 +833,15 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
 function fixtureFileSystem(overrides = {}) {
   return {
     async readPrivateFileBounded(path, maximumBytes, options) {
-      assertPrivateStateOptions(options);
+      await assertAnchoredPrivateState(options);
       return readPrivateFileBounded(path, maximumBytes);
     },
     async writePrivateFileAtomic(path, contents, options) {
-      assertPrivateStateOptions(options);
+      await assertAnchoredPrivateState(options);
       return writePrivateFileAtomic(path, contents);
     },
     async acquireInstanceLock(path, options) {
-      assertPrivateStateOptions(options);
+      await assertAnchoredPrivateState(options);
       return acquireInstanceLock(path, { prepareDirectory: false });
     },
     ...overrides,
@@ -753,6 +853,14 @@ function assertPrivateStateOptions(options) {
   assert.equal(typeof options?.directory, "string");
   assert.equal(typeof options?.directoryIdentity?.dev, "number");
   assert.equal(typeof options?.directoryIdentity?.ino, "number");
+}
+
+async function assertAnchoredPrivateState(options) {
+  assertPrivateStateOptions(options);
+  const live = await lstat(options.directory);
+  if (live.dev !== options.directoryIdentity.dev || live.ino !== options.directoryIdentity.ino) {
+    throw Object.assign(new Error("private-state directory identity changed"), { code: "EIDENTITY" });
+  }
 }
 
 function request() { return { provider: "cursor", target: "workspace-a", profile: "safe", mode: "local" }; }
