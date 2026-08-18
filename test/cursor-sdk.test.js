@@ -154,10 +154,10 @@ test("Cursor SDK redacts creation, reconciliation, discovery, and cancellation f
     observedCredential = credential;
     throw new Error(secret);
   };
-  await assert.rejects(
-    owned.adapter.discoverOwned([ledgerRecord(launched)]),
-    (error) => error.code === "cursor_bridge_failed" && !error.message.includes(secret),
-  );
+  const stale = await owned.adapter.discoverOwned([ledgerRecord(launched)]);
+  assert.equal(stale[0].status, "unknown");
+  assert.equal(stale[0].discovery.confidence, "low");
+  assert.equal(JSON.stringify(stale).includes(secret), false);
   assert.equal(observedCredential.every((byte) => byte === 0), true);
 
   const controller = new AbortController();
@@ -1168,8 +1168,16 @@ test("injected Cursor SDK adapter composes with the durable launch coordinator",
     if (failure) throw failure;
   });
   const fixture = await makeFixture(t);
+  const ledgerFile = join(fixture.directory, "launches.json");
+  const logs = [];
   registry = new AgentRegistry([fixture.adapter]);
-  coordinator = new LaunchCoordinator(registry, { ledgerFile: join(fixture.directory, "launches.json") });
+  coordinator = new LaunchCoordinator(registry, {
+    ledgerFile,
+    operations: {
+      logger: { log(...entries) { logs.push(entries); } },
+      metrics: { increment() {}, observe() {}, setGauge() {} },
+    },
+  });
   await coordinator.start();
   const accepted = await coordinator.submit({
     ...request(),
