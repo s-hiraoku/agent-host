@@ -11,14 +11,17 @@ exact ID in a dedicated store. The integration owner is
 responsible for supplying a separately reviewed bridge and credentials; the adapter does
 not perform interactive login or read Cursor's default credentials or stores.
 
-Trusted composition must call `open()` successfully before registering the adapter. That
-step traverses missing store and provenance-directory components one at a time from their
-pinned existing ancestors, rejecting links before descending, creates or validates the
-owner-only dedicated store, acquires the private provenance writer lease, and validates
-the complete bounded state;
-capabilities remain absent if opening fails. Every bridge invocation rechecks both the
-configured workspace and store identities and fails closed after replacement, symlink, or
-store-permission drift.
+Trusted composition must pre-create the dedicated store and provenance parent as
+owner-only canonical directories, inject bounded private-state read, atomic write, and
+writer-lock capabilities, and call `open()` successfully before registering the adapter.
+The adapter does not recursively create either directory. The injected state capabilities
+must keep every mutation anchored to the validated provenance directory, must not prepare
+its parent path, and must fail closed if that identity changes. This explicit capability
+boundary is required because Node's pathname APIs do not provide portable `openat`/
+`mkdirat` semantics against concurrent same-user path replacement. Capabilities remain
+absent if opening fails. Every bridge invocation rechecks both the configured workspace
+and pre-created store identities and fails closed after replacement, symlink, or
+store-permission drift; the separately reviewed bridge owns its store mutation boundary.
 
 When directly composed with `AgentRegistry`, the adapter:
 
@@ -45,4 +48,5 @@ discover an operator-installed package, or register this adapter in the standard
 until all gates recorded in the Cursor SDK spike are closed. In particular, the pinned
 SDK's transport dependency currently has unremediated High-severity advisories, release
 artifacts do not package dependencies, and SDK redistribution still requires explicit
-license/TOS review.
+license/TOS review. A production integration must also supply and validate the anchored
+private-state capability; this repository intentionally provides only fixture plumbing.

@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { CursorSdkAdapter } from "../src/adapters/cursor-sdk.js";
 import { AgentRegistry } from "../src/core/registry.js";
 import { LaunchCoordinator } from "../src/core/launch-coordinator.js";
-import { writePrivateFileAtomic } from "../src/secure-state.js";
+import { readPrivateFileBounded, writePrivateFileAtomic } from "../src/secure-state.js";
+import { acquireInstanceLock } from "../src/instance-lock.js";
 
 const ATTEMPT_ID = "attempt:00000000-0000-4000-8000-000000000001";
 const LAUNCH_ID = "launch:00000000-0000-4000-8000-000000000002";
@@ -195,6 +196,9 @@ test("Cursor SDK private state cannot overlap a configured workspace", async (t)
   const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-overlap-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(join(directory, "workspace"));
+  await mkdir(join(directory, "workspace", "sdk-store"), { mode: 0o700 });
+  await mkdir(join(directory, "sdk-store"), { mode: 0o700 });
+  await mkdir(join(directory, "private"), { mode: 0o700 });
   const bridge = {
     namespace: "fixture",
     sdkVersion: "1.0.28",
@@ -222,6 +226,7 @@ test("Cursor SDK target configuration rejects invalid profile values", async (t)
   t.after(() => rm(directory, { recursive: true, force: true }));
   const cwd = join(directory, "workspace");
   await mkdir(cwd);
+  await mkdir(join(directory, "sdk-store"), { mode: 0o700 });
   const bridge = {
     namespace: "fixture",
     sdkVersion: "1.0.28",
@@ -249,6 +254,7 @@ test("Cursor SDK provenance cannot overlap the bridge-managed store", async (t) 
   t.after(() => rm(directory, { recursive: true, force: true }));
   const cwd = join(directory, "workspace");
   await mkdir(cwd);
+  await mkdir(join(directory, "sdk-store"), { mode: 0o700 });
   const bridge = {
     namespace: "fixture",
     sdkVersion: "1.0.28",
@@ -264,67 +270,67 @@ test("Cursor SDK provenance cannot overlap the bridge-managed store", async (t) 
   }), /provenance state must be outside/);
 });
 
-test("Cursor SDK does not create its store through a replaced ancestor", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-store-ancestor-"));
+test("Cursor SDK accepts pre-created private state below an ordinary ancestor", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-precreated-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const cwd = join(directory, "workspace");
-  const storeAncestor = join(directory, "private");
+  const ordinary = join(directory, "ordinary");
+  const storeDirectory = join(ordinary, "sdk-store");
+  const provenanceDirectory = join(ordinary, "provenance");
   await mkdir(cwd);
-  await mkdir(storeAncestor);
-  const adapter = new CursorSdkAdapter({
-    bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
-    sdkVersion: "1.0.28",
-    storeDirectory: join(storeAncestor, "nested", "sdk-store"),
-    provenanceFile: join(directory, "provenance", "cursor-sdk.json"),
-    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
-  });
-  t.after(() => adapter.close());
-  await rename(storeAncestor, `${storeAncestor}-moved`);
-  await symlink(cwd, storeAncestor);
-  await assert.rejects(adapter.open(), /store ancestor changed after configuration/);
-  await assert.rejects(lstat(join(cwd, "nested")), { code: "ENOENT" });
-});
-
-test("Cursor SDK does not follow a symlink inserted below its pinned store ancestor", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-store-component-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const cwd = join(directory, "workspace");
-  const storeAncestor = join(directory, "private");
-  await mkdir(cwd);
-  await mkdir(storeAncestor, { mode: 0o700 });
-  const adapter = new CursorSdkAdapter({
-    bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
-    sdkVersion: "1.0.28",
-    storeDirectory: join(storeAncestor, "nested", "sdk-store"),
-    provenanceFile: join(directory, "provenance", "cursor-sdk.json"),
-    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
-  });
-  t.after(() => adapter.close());
-  await symlink(cwd, join(storeAncestor, "nested"));
-  await assert.rejects(adapter.open(), /store path changed after configuration/);
-  await assert.rejects(lstat(join(cwd, "sdk-store")), { code: "ENOENT" });
-});
-
-test("Cursor SDK does not acquire its provenance lock through an inserted symlink", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-provenance-component-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const cwd = join(directory, "workspace");
-  const storeDirectory = join(directory, "sdk-store");
-  const provenanceAncestor = join(directory, "private");
-  await mkdir(cwd);
+  await mkdir(ordinary, { mode: 0o755 });
   await mkdir(storeDirectory, { mode: 0o700 });
-  await mkdir(provenanceAncestor, { mode: 0o700 });
+  await mkdir(provenanceDirectory, { mode: 0o700 });
   const adapter = new CursorSdkAdapter({
     bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
     sdkVersion: "1.0.28",
     storeDirectory,
-    provenanceFile: join(provenanceAncestor, "nested", "cursor-sdk.json"),
+    provenanceFile: join(provenanceDirectory, "cursor-sdk.json"),
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+    fs: fixtureFileSystem(),
   });
   t.after(() => adapter.close());
-  await symlink(cwd, join(provenanceAncestor, "nested"));
-  await assert.rejects(adapter.open(), /provenance path changed after configuration/);
+  await adapter.open();
+  assert.ok(adapter.launchCapabilities());
+});
+
+test("Cursor SDK never creates a missing store and rejects linked stores", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-store-input-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  await mkdir(cwd);
+  await mkdir(join(directory, "provenance"), { mode: 0o700 });
+  const options = {
+    bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
+    sdkVersion: "1.0.28",
+    storeDirectory: join(directory, "sdk-store"),
+    provenanceFile: join(directory, "provenance", "cursor-sdk.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+    fs: fixtureFileSystem(),
+  };
+  assert.throws(() => new CursorSdkAdapter(options), /pre-created private directory/);
+  await symlink(cwd, options.storeDirectory);
+  assert.throws(() => new CursorSdkAdapter(options), /canonical real directory/);
   await assert.rejects(lstat(join(cwd, "cursor-sdk.json.writer.lock")), { code: "ENOENT" });
+});
+
+test("Cursor SDK requires pre-created provenance and an anchored writer-lock capability", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-provenance-input-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  const storeDirectory = join(directory, "sdk-store");
+  await mkdir(cwd);
+  await mkdir(storeDirectory, { mode: 0o700 });
+  const options = {
+    bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
+    sdkVersion: "1.0.28",
+    storeDirectory,
+    provenanceFile: join(directory, "private", "cursor-sdk.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+  };
+  assert.throws(() => new CursorSdkAdapter(options), /pre-created private directory/);
+  await mkdir(join(directory, "private"), { mode: 0o700 });
+  assert.throws(() => new CursorSdkAdapter(options), /injected anchored private-state capabilities/);
 });
 
 test("Cursor SDK launch rejects workspace replacement before bridge invocation", async (t) => {
@@ -383,7 +389,7 @@ test("Cursor SDK launch rejects a plain-directory workspace replacement", async 
   assert.equal(creates, 0);
 });
 
-test("Cursor SDK creates a private store and rejects replacement before bridge access", async (t) => {
+test("Cursor SDK validates its pre-created private store and rejects replacement before bridge access", async (t) => {
   let gets = 0;
   const fixture = await makeFixture(t, {
     async getLocal({ agentId }) {
@@ -427,6 +433,7 @@ test("Cursor SDK provenance admits only one injected writer", async (t) => {
     storeDirectory: first.storeDirectory,
     provenanceFile: first.provenanceFile,
     targets: [{ id: "workspace-a", cwd: first.cwd, profiles: ["safe"] }],
+    fs: fixtureFileSystem(),
   });
   t.after(() => second.close());
   await first.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
@@ -480,6 +487,7 @@ test("Cursor SDK close drains in-flight bridge work before releasing its writer 
     storeDirectory: first.storeDirectory,
     provenanceFile: first.provenanceFile,
     targets: [{ id: "workspace-a", cwd: first.cwd, profiles: ["safe"] }],
+    fs: fixtureFileSystem(),
   });
   const launch = first.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   await started;
@@ -502,6 +510,7 @@ test("Cursor SDK malformed provenance suppresses capabilities and fails closed",
   const privateDirectory = join(directory, "private");
   await mkdir(cwd);
   await mkdir(privateDirectory, { mode: 0o700 });
+  await mkdir(join(directory, "sdk-store"), { mode: 0o700 });
   const provenanceFile = join(privateDirectory, "provenance.json");
   await writeFile(provenanceFile, JSON.stringify({ schemaVersion: 999, records: [], secret: "must-not-reset" }), { mode: 0o600 });
   adapter = new CursorSdkAdapter({
@@ -510,6 +519,7 @@ test("Cursor SDK malformed provenance suppresses capabilities and fails closed",
     storeDirectory: join(directory, "sdk-store"),
     provenanceFile,
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+    fs: fixtureFileSystem(),
   });
   assert.equal(adapter.launchCapabilities(), null);
   await assert.rejects(adapter.open(), /invalid Cursor SDK provenance state/);
@@ -526,6 +536,8 @@ test("Cursor SDK provenance write failure occurs before bridge invocation", asyn
   });
   const cwd = join(directory, "workspace");
   await mkdir(cwd);
+  await mkdir(join(directory, "sdk-store"), { mode: 0o700 });
+  await mkdir(join(directory, "private"), { mode: 0o700 });
   let creates = 0;
   const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
   adapter = new CursorSdkAdapter({
@@ -539,10 +551,10 @@ test("Cursor SDK provenance write failure occurs before bridge invocation", asyn
     storeDirectory: join(directory, "sdk-store"),
     provenanceFile: join(directory, "private", "provenance.json"),
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
-    fs: {
+    fs: fixtureFileSystem({
       async readPrivateFileBounded() { throw missing; },
       async writePrivateFileAtomic() { throw new Error("synthetic atomic write failure"); },
-    },
+    }),
   });
   await adapter.open();
   await assert.rejects(
@@ -609,6 +621,7 @@ test("Cursor SDK provenance capacity rejects before bridge invocation", async (t
     storeDirectory: fixture.storeDirectory,
     provenanceFile: fixture.provenanceFile,
     targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
+    fs: fixtureFileSystem(),
   });
   await adapter.open();
   await assert.rejects(
@@ -662,6 +675,8 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
   await mkdir(cwd);
   const storeDirectory = join(directory, "sdk-store");
   const provenanceFile = join(directory, "private", "cursor-sdk-provenance.json");
+  await mkdir(storeDirectory, { mode: 0o700 });
+  await mkdir(join(directory, "private"), { mode: 0o700 });
   const adapter = new CursorSdkAdapter({
     bridge,
     sdkVersion: "1.0.28",
@@ -669,12 +684,12 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
     provenanceFile,
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
     now: adapterOptions.now,
-    fs: adapterOptions.afterProvenanceWrite ? {
+    fs: fixtureFileSystem(adapterOptions.afterProvenanceWrite ? {
       async writePrivateFileAtomic(...args) {
         await writePrivateFileAtomic(...args);
         await adapterOptions.afterProvenanceWrite({ cwd });
       },
-    } : undefined,
+    } : {}),
   });
   await adapter.open();
   t.after(async () => {
@@ -682,6 +697,31 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
     await rm(directory, { recursive: true, force: true });
   });
   return { adapter, bridge, agents, cwd, directory, storeDirectory, provenanceFile };
+}
+
+function fixtureFileSystem(overrides = {}) {
+  return {
+    async readPrivateFileBounded(path, maximumBytes, options) {
+      assertPrivateStateOptions(options);
+      return readPrivateFileBounded(path, maximumBytes);
+    },
+    async writePrivateFileAtomic(path, contents, options) {
+      assertPrivateStateOptions(options);
+      return writePrivateFileAtomic(path, contents);
+    },
+    async acquireInstanceLock(path, options) {
+      assertPrivateStateOptions(options);
+      return acquireInstanceLock(path, { prepareDirectory: false });
+    },
+    ...overrides,
+  };
+}
+
+function assertPrivateStateOptions(options) {
+  assert.equal(options?.prepareDirectory, false);
+  assert.equal(typeof options?.directory, "string");
+  assert.equal(typeof options?.directoryIdentity?.dev, "number");
+  assert.equal(typeof options?.directoryIdentity?.ino, "number");
 }
 
 function request() { return { provider: "cursor", target: "workspace-a", profile: "safe", mode: "local" }; }
