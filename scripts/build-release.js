@@ -47,12 +47,13 @@ const name = `agent-host-${packageJson.version}`;
 const root = join(temporary, name);
 try {
   await mkdir(root, { recursive: true });
-  for (const entry of ["LICENSE", "README.md", "CHANGELOG.md", "package.json", "release-compatibility.json", "src", "docs"]) {
+  for (const entry of ["LICENSE", "README.md", "CHANGELOG.md", "package.json", "release-compatibility.json", "src", "docs", "native"]) {
     await cp(join(repository, entry), join(root, entry), { recursive: true });
   }
   assertDisabledCursorSdkSourceManifest(JSON.parse(await readFile(join(root, "package.json"), "utf8")));
   await mkdir(join(root, "scripts"));
   await cp(join(repository, "scripts", "manage-installation.js"), join(root, "scripts", "manage-installation.js"));
+  await cp(join(repository, "scripts", "build-anchored-private-state-helper.js"), join(root, "scripts", "build-anchored-private-state-helper.js"));
   await cp(dashboardDirectory, join(root, "dashboard"), { recursive: true });
   await verifyDashboardArtifactAttestation(join(root, "dashboard"), compatibility);
   const entries = await collectEntries(root);

@@ -22,6 +22,16 @@ jobs:
         with: { node-version: "${{ matrix.node }}" }
       - run: npm run check
 
+  native-state-macos:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node --test test/anchored-private-state.test.js test/cursor-sdk.test.js
+
   integrated-artifact:
     runs-on: ubuntu-latest
     timeout-minutes: 15

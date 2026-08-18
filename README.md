@@ -111,7 +111,8 @@ The repository also contains a dependency-free, explicitly injected Cursor SDK a
 boundary for contract testing. It is not registered by the normal runtime and does not
 make the currently blocked Cursor SDK a supported dependency. See
 [`docs/cursor-sdk-adapter.md`](docs/cursor-sdk-adapter.md) for its safety boundary and
-explicit no-fallback credential source contract, and the upstream gates.
+explicit no-fallback credential source contract, protected-parent persistent Linux/macOS
+provenance backend, and upstream gates.
 
 `GET /v1/agents` accepts repeatable or comma-separated `provider` and `status`
 filters, plus `view`, `cwd`, free-text `q`, `sort`, `direction`, `limit`, and an opaque

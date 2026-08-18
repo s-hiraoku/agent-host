@@ -45,13 +45,15 @@ does not approve an SDK dependency, bridge implementation, normal-runtime regist
 distribution model, or use of `Cursor.auth.login()`.
 
 Trusted composition must pre-create the dedicated store and provenance parent as
-owner-only canonical directories, inject bounded private-state read, atomic write, and
-writer-lock capabilities, and call `open()` successfully before registering the adapter.
+owner-only canonical directories, open the provenance parent with
+`openAnchoredPrivateState`, inject that scoped backend, and call `open()` successfully
+before registering the adapter.
 The adapter does not recursively create either directory. The injected state capabilities
 must keep every mutation anchored to the validated provenance directory, must not prepare
 its parent path, and must fail closed if that identity changes. This explicit capability
-boundary is required because Node's pathname APIs do not provide portable `openat`/
-`mkdirat` semantics against concurrent same-user path replacement. Capabilities remain
+boundary uses the repository's small POSIX helper because Node's pathname APIs do not
+provide portable `openat` semantics against concurrent same-user path replacement.
+Capabilities remain
 absent if opening fails. Every bridge invocation rechecks both the configured workspace
 and pre-created store identities and fails closed after replacement, symlink, or
 store-permission drift; the separately reviewed bridge owns its store mutation boundary.
@@ -76,6 +78,48 @@ version, the bridge namespace, a hash-derived store scope, canonical-target dige
 and derived agent IDs. It does not contain workspace or store paths, prompts, messages,
 credentials, or provider responses.
 
+## Anchored private-state backend
+
+The production backend supports Linux and macOS and fails closed elsewhere. Build its
+auditable C helper on the target platform, outside a workspace and before dropping its
+write bits:
+
+```sh
+npm run native:build -- /absolute/private/bin/agent-host-anchored-state
+```
+
+The builder requires a C11 compiler and refuses to replace an existing output. The
+release archive includes both the builder and `native/anchored-private-state.c`; it does
+not contain a cross-platform executable. Treat the resulting absolute helper path as
+trusted code and protect its parent directory from untrusted writers.
+The backend rejects helper symlinks, non-canonical paths, writable binaries, and identity
+changes observed before each invocation. Node cannot execute an already-open executable
+descriptor portably on both supported platforms, so this helper pathname is a distinct
+code-trust boundary: use a root-owned immutable binary and root-owned parent when a
+hostile process with the same UID is in scope.
+
+```js
+import { openAnchoredPrivateState } from "./src/anchored-private-state.js";
+
+const privateState = await openAnchoredPrivateState(provenanceDirectory, {
+  helperPath: "/absolute/private/bin/agent-host-anchored-state",
+});
+const adapter = new CursorSdkAdapter({
+  bridge, sdkVersion, storeDirectory, provenanceFile, targets, privateState,
+});
+await adapter.open();
+```
+
+The backend holds the validated directory descriptor for its lifetime. Reads, exclusive
+0600 temporary creation, file fsync, same-directory rename, directory fsync, and writer
+locking all execute relative to that descriptor. Writer exclusion uses a kernel lock on
+a separately opened descriptor for the anchored directory inode, so replacing the
+metadata basename cannot create a second writer. Lock metadata is intentionally retained;
+release closes the directory lock and never unlinks a pathname that may have been
+replaced. `close()` releases all leases and the directory
+descriptor. Inputs are basename-only and bounded; symlinks, non-regular files, unsafe
+ownership or modes, and accessible directories are rejected.
+
 ## Supported-runtime gate
 
 Do not add the Cursor SDK to the normal or optional dependency graph, automatically
@@ -99,3 +143,5 @@ Updating dashboard inputs or output therefore requires an explicit reviewed comp
 change; enabling a provider also requires a reviewed policy-version change. This negative
 artifact proof only establishes absence from a disabled release; it does not approve the
 SDK's license/TOS, dependency risk, credentials, transport, or redistribution.
+The anchored private-state backend closes only the provenance-storage prerequisite; it
+does not close these SDK runtime gates.
