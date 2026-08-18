@@ -225,6 +225,28 @@ test("Cursor SDK owned discovery propagates cancellation instead of returning st
   );
 });
 
+test("Cursor SDK owned discovery propagates cancellation after a late lookup result", async (t) => {
+  const fixture = await makeFixture(t);
+  const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  let lookupStarted;
+  const started = new Promise((resolve) => { lookupStarted = resolve; });
+  let finishLookup;
+  const lookupFinished = new Promise((resolve) => { finishLookup = resolve; });
+  fixture.bridge.getLocal = async ({ agentId }) => {
+    lookupStarted();
+    await lookupFinished;
+    return fixture.agents.get(agentId) ?? null;
+  };
+  const controller = new AbortController();
+  const abortReason = new Error("synthetic delayed discovery abort");
+  const discovery = fixture.adapter.discoverOwned([ledgerRecord(owned)], { signal: controller.signal });
+  await started;
+  controller.abort(abortReason);
+  finishLookup();
+
+  await assert.rejects(discovery, (error) => error === abortReason);
+});
+
 test("Cursor SDK owned discovery bounds bridge concurrency", async (t) => {
   const fixture = await makeFixture(t);
   const records = [];
@@ -254,6 +276,45 @@ test("Cursor SDK owned discovery bounds bridge concurrency", async (t) => {
   assert.equal((await fixture.adapter.discoverOwned(records)).length, records.length);
   assert.ok(maximum <= 8, `expected bounded concurrency, observed ${maximum}`);
   assert.ok(maximum > 1, `expected concurrent lookups, observed ${maximum}`);
+});
+
+test("Cursor SDK owned discovery rechecks its store before each batched lookup", async (t) => {
+  const fixture = await makeFixture(t);
+  const records = [];
+  for (let index = 200; index < 209; index += 1) {
+    const uuid = uuidFor(index);
+    const attemptId = `attempt:${uuid}`;
+    const launchId = `launch:${uuid}`;
+    const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId, launchId });
+    records.push({
+      id: launchId,
+      attemptId,
+      state: "owned",
+      agentId: owned.agentId,
+      providerAgentId: owned.providerAgentId,
+      request: resolvedRequest(),
+    });
+  }
+  let lookups = 0;
+  let initialBatchStarted;
+  const started = new Promise((resolve) => { initialBatchStarted = resolve; });
+  let finishInitialBatch;
+  const initialBatchFinished = new Promise((resolve) => { finishInitialBatch = resolve; });
+  fixture.bridge.getLocal = async ({ agentId }) => {
+    lookups += 1;
+    if (lookups === 8) initialBatchStarted();
+    await initialBatchFinished;
+    return fixture.agents.get(agentId) ?? null;
+  };
+
+  const discovery = fixture.adapter.discoverOwned(records);
+  await started;
+  await rename(fixture.storeDirectory, `${fixture.storeDirectory}-moved`);
+  await mkdir(fixture.storeDirectory, { mode: 0o700 });
+  finishInitialBatch();
+
+  await assert.rejects(discovery, /store changed after configuration/);
+  assert.equal(lookups, 8);
 });
 
 test("normal runtime does not import or register the Cursor SDK adapter", async () => {
@@ -588,6 +649,35 @@ test("Cursor SDK provenance reopen reacquires its lease after release fails", as
   await assert.rejects(fixture.adapter.close(), /synthetic release failure/);
   await fixture.adapter.open();
   assert.equal(acquisitions, 2);
+});
+
+test("Cursor SDK provenance retains its lease when release fails before unlocking", async (t) => {
+  let acquisitions = 0;
+  let releaseCalls = 0;
+  const fixture = await makeFixture(t, {}, {
+    fs: fixtureFileSystem({
+      async acquireInstanceLock(path, options) {
+        await assertAnchoredPrivateState(options);
+        acquisitions += 1;
+        const lease = await acquireInstanceLock(path, { prepareDirectory: false });
+        return {
+          ...lease,
+          async release() {
+            releaseCalls += 1;
+            if (releaseCalls === 1) throw new Error("synthetic pre-unlock release failure");
+            await lease.release();
+          },
+        };
+      },
+    }),
+  });
+
+  await assert.rejects(fixture.adapter.close(), /synthetic pre-unlock release failure/);
+  await fixture.adapter.open();
+  assert.equal(acquisitions, 1);
+  await fixture.adapter.close();
+  assert.equal(releaseCalls, 2);
+  await assert.rejects(lstat(`${fixture.provenanceFile}.writer.lock`), { code: "ENOENT" });
 });
 
 test("Cursor SDK close drains in-flight bridge work before releasing its writer lease", async (t) => {
