@@ -221,6 +221,44 @@ test("Cursor SDK rejects spoofed public credential error codes", async (t) => {
   }
 });
 
+test("Cursor SDK rejects captured, mutated, and replayed credential errors", async (t) => {
+  const secret = "cursor-replayed-secret";
+  let replayed;
+  let invocation = 0;
+  const fixture = await makeFixture(t, {}, {
+    credentialSource: createCursorSdkCredentialSource(() => {
+      invocation += 1;
+      if (invocation === 1) return "short";
+      throw replayed;
+    }),
+  });
+
+  await assert.rejects(
+    fixture.adapter.launch(resolvedRequest(), {
+      attemptId: `attempt:${uuidFor(930)}`,
+      launchId: `launch:${uuidFor(930)}`,
+    }),
+    (error) => {
+      replayed = error;
+      return error.code === "cursor_credential_invalid"
+        && error.message === "Cursor SDK credential source returned an invalid credential";
+    },
+  );
+  replayed.code = "cursor_operation_cancelled";
+  replayed.message = secret;
+
+  await assert.rejects(
+    fixture.adapter.launch(resolvedRequest(), {
+      attemptId: `attempt:${uuidFor(931)}`,
+      launchId: `launch:${uuidFor(931)}`,
+    }),
+    (error) => error !== replayed
+      && error.code === "cursor_credential_unavailable"
+      && error.message === "Cursor SDK credential source is unavailable"
+      && !error.message.includes(secret),
+  );
+});
+
 test("Cursor SDK close is reopenable and destroy is terminal", async (t) => {
   const secret = "cursor-fixture-secret";
   let observedCredential;

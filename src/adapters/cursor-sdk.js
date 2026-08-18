@@ -26,9 +26,15 @@ export function createCursorSdkCredentialSource(secretOrCallback) {
   if (typeof secretOrCallback !== "string" && typeof secretOrCallback !== "function") {
     throw new TypeError("Cursor SDK credential source requires an explicit secret or secret callback");
   }
-  const retained = typeof secretOrCallback === "string"
-    ? credentialBytes(secretOrCallback)
-    : undefined;
+  let retained;
+  try {
+    retained = typeof secretOrCallback === "string"
+      ? credentialBytes(secretOrCallback)
+      : undefined;
+  } catch (error) {
+    if (isInternalCredentialError(error)) throw publicCredentialError(error);
+    throw error;
+  }
   const callback = typeof secretOrCallback === "function" ? secretOrCallback : undefined;
   let closed = false;
   let claimed = false;
@@ -310,7 +316,7 @@ export class CursorSdkAdapter {
         signal,
       );
     } catch (error) {
-      if (isInternalCredentialError(error)) throw error;
+      if (isInternalCredentialError(error)) throw publicCredentialError(error);
       const failure = new Error(`Cursor SDK bridge ${operation} failed`);
       failure.code = "cursor_bridge_failed";
       throw failure;
@@ -624,6 +630,12 @@ function internalCredentialError(code, message) {
 
 function isInternalCredentialError(error) {
   return error?.[INTERNAL_CREDENTIAL_ERROR] === true;
+}
+
+function publicCredentialError(error) {
+  const failure = new Error(error.message);
+  failure.code = error.code;
+  return failure;
 }
 
 function normalizeTargets(targets) {
