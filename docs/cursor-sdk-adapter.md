@@ -33,6 +33,12 @@ bounded credential-free errors, and never writes credentials to launch provenanc
 agent metadata. Trusted composition must still keep the source and bridge out of generic
 configuration, diagnostic, and structured logging.
 
+Result redaction runs before identity validation and preserves the adapter's bounded
+bridge fields (`agentId`, `status`, `name`, and `lastActivityAt`); a credential-bearing
+identity is redacted and therefore rejected rather than trusted. This credential contract
+does not approve an SDK dependency, bridge implementation, normal-runtime registration,
+distribution model, or use of `Cursor.auth.login()`.
+
 Trusted composition must pre-create the dedicated store and provenance parent as
 owner-only canonical directories, inject bounded private-state read, atomic write, and
 writer-lock capabilities, and call `open()` successfully before registering the adapter.
