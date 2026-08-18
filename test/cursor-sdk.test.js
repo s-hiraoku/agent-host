@@ -1087,19 +1087,20 @@ test("Cursor SDK provenance reopen reacquires its lease after release fails", as
     privateStateFactory(directory) {
       const privateState = fixtureFileSystem(directory);
       const acquire = privateState.acquireWriterLock.bind(privateState);
-      return { ...privateState,
+      return {
+        ...privateState,
         async acquireWriterLock(name) {
-        acquisitions += 1;
-        const lease = await acquire(name);
-        if (acquisitions !== 1) return lease;
-        return {
-          ...lease,
-          async release() {
-            await lease.release();
-            throw new Error("synthetic release failure");
-          },
-        };
-      },
+          acquisitions += 1;
+          const lease = await acquire(name);
+          if (acquisitions !== 1) return lease;
+          return {
+            ...lease,
+            async release() {
+              await lease.release();
+              throw new Error("synthetic release failure");
+            },
+          };
+        },
       };
     },
   });
@@ -1116,19 +1117,20 @@ test("Cursor SDK provenance retains its lease when release fails before unlockin
     privateStateFactory(directory) {
       const privateState = fixtureFileSystem(directory);
       const acquire = privateState.acquireWriterLock.bind(privateState);
-      return { ...privateState,
+      return {
+        ...privateState,
         async acquireWriterLock(name) {
-        acquisitions += 1;
-        const lease = await acquire(name);
-        return {
-          ...lease,
-          async release() {
-            releaseCalls += 1;
-            if (releaseCalls === 1) throw new Error("synthetic pre-unlock release failure");
-            await lease.release();
-          },
-        };
-      },
+          acquisitions += 1;
+          const lease = await acquire(name);
+          return {
+            ...lease,
+            async release() {
+              releaseCalls += 1;
+              if (releaseCalls === 1) throw new Error("synthetic pre-unlock release failure");
+              await lease.release();
+            },
+          };
+        },
       };
     },
   });

@@ -107,7 +107,10 @@ class AnchoredPrivateState {
         this.#leaseFailure ??= record.invalid;
       }
     });
-    return { release: record.release };
+    return {
+      release: record.release,
+      isHeld: () => !released && !record.invalid,
+    };
   }
 
   async assertCurrent() {

@@ -116,12 +116,14 @@ test("writer locks serialize helpers and release never unlinks a replacement", a
   const second = await openAnchoredPrivateState(directory, { helperPath });
   t.after(() => second.close());
   const firstLease = await state.acquireWriterLock("writer.lock");
+  assert.equal(firstLease.isHeld(), true);
   await assert.rejects(second.acquireWriterLock("writer.lock"),
     (error) => error.code === "instance_already_running" && /already held/.test(error.message));
   await rename(join(directory, "writer.lock"), join(directory, "held.lock"));
   await writeFile(join(directory, "writer.lock"), "replacement", { mode: 0o600 });
   await assert.rejects(second.acquireWriterLock("writer.lock"), /already held/);
   await firstLease.release();
+  assert.equal(firstLease.isHeld(), false);
   assert.equal(await readFile(join(directory, "writer.lock"), "utf8"), "replacement");
   const secondLease = await second.acquireWriterLock("writer.lock");
   await secondLease.release();
@@ -149,6 +151,7 @@ test("writer-lock helper termination invalidates the state and release observes 
     try { await state.assertCurrent(); return false; }
     catch (error) { return /writer lock was lost/.test(error.message); }
   });
+  assert.equal(lease.isHeld(), false);
   await assert.rejects(state.writeFileAtomic("provenance.json", "mutated"), /writer lock was lost/);
   await assert.rejects(Promise.race([
     lease.release(),

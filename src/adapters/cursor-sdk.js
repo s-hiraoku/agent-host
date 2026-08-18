@@ -461,6 +461,7 @@ export class CursorSdkProvenanceStore {
       const lease = this.#lease;
       if (!lease) {
         this.#lease = undefined;
+        await this.#privateState.close();
         return;
       }
       try { await lease.release(); }
