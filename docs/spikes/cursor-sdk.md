@@ -25,8 +25,8 @@ presented as control of pre-existing Cursor IDE conversations.
 The launch contract now exists, but the latest inspected SDK release remains blocked from
 the supported runtime. `@cursor/sdk@1.0.28` resolves through
 `@connectrpc/connect-node@1.7.0` to `undici@5.29.0`. That transport version is affected by
-the High-severity [GHSA-vxpw-j846-p89q](https://github.com/advisories/GHSA-vxpw-j846-p89q)
-and [GHSA-v9p9-hfj2-hcw8](https://github.com/advisories/GHSA-v9p9-hfj2-hcw8), plus
+the High-severity [GHSA-v9p9-hfj2-hcw8](https://github.com/advisories/GHSA-v9p9-hfj2-hcw8),
+plus the Moderate
 [GHSA-2mjp-6q6p-2qxm](https://github.com/advisories/GHSA-2mjp-6q6p-2qxm). npm reports no
 supported fix for the SDK dependency graph. Forcing Undici across its major-version
 boundary is not an accepted compatibility or security remedy.

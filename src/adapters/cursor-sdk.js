@@ -141,17 +141,41 @@ export class CursorSdkAdapter {
   async discoverOwned(records, { signal } = {}) {
     return this.#run(async () => {
       const provenanceByAttempt = await this.#state.snapshot();
+      await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
       return mapConcurrent(records, DISCOVERY_CONCURRENCY, async (record) => {
+        throwIfAborted(signal);
         const provenance = this.#verifiedProvenance(provenanceByAttempt.get(record.attemptId), record);
         const target = this.#targets.get(provenance.target);
-        await this.#assertBridgeDirectories(target);
-        const result = await this.#bridge.getLocal({
-          agentId: provenance.providerAgentId,
-          cwd: target.cwd,
-          storeDirectory: this.#storeDirectory,
-          signal,
-        });
-        if (!result) throw new Error("Cursor SDK owned agent is not present in the dedicated store");
+        try {
+          await assertDirectoryIdentity(target.cwd, target.identity, "target");
+          throwIfAborted(signal);
+        }
+        catch (error) {
+          throwIfAborted(signal, error);
+          return this.#agent(record, provenance);
+        }
+        try {
+          await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
+          throwIfAborted(signal);
+        } catch (error) {
+          throwIfAborted(signal, error);
+          throw error;
+        }
+        let result;
+        try {
+          result = await this.#bridge.getLocal({
+            agentId: provenance.providerAgentId,
+            cwd: target.cwd,
+            storeDirectory: this.#storeDirectory,
+            signal,
+          });
+          throwIfAborted(signal);
+        }
+        catch (error) {
+          throwIfAborted(signal, error);
+          return this.#agent(record, provenance);
+        }
+        if (!result) return this.#agent(record, provenance);
         assertProviderAgent(result, provenance.providerAgentId);
         return this.#agent(record, provenance, result);
       });
@@ -351,10 +375,17 @@ export class CursorSdkProvenanceStore {
 
   async close() {
     return this.#exclusive(async () => {
-      await this.#lease?.release();
-      this.#lease = undefined;
-      this.#directoryIdentity = undefined;
-      this.#lockIdentity = undefined;
+      const lease = this.#lease;
+      if (!lease) {
+        this.#clearLeaseState();
+        return;
+      }
+      try { await lease.release(); }
+      catch (error) {
+        if (!await this.#leaseStillOwned()) this.#clearLeaseState();
+        throw error;
+      }
+      this.#clearLeaseState();
     });
   }
 
@@ -422,6 +453,27 @@ export class CursorSdkProvenanceStore {
       || !sameIdentity(lock, this.#lockIdentity)) {
       throw new Error("Cursor SDK provenance changed after configuration");
     }
+  }
+  async #leaseStillOwned() {
+    try {
+      const before = await lstat(this.#directory);
+      const lock = await lstat(this.#lockFile);
+      const after = await lstat(this.#directory);
+      return before.isDirectory() && !before.isSymbolicLink()
+        && after.isDirectory() && !after.isSymbolicLink()
+        && lock.isFile() && !lock.isSymbolicLink()
+        && sameIdentity(statIdentity(before), this.#directoryIdentity)
+        && sameStatIdentity(before, after)
+        && sameIdentity(statIdentity(lock), this.#lockIdentity);
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      return true;
+    }
+  }
+  #clearLeaseState() {
+    this.#lease = undefined;
+    this.#directoryIdentity = undefined;
+    this.#lockIdentity = undefined;
   }
   #capabilityOptions() {
     return {
@@ -606,6 +658,9 @@ function sameIntent(left, right) {
     "bridgeNamespace", "storeScope", "targetDigest",
   ]
     .every((key) => left[key] === right[key]);
+}
+function throwIfAborted(signal, fallback = new Error("Cursor SDK discovery was aborted")) {
+  if (signal?.aborted) throw signal.reason ?? fallback;
 }
 async function mapConcurrent(values, concurrency, mapper) {
   const results = new Array(values.length);
