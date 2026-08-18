@@ -20,7 +20,7 @@ const RECORD_KEYS = new Set([
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
 const CREDENTIAL_SOURCE = Symbol("CursorSdkCredentialSource");
-const INTERNAL_CREDENTIAL_ERROR = Symbol("CursorSdkCredentialError");
+const INTERNAL_CREDENTIAL_ERRORS = new WeakSet();
 
 export function createCursorSdkCredentialSource(secretOrCallback) {
   if (typeof secretOrCallback !== "string" && typeof secretOrCallback !== "function") {
@@ -624,12 +624,12 @@ function credentialCancellation() {
 function internalCredentialError(code, message) {
   const error = new Error(message);
   error.code = code;
-  Object.defineProperty(error, INTERNAL_CREDENTIAL_ERROR, { value: true });
+  INTERNAL_CREDENTIAL_ERRORS.add(error);
   return error;
 }
 
 function isInternalCredentialError(error) {
-  return error?.[INTERNAL_CREDENTIAL_ERROR] === true;
+  return INTERNAL_CREDENTIAL_ERRORS.has(error);
 }
 
 function publicCredentialError(error) {

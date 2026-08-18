@@ -259,6 +259,47 @@ test("Cursor SDK rejects captured, mutated, and replayed credential errors", asy
   );
 });
 
+test("Cursor SDK does not consult Proxy properties when classifying external errors", async (t) => {
+  const secret = "cursor-proxy-secret";
+  let propertyReads = 0;
+  const proxyError = () => new Proxy(new Error("untrusted"), {
+    get(target, property, receiver) {
+      propertyReads += 1;
+      if (typeof property === "symbol") return true;
+      if (property === "message" || property === "code") return secret;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+
+  const callbackFixture = await makeFixture(t, {}, {
+    credentialSource: createCursorSdkCredentialSource(() => { throw proxyError(); }),
+  });
+  await assert.rejects(
+    callbackFixture.adapter.launch(resolvedRequest(), {
+      attemptId: `attempt:${uuidFor(932)}`,
+      launchId: `launch:${uuidFor(932)}`,
+    }),
+    (error) => error.code === "cursor_credential_unavailable"
+      && error.message === "Cursor SDK credential source is unavailable"
+      && !error.message.includes(secret),
+  );
+  assert.equal(propertyReads, 0);
+
+  const bridgeFixture = await makeFixture(t, {
+    async createLocal() { throw proxyError(); },
+  }, { credentialSource: createCursorSdkCredentialSource("cursor-fixture-secret") });
+  await assert.rejects(
+    bridgeFixture.adapter.launch(resolvedRequest(), {
+      attemptId: `attempt:${uuidFor(933)}`,
+      launchId: `launch:${uuidFor(933)}`,
+    }),
+    (error) => error.code === "cursor_bridge_failed"
+      && error.message === "Cursor SDK bridge createLocal failed"
+      && !error.message.includes(secret),
+  );
+  assert.equal(propertyReads, 0);
+});
+
 test("Cursor SDK close is reopenable and destroy is terminal", async (t) => {
   const secret = "cursor-fixture-secret";
   let observedCredential;
