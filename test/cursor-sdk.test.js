@@ -50,12 +50,11 @@ test("Cursor SDK launch persists intent before invocation and proves owned disco
 test("Cursor SDK reconciliation never recreates an unconfirmed intent", async (t) => {
   let creates = 0;
   const fixture = await makeFixture(t, {
-    async createLocal(input) { creates += 1; return { agentId: input.agentId }; },
+    async createLocal(input) {
+      creates += 1;
+      throw new Error(`transport lost after ${input.agentId}`);
+    },
   });
-  fixture.bridge.createLocal = async (input) => {
-    creates += 1;
-    throw new Error(`transport lost after ${input.agentId}`);
-  };
   await assert.rejects(
     fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
     /transport lost/,
@@ -399,6 +398,8 @@ test("Cursor SDK rejects provenance directory replacement before another bridge 
 });
 
 test("Cursor SDK close drains in-flight bridge work before releasing its writer lease", async (t) => {
+  let second;
+  t.after(() => second?.close());
   let bridgeStarted;
   const started = new Promise((resolve) => { bridgeStarted = resolve; });
   let finishBridge;
@@ -410,15 +411,13 @@ test("Cursor SDK close drains in-flight bridge work before releasing its writer 
       return { agentId: input.agentId };
     },
   });
-  const second = new CursorSdkAdapter({
+  second = new CursorSdkAdapter({
     bridge: { ...first.bridge, namespace: "fixture-second" },
     sdkVersion: "1.0.28",
     storeDirectory: first.storeDirectory,
     provenanceFile: first.provenanceFile,
     targets: [{ id: "workspace-a", cwd: first.cwd, profiles: ["safe"] }],
   });
-  t.after(() => second.close());
-
   const launch = first.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   await started;
   const closing = first.adapter.close();
@@ -431,21 +430,24 @@ test("Cursor SDK close drains in-flight bridge work before releasing its writer 
 
 test("Cursor SDK malformed provenance suppresses capabilities and fails closed", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-malformed-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  let adapter;
+  t.after(async () => {
+    await adapter?.close();
+    await rm(directory, { recursive: true, force: true });
+  });
   const cwd = join(directory, "workspace");
   const privateDirectory = join(directory, "private");
   await mkdir(cwd);
   await mkdir(privateDirectory, { mode: 0o700 });
   const provenanceFile = join(privateDirectory, "provenance.json");
   await writeFile(provenanceFile, JSON.stringify({ schemaVersion: 999, records: [], secret: "must-not-reset" }), { mode: 0o600 });
-  const adapter = new CursorSdkAdapter({
+  adapter = new CursorSdkAdapter({
     bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
     sdkVersion: "1.0.28",
     storeDirectory: join(directory, "sdk-store"),
     provenanceFile,
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
   });
-  t.after(() => adapter.close());
   assert.equal(adapter.launchCapabilities(), null);
   await assert.rejects(adapter.open(), /invalid Cursor SDK provenance state/);
   assert.equal(adapter.launchCapabilities(), null);
@@ -454,12 +456,16 @@ test("Cursor SDK malformed provenance suppresses capabilities and fails closed",
 
 test("Cursor SDK provenance write failure occurs before bridge invocation", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-write-failure-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  let adapter;
+  t.after(async () => {
+    await adapter?.close();
+    await rm(directory, { recursive: true, force: true });
+  });
   const cwd = join(directory, "workspace");
   await mkdir(cwd);
   let creates = 0;
   const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
-  const adapter = new CursorSdkAdapter({
+  adapter = new CursorSdkAdapter({
     bridge: {
       namespace: "fixture",
       sdkVersion: "1.0.28",
@@ -475,7 +481,6 @@ test("Cursor SDK provenance write failure occurs before bridge invocation", asyn
       async writePrivateFileAtomic() { throw new Error("synthetic atomic write failure"); },
     },
   });
-  t.after(() => adapter.close());
   await adapter.open();
   await assert.rejects(
     adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
@@ -509,6 +514,8 @@ test("Cursor SDK ownership transition remains monotonic when the clock moves bac
 });
 
 test("Cursor SDK provenance capacity rejects before bridge invocation", async (t) => {
+  let adapter;
+  t.after(() => adapter?.close());
   const fixture = await makeFixture(t);
   await fixture.adapter.launch(request(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
@@ -528,7 +535,7 @@ test("Cursor SDK provenance capacity rejects before bridge invocation", async (t
   await fixture.adapter.close();
   await writeFile(fixture.provenanceFile, `${JSON.stringify(state)}\n`, { mode: 0o600 });
   let creates = 0;
-  const adapter = new CursorSdkAdapter({
+  adapter = new CursorSdkAdapter({
     bridge: {
       namespace: "fixture",
       sdkVersion: "1.0.28",
@@ -540,7 +547,6 @@ test("Cursor SDK provenance capacity rejects before bridge invocation", async (t
     provenanceFile: fixture.provenanceFile,
     targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
   });
-  t.after(() => adapter.close());
   await adapter.open();
   await assert.rejects(
     adapter.launch(request(), {
