@@ -264,6 +264,27 @@ test("Cursor SDK provenance cannot overlap the bridge-managed store", async (t) 
   }), /provenance state must be outside/);
 });
 
+test("Cursor SDK does not create its store through a replaced ancestor", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-store-ancestor-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  const storeAncestor = join(directory, "private");
+  await mkdir(cwd);
+  await mkdir(storeAncestor);
+  const adapter = new CursorSdkAdapter({
+    bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
+    sdkVersion: "1.0.28",
+    storeDirectory: join(storeAncestor, "nested", "sdk-store"),
+    provenanceFile: join(directory, "provenance", "cursor-sdk.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+  });
+  t.after(() => adapter.close());
+  await rename(storeAncestor, `${storeAncestor}-moved`);
+  await symlink(cwd, storeAncestor);
+  await assert.rejects(adapter.open(), /store ancestor changed after configuration/);
+  await assert.rejects(lstat(join(cwd, "nested")), { code: "ENOENT" });
+});
+
 test("Cursor SDK launch rejects workspace replacement before bridge invocation", async (t) => {
   let creates = 0;
   const fixture = await makeFixture(t, {

@@ -26,6 +26,8 @@ export class CursorSdkAdapter {
   #targets;
   #state;
   #storeDirectory;
+  #storeAncestor;
+  #storeAncestorIdentity;
   #storeIdentity;
   #scope;
   #sdkVersion;
@@ -41,7 +43,10 @@ export class CursorSdkAdapter {
     if (this.#bridge.sdkVersion !== this.#sdkVersion) {
       throw new Error(`Cursor SDK bridge version mismatch: expected ${this.#sdkVersion}`);
     }
-    this.#storeDirectory = absolutePath(options.storeDirectory, "storeDirectory");
+    const store = canonicalPotentialDirectory(options.storeDirectory, "storeDirectory");
+    this.#storeDirectory = store.path;
+    this.#storeAncestor = store.ancestor;
+    this.#storeAncestorIdentity = store.identity;
     this.#targets = normalizeTargets(options.targets);
     this.#now = options.now ?? Date.now;
     const provenanceFile = absolutePath(options.provenanceFile, "provenanceFile");
@@ -75,7 +80,9 @@ export class CursorSdkAdapter {
   async open() {
     const generation = this.#lifecycleGeneration;
     await this.#closing;
+    await assertDirectoryIdentity(this.#storeAncestor, this.#storeAncestorIdentity, "store ancestor");
     await ensurePrivateDirectory(this.#storeDirectory);
+    await assertDirectoryIdentity(this.#storeAncestor, this.#storeAncestorIdentity, "store ancestor");
     this.#storeIdentity = await directoryIdentity(this.#storeDirectory, "store");
     for (const target of this.#targets.values()) {
       if (pathsOverlap(target.cwd, this.#storeDirectory)) {
@@ -479,6 +486,33 @@ function publicId(scope, providerAgentId) { return `cursor-sdk:${scope}:${provid
 function absolutePath(value, name) {
   if (typeof value !== "string" || !isAbsolute(value)) throw new TypeError(`${name} must be an absolute path`);
   return canonicalPotentialPath(value);
+}
+function canonicalPotentialDirectory(value, name) {
+  if (typeof value !== "string" || !isAbsolute(value)) throw new TypeError(`${name} must be an absolute path`);
+  let current = resolve(value);
+  const suffix = [];
+  while (true) {
+    try {
+      const before = lstatSync(current);
+      const ancestor = realpathSync(current);
+      const after = lstatSync(current);
+      const canonical = lstatSync(ancestor);
+      if (!sameStatIdentity(before, after) || !canonical.isDirectory() || canonical.isSymbolicLink()) {
+        throw new Error(`Cursor SDK ${name} must have a stable directory ancestor`);
+      }
+      return {
+        path: resolve(ancestor, ...suffix.reverse()),
+        ancestor,
+        identity: statIdentity(canonical),
+      };
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      suffix.push(basename(current));
+      current = parent;
+    }
+  }
 }
 function canonicalDirectory(value) {
   if (typeof value !== "string" || !isAbsolute(value)) throw new TypeError("target cwd must be an absolute path");
