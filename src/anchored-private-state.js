@@ -44,6 +44,7 @@ class AnchoredPrivateState {
   #maxBytes;
   #closed = false;
   #leases = new Set();
+  #leaseFailure;
 
   constructor(directory, identity, handle, helper, maxBytes = DEFAULT_MAX_BYTES) {
     if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new RangeError("maxBytes must be a positive integer");
@@ -75,30 +76,53 @@ class AnchoredPrivateState {
   async acquireWriterLock(name) {
     this.#assertOpen();
     validateName(name);
+    await this.assertCurrent();
     const child = this.#spawn(["lock", name]);
-    const ready = await waitForReady(child);
+    const tracked = trackChild(child);
+    const ready = await waitForReady(child, tracked);
     if (!ready) throw new Error("anchored writer lock did not become ready");
     let released = false;
-    const lease = {
+    const record = {
+      invalid: undefined,
       release: async () => {
         if (released) return;
         released = true;
-        this.#leases.delete(lease);
-        child.stdin.end();
-        await childResult(child);
+        this.#leases.delete(record);
+        if (!child.stdin.destroyed) child.stdin.end();
+        const outcome = await tracked.result;
+        if (outcome.error || outcome.code !== 0) throw childExitError(outcome, tracked.stderr());
       },
     };
-    this.#leases.add(lease);
-    return lease;
+    this.#leases.add(record);
+    void tracked.result.then((outcome) => {
+      if (!released) {
+        record.invalid = childExitError(outcome, tracked.stderr());
+        this.#leaseFailure ??= record.invalid;
+      }
+    });
+    return { release: record.release };
   }
 
   async assertCurrent() {
     this.#assertOpen();
+    if (this.#leaseFailure) throw new Error("anchored writer lock was lost", { cause: this.#leaseFailure });
+    for (const lease of this.#leases) {
+      if (lease.invalid) throw new Error("anchored writer lock was lost", { cause: lease.invalid });
+    }
     const state = await this.#handle.stat();
     if (!state.isDirectory() || !sameIdentity(state, this.identity)) {
       throw new Error("anchored private-state directory descriptor changed");
     }
     assertPrivate(state, "anchored private-state directory");
+    let pathname;
+    try { pathname = await lstat(this.directory); }
+    catch (error) {
+      throw new Error("anchored private-state directory pathname changed", { cause: error });
+    }
+    if (!pathname.isDirectory() || pathname.isSymbolicLink() || !sameIdentity(pathname, this.identity)) {
+      throw new Error("anchored private-state directory pathname changed");
+    }
+    assertPrivate(pathname, "anchored private-state directory");
   }
 
   async close() {
@@ -192,27 +216,39 @@ async function childResult(child) {
   return Buffer.concat(stdout);
 }
 
-async function waitForReady(child) {
+function trackChild(child) {
+  const errors = [];
+  child.stderr.on("data", (chunk) => errors.push(chunk));
+  const result = new Promise((resolve) => {
+    child.once("error", (error) => resolve({ error, code: null, signal: null }));
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+  return { result, stderr: () => Buffer.concat(errors).toString("utf8").trim() };
+}
+
+function childExitError(outcome, detail = "") {
+  if (outcome.error) return outcome.error;
+  const error = new Error(detail || `anchored private-state helper exited with ${outcome.code ?? outcome.signal}`);
+  if (outcome.code === 2) error.code = "ENOENT";
+  if (detail.includes("writer lock is already held")) error.code = "instance_already_running";
+  return error;
+}
+
+async function waitForReady(child, tracked) {
   let output = Buffer.alloc(0);
-  let errors = Buffer.alloc(0);
-  child.stderr.on("data", (chunk) => { errors = Buffer.concat([errors, chunk]); });
   return new Promise((resolve, reject) => {
-    const onError = (error) => { cleanup(); reject(error); };
-    const onClose = (code) => {
+    const onExit = (outcome) => {
       cleanup();
-      reject(new Error(errors.toString("utf8").trim() || `anchored writer-lock helper exited with ${code}`));
+      reject(childExitError(outcome, tracked.stderr()));
     };
     const onData = (chunk) => {
       output = Buffer.concat([output, chunk]);
       if (output.includes("ready\n")) { cleanup(); resolve(true); }
     };
     const cleanup = () => {
-      child.off("error", onError);
-      child.off("close", onClose);
       child.stdout.off("data", onData);
     };
-    child.on("error", onError);
-    child.on("close", onClose);
+    void tracked.result.then(onExit);
     child.stdout.on("data", onData);
   });
 }

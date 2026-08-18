@@ -1,9 +1,10 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { openAnchoredPrivateState } from "../src/anchored-private-state.js";
@@ -59,11 +60,11 @@ test("directory replacement receives no descriptor-relative write or lock mutati
   await rename(directory, captured);
   await mkdir(directory, { mode: 0o700 });
   t.after(() => rm(captured, { recursive: true, force: true }));
-  await state.writeFileAtomic("provenance.json", "captured");
-  const lease = await state.acquireWriterLock("writer.lock");
-  await lease.release();
-  assert.equal(await readFile(join(captured, "provenance.json"), "utf8"), "captured");
+  await assert.rejects(state.writeFileAtomic("provenance.json", "captured"), /pathname changed/);
+  await assert.rejects(state.acquireWriterLock("writer.lock"), /pathname changed/);
+  await assert.rejects(readFile(join(captured, "provenance.json")), { code: "ENOENT" });
   await assert.rejects(readFile(join(directory, "provenance.json")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(captured, "writer.lock")), { code: "ENOENT" });
   await assert.rejects(lstat(join(directory, "writer.lock")), { code: "ENOENT" });
 });
 
@@ -72,7 +73,8 @@ test("writer locks serialize helpers and release never unlinks a replacement", a
   const second = await openAnchoredPrivateState(directory, { helperPath });
   t.after(() => second.close());
   const firstLease = await state.acquireWriterLock("writer.lock");
-  await assert.rejects(second.acquireWriterLock("writer.lock"), /already held/);
+  await assert.rejects(second.acquireWriterLock("writer.lock"),
+    (error) => error.code === "instance_already_running" && /already held/.test(error.message));
   await rename(join(directory, "writer.lock"), join(directory, "held.lock"));
   await writeFile(join(directory, "writer.lock"), "replacement", { mode: 0o600 });
   await assert.rejects(second.acquireWriterLock("writer.lock"), /already held/);
@@ -80,6 +82,37 @@ test("writer locks serialize helpers and release never unlinks a replacement", a
   assert.equal(await readFile(join(directory, "writer.lock"), "utf8"), "replacement");
   const secondLease = await second.acquireWriterLock("writer.lock");
   await secondLease.release();
+});
+
+test("writer-lock metadata rejects hard links without corrupting their target", async (t) => {
+  const { directory, state } = await fixture(t);
+  const provenance = join(directory, "provenance.json");
+  await writeFile(provenance, "durable provenance", { mode: 0o600 });
+  await link(provenance, join(directory, "writer.lock"));
+  await assert.rejects(state.acquireWriterLock("writer.lock"), /must not be hard-linked/);
+  assert.equal(await readFile(provenance, "utf8"), "durable provenance");
+  assert.equal(await readFile(join(directory, "writer.lock"), "utf8"), "durable provenance");
+});
+
+test("writer-lock helper termination invalidates the state and release observes an earlier close", async (t) => {
+  const { directory, state } = await fixture(t);
+  await state.writeFileAtomic("provenance.json", "original");
+  const lease = await state.acquireWriterLock("writer.lock");
+  const metadata = await readFile(join(directory, "writer.lock"), "utf8");
+  const helperPid = Number(/^helper_pid=(\d+)$/m.exec(metadata)?.[1]);
+  assert.ok(Number.isSafeInteger(helperPid) && helperPid > 0);
+  process.kill(helperPid, "SIGKILL");
+  await waitFor(async () => {
+    try { await state.assertCurrent(); return false; }
+    catch (error) { return /writer lock was lost/.test(error.message); }
+  });
+  await assert.rejects(state.writeFileAtomic("provenance.json", "mutated"), /writer lock was lost/);
+  await assert.rejects(Promise.race([
+    lease.release(),
+    delay(1_000).then(() => { throw new Error("release timed out"); }),
+  ]), (error) => !/release timed out/.test(error.message));
+  await assert.rejects(state.assertCurrent(), /writer lock was lost/);
+  assert.equal(await readFile(join(directory, "provenance.json"), "utf8"), "original");
 });
 
 test("opening rejects non-canonical, linked, or accessible directories and mutable helpers", async (t) => {
@@ -117,4 +150,13 @@ async function fixture(t, options = {}) {
     await rm(directory, { recursive: true, force: true });
   });
   return { directory, state };
+}
+
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await delay(10);
+  }
+  throw new Error("condition was not met before timeout");
 }

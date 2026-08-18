@@ -161,7 +161,10 @@ static void lock_file(const char *name) {
   struct stat state;
   if (fstat(fd, &state) != 0) fail("cannot inspect writer lock");
   validate_file(&state);
-  if (ftruncate(fd, 0) != 0 || dprintf(fd, "pid=%ld\n", (long) getppid()) < 0 || fsync(fd) != 0) {
+  if (state.st_nlink != 1) reject("writer lock must not be hard-linked");
+  if (ftruncate(fd, 0) != 0
+      || dprintf(fd, "pid=%ld\nhelper_pid=%ld\n", (long) getppid(), (long) getpid()) < 0
+      || fsync(fd) != 0) {
     fail("cannot initialize writer lock");
   }
   if (close(fd) != 0) fail("cannot close writer-lock metadata");

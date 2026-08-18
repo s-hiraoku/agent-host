@@ -112,9 +112,14 @@ await adapter.open();
 
 The backend holds the validated directory descriptor for its lifetime. Reads, exclusive
 0600 temporary creation, file fsync, same-directory rename, directory fsync, and writer
-locking all execute relative to that descriptor. Writer exclusion uses a kernel lock on
+locking all execute relative to that descriptor. Every operation also verifies that the
+configured pathname still names the captured directory identity, so a renamed or replaced
+directory fails closed before descriptor-relative mutation. Writer exclusion uses a kernel lock on
 a separately opened descriptor for the anchored directory inode, so replacing the
-metadata basename cannot create a second writer. Lock metadata is intentionally retained;
+metadata basename cannot create a second writer. Existing hard-linked lock metadata is
+rejected before truncation. The backend tracks the lock helper after readiness and treats
+unexpected termination as a lost lease, preventing later state operations. Contention is
+reported as `instance_already_running`. Lock metadata is intentionally retained;
 release closes the directory lock and never unlinks a pathname that may have been
 replaced. `close()` releases all leases and the directory
 descriptor. Inputs are basename-only and bounded; symlinks, non-regular files, unsafe
