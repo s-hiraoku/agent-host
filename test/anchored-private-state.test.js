@@ -33,7 +33,9 @@ test("production backend rejects root execution or unprivileged paths", async ()
 
 test("persistent anchored private-state integration", { skip: !privileged }, async (t) => {
   await t.test("helper rejects root execution", async () => {
-    await assert.rejects(promisify(execFile)("sudo", ["-n", privilegedHelper, "serve", privilegedDirectory]));
+    await assert.rejects(promisify(execFile)("sudo", ["-n", privilegedHelper, "serve", privilegedDirectory]),
+      (error) => error?.code !== 0
+        && /anchored-private-state: root execution is unsupported for the same-UID threat model/.test(error.stderr));
   });
 
   await t.test("trusted helper still rejects a state directory below a writable ancestor", async () => {
@@ -52,6 +54,17 @@ test("persistent anchored private-state integration", { skip: !privileged }, asy
     lease = await state.acquireWriterLock("basic.lock");
     assert.equal(await state.readFileBounded("basic.json", 32), "hello");
     await lease.release();
+    await state.dispose();
+  });
+
+  await t.test("clean helper exit leaves no bounded-exit timer referenced", async () => {
+    const timeoutCount = () => process.getActiveResourcesInfo().filter((type) => type === "Timeout").length;
+    const before = timeoutCount();
+    const state = await productionState();
+    const lease = await state.acquireWriterLock("timer-cleanup.lock");
+    await lease.release();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(timeoutCount() <= before, "bounded-exit timers are cleared after helper termination");
     await state.dispose();
   });
 
@@ -181,6 +194,7 @@ test("persistent anchored private-state integration", { skip: !privileged }, asy
     const lease = await state.acquireWriterLock("death.lock");
     const metadata = await readFile(join(privilegedDirectory, "death.lock"), "utf8");
     const helperPid = Number(/^helper_pid=(\d+)$/m.exec(metadata)?.[1]);
+    assert.ok(Number.isInteger(helperPid) && helperPid > 1, "helper metadata contains a safe process id");
     process.kill(helperPid, "SIGKILL");
     await waitFor(() => !lease.isHeld());
     await assert.rejects(state.assertCurrent(), /poisoned/);
@@ -195,6 +209,7 @@ test("persistent anchored private-state integration", { skip: !privileged }, asy
     await state.writeFileAtomic("input-death.json", "original");
     const metadata = await readFile(join(privilegedDirectory, "input-death.lock"), "utf8");
     const helperPid = Number(/^helper_pid=(\d+)$/m.exec(metadata)?.[1]);
+    assert.ok(Number.isInteger(helperPid) && helperPid > 1, "helper metadata contains a safe process id");
     process.kill(helperPid, "SIGSTOP");
     const writing = state.writeFileAtomic("input-death.json", Buffer.alloc(1_000_000, 0x78));
     await delay(20);

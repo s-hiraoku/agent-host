@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, rename, rm } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -19,7 +19,11 @@ try {
     `${repository}/native/anchored-private-state.c`, "-o", temporary,
   ]);
   await chmod(temporary, 0o500);
-  await rename(temporary, output);
+  try { await link(temporary, output); }
+  catch (error) {
+    if (error?.code === "EEXIST") throw new Error(`refusing to replace existing helper: ${output}`, { cause: error });
+    throw error;
+  }
 } finally {
   await rm(temporary, { force: true });
 }

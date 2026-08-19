@@ -1278,6 +1278,38 @@ test("Cursor SDK malformed provenance suppresses capabilities and fails closed",
   assert.equal((await readFile(provenanceFile, "utf8")).includes("must-not-reset"), true);
 });
 
+test("Cursor SDK does not treat a post-read identity failure as missing provenance", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-post-read-identity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  const storeDirectory = join(directory, "sdk-store");
+  const privateDirectory = join(directory, "private");
+  await mkdir(cwd);
+  await mkdir(storeDirectory, { mode: 0o700 });
+  await mkdir(privateDirectory, { mode: 0o700 });
+  const missing = Object.assign(new Error("provenance identity disappeared"), { code: "ENOENT" });
+  let identityChecks = 0;
+  const adapter = new CursorSdkAdapter({
+    bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
+    credentialSource: fixtureCredentialSource(),
+    sdkVersion: "1.0.28",
+    storeDirectory,
+    provenanceFile: join(privateDirectory, "provenance.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+    privateState: fixtureFileSystem(privateDirectory, {
+      async readFileBounded() { return JSON.stringify({ schemaVersion: 1, records: [] }); },
+      async assertCurrent() {
+        identityChecks += 1;
+        if (identityChecks === 3) throw missing;
+      },
+    }),
+  });
+  t.after(() => adapter.destroy());
+  await assert.rejects(adapter.open(), (error) => error === missing);
+  assert.equal(identityChecks, 3);
+  assert.equal(adapter.launchCapabilities(), null);
+});
+
 test("Cursor SDK provenance write failure occurs before bridge invocation", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-write-failure-"));
   let adapter;

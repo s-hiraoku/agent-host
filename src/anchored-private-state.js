@@ -312,7 +312,9 @@ class NativeSession {
   }
 
   async #boundedExit(afterAcknowledgedClose) {
-    const first = await Promise.race([this.#exit, delay(1_000).then(() => null)]);
+    const firstTimeout = exitTimeout(1_000);
+    const first = await Promise.race([this.#exit, firstTimeout.promise]);
+    firstTimeout.cancel();
     if (first) {
       if (afterAcknowledgedClose && (first.error || first.code !== 0)) {
         throw new Error("anchored private-state helper failed after close acknowledgement");
@@ -321,7 +323,9 @@ class NativeSession {
       return;
     }
     this.#child.kill("SIGTERM");
-    const second = await Promise.race([this.#exit, delay(250).then(() => null)]);
+    const secondTimeout = exitTimeout(250);
+    const second = await Promise.race([this.#exit, secondTimeout.promise]);
+    secondTimeout.cancel();
     if (!second) this.#child.kill("SIGKILL");
     await this.#exit;
     if (!afterAcknowledgedClose) throw this.#failure ?? new Error("anchored private-state helper did not exit");
@@ -416,4 +420,11 @@ function writeTo(stream, buffer) {
   });
 }
 
-function delay(milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
+function exitTimeout(milliseconds) {
+  let timer;
+  const promise = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), milliseconds);
+    timer.unref?.();
+  });
+  return { promise, cancel: () => clearTimeout(timer) };
+}

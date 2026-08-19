@@ -141,7 +141,7 @@ static void validate_trusted_ancestor(int fd) {
   }
   errno = 0;
   if (faccessat(fd, ".", W_OK, AT_EACCESS) == 0) reject("state ancestor is writable by the effective user");
-  if (errno != EACCES && errno != EROFS) fatal("cannot verify effective write access to state ancestor");
+  if (errno != EACCES && errno != EPERM && errno != EROFS) fatal("cannot verify effective write access to state ancestor");
 }
 
 static void open_protected_directory(const char *configured) {

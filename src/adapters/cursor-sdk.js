@@ -511,19 +511,9 @@ export class CursorSdkProvenanceStore {
 
   async #load() {
     await this.#assertOpen();
+    let contents;
     try {
-      const parsed = JSON.parse(await this.#privateState.readFileBounded(this.#file, MAX_STATE_BYTES));
-      await this.#assertOpen();
-      if (parsed?.schemaVersion !== STATE_SCHEMA_VERSION || Object.keys(parsed).some((key) => !STATE_KEYS.has(key))
-        || !Array.isArray(parsed.records)
-        || parsed.records.length > MAX_RECORDS) throw new Error("invalid Cursor SDK provenance state");
-      const records = parsed.records.map(validateRecord);
-      if (new Set(records.map((record) => record.attemptId)).size !== records.length
-        || new Set(records.map((record) => record.agentId)).size !== records.length
-        || new Set(records.map((record) => record.providerAgentId)).size !== records.length) {
-        throw new Error("invalid Cursor SDK provenance state");
-      }
-      return { schemaVersion: STATE_SCHEMA_VERSION, records };
+      contents = await this.#privateState.readFileBounded(this.#file, MAX_STATE_BYTES);
     } catch (error) {
       if (error?.code === "ENOENT") {
         await this.#assertOpen();
@@ -531,6 +521,18 @@ export class CursorSdkProvenanceStore {
       }
       throw error;
     }
+    const parsed = JSON.parse(contents);
+    await this.#assertOpen();
+    if (parsed?.schemaVersion !== STATE_SCHEMA_VERSION || Object.keys(parsed).some((key) => !STATE_KEYS.has(key))
+      || !Array.isArray(parsed.records)
+      || parsed.records.length > MAX_RECORDS) throw new Error("invalid Cursor SDK provenance state");
+    const records = parsed.records.map(validateRecord);
+    if (new Set(records.map((record) => record.attemptId)).size !== records.length
+      || new Set(records.map((record) => record.agentId)).size !== records.length
+      || new Set(records.map((record) => record.providerAgentId)).size !== records.length) {
+      throw new Error("invalid Cursor SDK provenance state");
+    }
+    return { schemaVersion: STATE_SCHEMA_VERSION, records };
   }
 
   async #save(state) {
