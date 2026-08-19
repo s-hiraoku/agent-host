@@ -113,7 +113,7 @@ export class CursorSdkAdapter {
         throw new Error("Cursor SDK private state must be outside configured workspaces");
       }
     }
-    this.#state = new CursorSdkProvenanceStore(provenanceFile, options.fs, this.#now);
+    this.#state = new CursorSdkProvenanceStore(provenanceFile, options.privateState, this.#now);
     this.#scope = createHash("sha256").update(this.#storeDirectory).digest("base64url").slice(0, 16);
     this.#credentialSource = validateCredentialSource(options.credentialSource);
   }
@@ -264,8 +264,20 @@ export class CursorSdkAdapter {
     if (this.#destroyed) return Promise.resolve();
     this.#destroyed = true;
     this.#destroying = (async () => {
-      try { await this.close(); }
-      finally { this.#credentialSource.destroy(); }
+      const errors = [];
+      this.#lifecycleGeneration += 1;
+      this.#ready = false;
+      if (this.#closing) {
+        try { await this.#closing; }
+        catch (error) { errors.push(error); }
+      } else {
+        await Promise.allSettled([...this.#activeOperations]);
+      }
+      try { await this.#state.dispose(); }
+      catch (error) { errors.push(error); }
+      try { this.#credentialSource.destroy(); }
+      catch (error) { errors.push(error); }
+      throwDisposalErrors(errors);
     })();
     return this.#destroying;
   }
@@ -365,30 +377,26 @@ export class CursorSdkAdapter {
 export class CursorSdkProvenanceStore {
   #file;
   #directory;
-  #configuredDirectoryIdentity;
   #lockFile;
-  #read;
-  #write;
-  #acquireLock;
+  #privateState;
   #now;
   #lease;
-  #directoryIdentity;
-  #lockIdentity;
+  #disposing;
+  #disposed = false;
   #tail = Promise.resolve();
 
-  constructor(file, fs = {}, now = Date.now) {
+  constructor(file, privateState, now = Date.now) {
     const directory = canonicalPrivateDirectory(dirname(file), "provenance directory");
     this.#directory = directory.path;
-    this.#configuredDirectoryIdentity = directory.identity;
-    this.#file = join(this.#directory, basename(file));
+    this.#file = basename(file);
     this.#lockFile = `${this.#file}.writer.lock`;
-    if (!["readPrivateFileBounded", "writePrivateFileAtomic", "acquireInstanceLock"]
-      .every((name) => typeof fs[name] === "function")) {
+    if (!privateState || privateState.directory !== this.#directory
+      || !sameIdentity(privateState.identity, directory.identity)
+      || !["readFileBounded", "writeFileAtomic", "acquireWriterLock", "assertCurrent", "close"]
+        .every((name) => typeof privateState[name] === "function")) {
       throw new TypeError("Cursor SDK provenance requires injected anchored private-state capabilities");
     }
-    this.#read = fs.readPrivateFileBounded;
-    this.#write = fs.writePrivateFileAtomic;
-    this.#acquireLock = fs.acquireInstanceLock;
+    this.#privateState = privateState;
     this.#now = now;
   }
 
@@ -397,8 +405,7 @@ export class CursorSdkProvenanceStore {
       await this.#open();
       try { await this.#load(); }
       catch (error) {
-        await this.#lease?.release().catch(() => {});
-        this.#lease = undefined;
+        await this.#releaseLease().catch(() => {});
         throw error;
       }
     });
@@ -458,124 +465,109 @@ export class CursorSdkProvenanceStore {
 
   async assertCurrent() {
     return this.#exclusive(async () => {
-      await this.#assertOpenIdentity();
+      await this.#assertOpen();
     });
   }
 
   async close() {
     return this.#exclusive(async () => {
-      const lease = this.#lease;
-      if (!lease) {
-        this.#clearLeaseState();
-        return;
-      }
-      try { await lease.release(); }
-      catch (error) {
-        if (!await this.#leaseStillOwned()) this.#clearLeaseState();
-        throw error;
-      }
-      this.#clearLeaseState();
+      await this.#releaseLease();
     });
   }
 
+  async dispose() {
+    if (this.#disposing) return this.#disposing;
+    this.#disposed = true;
+    const disposing = this.#exclusive(async () => {
+      const errors = [];
+      const lease = this.#lease;
+      try { await this.#releaseLease(); }
+      catch (error) { errors.push(error); }
+      try {
+        if (typeof this.#privateState.dispose === "function") await this.#privateState.dispose();
+        else await this.#privateState.close();
+      } catch (error) { errors.push(error); }
+      finally { if (this.#lease === lease) this.#lease = undefined; }
+      throwDisposalErrors(errors);
+    });
+    this.#disposing = disposing;
+    return disposing;
+  }
+
   async #load() {
-    await this.#assertOpenIdentity();
+    await this.#assertOpen();
+    let contents;
     try {
-      const parsed = JSON.parse(await this.#read(this.#file, MAX_STATE_BYTES, this.#capabilityOptions()));
-      await this.#assertOpenIdentity();
-      if (parsed?.schemaVersion !== STATE_SCHEMA_VERSION || Object.keys(parsed).some((key) => !STATE_KEYS.has(key))
-        || !Array.isArray(parsed.records)
-        || parsed.records.length > MAX_RECORDS) throw new Error("invalid Cursor SDK provenance state");
-      const records = parsed.records.map(validateRecord);
-      if (new Set(records.map((record) => record.attemptId)).size !== records.length
-        || new Set(records.map((record) => record.agentId)).size !== records.length
-        || new Set(records.map((record) => record.providerAgentId)).size !== records.length) {
-        throw new Error("invalid Cursor SDK provenance state");
-      }
-      return { schemaVersion: STATE_SCHEMA_VERSION, records };
+      contents = await this.#privateState.readFileBounded(this.#file, MAX_STATE_BYTES);
     } catch (error) {
       if (error?.code === "ENOENT") {
-        await this.#assertOpenIdentity();
+        await this.#assertOpen();
         return { schemaVersion: STATE_SCHEMA_VERSION, records: [] };
       }
       throw error;
     }
+    const parsed = JSON.parse(contents);
+    await this.#assertOpen();
+    if (parsed?.schemaVersion !== STATE_SCHEMA_VERSION || Object.keys(parsed).some((key) => !STATE_KEYS.has(key))
+      || !Array.isArray(parsed.records)
+      || parsed.records.length > MAX_RECORDS) throw new Error("invalid Cursor SDK provenance state");
+    const records = parsed.records.map(validateRecord);
+    if (new Set(records.map((record) => record.attemptId)).size !== records.length
+      || new Set(records.map((record) => record.agentId)).size !== records.length
+      || new Set(records.map((record) => record.providerAgentId)).size !== records.length) {
+      throw new Error("invalid Cursor SDK provenance state");
+    }
+    return { schemaVersion: STATE_SCHEMA_VERSION, records };
   }
 
   async #save(state) {
-    await this.#assertOpenIdentity();
-    await this.#write(this.#file, `${JSON.stringify(state)}\n`, this.#capabilityOptions());
-    await this.#assertOpenIdentity();
+    await this.#assertOpen();
+    await this.#privateState.writeFileAtomic(this.#file, `${JSON.stringify(state)}\n`);
+    await this.#assertOpen();
   }
   async #open() {
+    if (this.#disposed) throw new Error("Cursor SDK provenance store is disposed");
     if (this.#lease) {
-      await this.#assertOpenIdentity();
+      await this.#assertOpen();
       return;
     }
-    await assertDirectoryIdentity(
-      this.#directory,
-      this.#configuredDirectoryIdentity,
-      "provenance",
-    );
-    this.#lease = await this.#acquireLock(this.#lockFile, this.#capabilityOptions());
+    this.#lease = await this.#privateState.acquireWriterLock(this.#lockFile);
     try {
-      const before = await directoryIdentity(this.#directory, "provenance");
-      const lock = await fileIdentity(this.#lockFile, "provenance writer lock");
-      const after = await directoryIdentity(this.#directory, "provenance");
-      if (!sameIdentity(before, after)) throw new Error("Cursor SDK provenance changed after configuration");
-      this.#directoryIdentity = after;
-      this.#lockIdentity = lock;
+      await this.#privateState.assertCurrent();
     } catch (error) {
-      await this.#lease.release().catch(() => {});
-      this.#lease = undefined;
+      await this.#releaseLease().catch(() => {});
       throw error;
     }
   }
-  async #assertOpenIdentity() {
-    if (!this.#lease || !this.#directoryIdentity || !this.#lockIdentity) {
+  async #assertOpen() {
+    if (!this.#lease) {
       throw new Error("Cursor SDK provenance store is not open");
     }
-    const before = await directoryIdentity(this.#directory, "provenance");
-    const lock = await fileIdentity(this.#lockFile, "provenance writer lock");
-    const after = await directoryIdentity(this.#directory, "provenance");
-    if (!sameIdentity(before, this.#directoryIdentity) || !sameIdentity(after, this.#directoryIdentity)
-      || !sameIdentity(lock, this.#lockIdentity)) {
-      throw new Error("Cursor SDK provenance changed after configuration");
+    await this.#privateState.assertCurrent();
+  }
+  async #releaseLease() {
+    const lease = this.#lease;
+    if (!lease) {
+      this.#lease = undefined;
+      return;
     }
-  }
-  async #leaseStillOwned() {
-    try {
-      const before = await lstat(this.#directory);
-      const lock = await lstat(this.#lockFile);
-      const after = await lstat(this.#directory);
-      return before.isDirectory() && !before.isSymbolicLink()
-        && after.isDirectory() && !after.isSymbolicLink()
-        && lock.isFile() && !lock.isSymbolicLink()
-        && sameIdentity(statIdentity(before), this.#directoryIdentity)
-        && sameStatIdentity(before, after)
-        && sameIdentity(statIdentity(lock), this.#lockIdentity);
-    } catch (error) {
-      if (error?.code === "ENOENT") return false;
-      return true;
+    try { await lease.release(); }
+    catch (error) {
+      if (lease.isHeld?.() !== true && this.#lease === lease) this.#lease = undefined;
+      throw error;
     }
-  }
-  #clearLeaseState() {
-    this.#lease = undefined;
-    this.#directoryIdentity = undefined;
-    this.#lockIdentity = undefined;
-  }
-  #capabilityOptions() {
-    return {
-      directory: this.#directory,
-      directoryIdentity: { ...this.#configuredDirectoryIdentity },
-      prepareDirectory: false,
-    };
+    if (this.#lease === lease) this.#lease = undefined;
   }
   #exclusive(operation) {
     const next = this.#tail.then(operation, operation);
     this.#tail = next.catch(() => {});
     return next;
   }
+}
+
+function throwDisposalErrors(errors) {
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "Cursor SDK terminal disposal failed");
 }
 
 function validateBridge(bridge) {
@@ -754,19 +746,6 @@ async function assertDirectoryIdentity(path, expected, kind) {
   if (!expected || !sameIdentity(actual, expected)) {
     throw new Error(`Cursor SDK ${kind} changed after configuration`);
   }
-}
-async function fileIdentity(path, kind) {
-  let stat;
-  try { stat = await lstat(path); }
-  catch (error) {
-    if (error?.code === "ENOENT") throw new Error(`Cursor SDK ${kind} changed after configuration`);
-    throw error;
-  }
-  if (!stat.isFile() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())
-    || (stat.mode & 0o077) !== 0) {
-    throw new Error(`Cursor SDK ${kind} changed after configuration`);
-  }
-  return statIdentity(stat);
 }
 function statIdentity(stat) { return { dev: stat.dev, ino: stat.ino }; }
 function sameIdentity(left, right) { return left.dev === right.dev && left.ino === right.ino; }

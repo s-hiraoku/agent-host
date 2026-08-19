@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { lstatSync, realpathSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { CursorSdkAdapter, createCursorSdkCredentialSource } from "../src/adapters/cursor-sdk.js";
 import { AgentRegistry } from "../src/core/registry.js";
@@ -46,7 +47,7 @@ test("Cursor SDK adapter rejects absent or unbranded credential sources", async 
     storeDirectory: fixture.storeDirectory,
     provenanceFile: fixture.provenanceFile,
     targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
-    fs: fixtureFileSystem(),
+    privateState: fixtureFileSystem(dirname(fixture.provenanceFile)),
   };
   assert.throws(
     () => new CursorSdkAdapter(options),
@@ -882,7 +883,7 @@ test("Cursor SDK accepts pre-created private state below an ordinary ancestor", 
     storeDirectory,
     provenanceFile: join(provenanceDirectory, "cursor-sdk.json"),
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
-    fs: fixtureFileSystem(),
+    privateState: fixtureFileSystem(provenanceDirectory),
   });
   await adapter.open();
   assert.ok(adapter.launchCapabilities());
@@ -900,7 +901,7 @@ test("Cursor SDK never creates a missing store and rejects linked stores", async
     storeDirectory: join(directory, "sdk-store"),
     provenanceFile: join(directory, "provenance", "cursor-sdk.json"),
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
-    fs: fixtureFileSystem(),
+    privateState: fixtureFileSystem(join(directory, "provenance")),
   };
   assert.throws(() => new CursorSdkAdapter(options), /pre-created private directory/);
   await symlink(cwd, options.storeDirectory);
@@ -1028,7 +1029,7 @@ test("Cursor SDK provenance admits only one injected writer", async (t) => {
     storeDirectory: first.storeDirectory,
     provenanceFile: first.provenanceFile,
     targets: [{ id: "workspace-a", cwd: first.cwd, profiles: ["safe"] }],
-    fs: fixtureFileSystem(),
+    privateState: fixtureFileSystem(dirname(first.provenanceFile)),
   });
   t.after(() => second.close());
   await first.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
@@ -1083,21 +1084,25 @@ test("Cursor SDK fixture capabilities never mutate a replaced provenance directo
 test("Cursor SDK provenance reopen reacquires its lease after release fails", async (t) => {
   let acquisitions = 0;
   const fixture = await makeFixture(t, {}, {
-    fs: fixtureFileSystem({
-      async acquireInstanceLock(path, options) {
-        await assertAnchoredPrivateState(options);
-        acquisitions += 1;
-        const lease = await acquireInstanceLock(path, { prepareDirectory: false });
-        if (acquisitions !== 1) return lease;
-        return {
-          ...lease,
-          async release() {
-            await lease.release();
-            throw new Error("synthetic release failure");
-          },
-        };
-      },
-    }),
+    privateStateFactory(directory) {
+      const privateState = fixtureFileSystem(directory);
+      const acquire = privateState.acquireWriterLock.bind(privateState);
+      return {
+        ...privateState,
+        async acquireWriterLock(name) {
+          acquisitions += 1;
+          const lease = await acquire(name);
+          if (acquisitions !== 1) return lease;
+          return {
+            ...lease,
+            async release() {
+              await lease.release();
+              throw new Error("synthetic release failure");
+            },
+          };
+        },
+      };
+    },
   });
 
   await assert.rejects(fixture.adapter.close(), /synthetic release failure/);
@@ -1105,25 +1110,170 @@ test("Cursor SDK provenance reopen reacquires its lease after release fails", as
   assert.equal(acquisitions, 2);
 });
 
+test("Cursor SDK initial-load cleanup retains only a still-held writer lease", async (t) => {
+  await t.test("a pre-unlock failure is retained for retry and terminal backend cleanup", async (t) => {
+    const fixture = await makeLeaseCleanupFixture(t, { failurePoint: "load", releaseFailure: "pre-unlock" });
+    await assert.rejects(fixture.adapter.open(), (error) => error === fixture.cleanupError);
+    await fixture.adapter.open();
+    assert.equal(fixture.acquisitions(), 1);
+    await assert.rejects(fixture.adapter.destroy(), /synthetic pre-unlock release failure/);
+    assert.equal(fixture.releaseCalls(), 2);
+    assert.equal(fixture.backendCloses(), 1);
+
+    const replacement = new CursorSdkAdapter({
+      bridge: fixture.bridge,
+      credentialSource: fixtureCredentialSource(),
+      sdkVersion: "1.0.28",
+      storeDirectory: fixture.storeDirectory,
+      provenanceFile: fixture.provenanceFile,
+      targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
+      privateState: fixtureFileSystem(fixture.privateDirectory),
+    });
+    await replacement.open();
+    await replacement.destroy();
+  });
+
+  await t.test("a post-unlock failure clears the lease and reacquires on retry", async (t) => {
+    const fixture = await makeLeaseCleanupFixture(t, { failurePoint: "load", releaseFailure: "post-unlock" });
+    await assert.rejects(fixture.adapter.open(), (error) => error === fixture.cleanupError);
+    await fixture.adapter.open();
+    assert.equal(fixture.acquisitions(), 2);
+    await fixture.adapter.destroy();
+    assert.equal(fixture.releaseCalls(), 2);
+    assert.equal(fixture.backendCloses(), 1);
+  });
+});
+
+test("Cursor SDK post-acquire identity cleanup retains only a still-held writer lease", async (t) => {
+  await t.test("a pre-unlock failure retains the lease for retry and terminal cleanup", async (t) => {
+    const fixture = await makeLeaseCleanupFixture(t, { failurePoint: "assert", releaseFailure: "pre-unlock" });
+    await assert.rejects(fixture.adapter.open(), (error) => error === fixture.cleanupError);
+    await fixture.adapter.open();
+    assert.equal(fixture.acquisitions(), 1);
+    await assert.rejects(fixture.adapter.destroy(), /synthetic pre-unlock release failure/);
+    assert.equal(fixture.releaseCalls(), 2);
+    assert.equal(fixture.backendCloses(), 1);
+
+    const replacement = new CursorSdkAdapter({
+      bridge: fixture.bridge,
+      credentialSource: fixtureCredentialSource(),
+      sdkVersion: "1.0.28",
+      storeDirectory: fixture.storeDirectory,
+      provenanceFile: fixture.provenanceFile,
+      targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
+      privateState: fixtureFileSystem(fixture.privateDirectory),
+    });
+    await replacement.open();
+    await replacement.destroy();
+  });
+
+  await t.test("a post-unlock failure clears the lease and reacquires on retry", async (t) => {
+    const fixture = await makeLeaseCleanupFixture(t, { failurePoint: "assert", releaseFailure: "post-unlock" });
+    await assert.rejects(fixture.adapter.open(), (error) => error === fixture.cleanupError);
+    await fixture.adapter.open();
+    assert.equal(fixture.acquisitions(), 2);
+    await fixture.adapter.destroy();
+    assert.equal(fixture.releaseCalls(), 2);
+    assert.equal(fixture.backendCloses(), 1);
+  });
+});
+
+test("Cursor SDK close releases only its lease and destroy terminates the injected backend", async (t) => {
+  let backendCloses = 0;
+  let backendDisposals = 0;
+  const fixture = await makeFixture(t, {}, {
+    privateStateFactory(directory) {
+      return {
+        ...fixtureFileSystem(directory),
+        async close() { backendCloses += 1; },
+        async dispose() { backendDisposals += 1; },
+      };
+    },
+  });
+
+  await fixture.adapter.close();
+  assert.equal(backendCloses, 0);
+  await fixture.adapter.open();
+  await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await fixture.adapter.destroy();
+  assert.equal(backendCloses, 0);
+  assert.equal(backendDisposals, 1);
+  await assert.rejects(fixture.adapter.open(), /destroyed/);
+});
+
+test("Cursor SDK terminal destroy abandons a lease after graceful release fails", async (t) => {
+  let backendDisposals = 0;
+  let underlyingLease;
+  const fixture = await makeFixture(t, {}, {
+    expectDestroyFailure: true,
+    privateStateFactory(directory) {
+      const privateState = fixtureFileSystem(directory);
+      const acquire = privateState.acquireWriterLock.bind(privateState);
+      return {
+        ...privateState,
+        async acquireWriterLock(name) {
+          underlyingLease = await acquire(name);
+          return {
+            isHeld: () => underlyingLease.isHeld(),
+            async release() { throw new Error("synthetic held-lease release failure"); },
+          };
+        },
+        async dispose() {
+          backendDisposals += 1;
+          await underlyingLease.release();
+          throw new Error("synthetic backend disposal failure");
+        },
+      };
+    },
+  });
+
+  const first = fixture.adapter.destroy();
+  const second = fixture.adapter.destroy();
+  assert.equal(second, first);
+  for (const disposal of [first, second]) {
+    await assert.rejects(disposal, (error) => error instanceof AggregateError
+      && error.errors.some((entry) => /held-lease release failure/.test(entry.message))
+      && error.errors.some((entry) => /backend disposal failure/.test(entry.message)));
+  }
+  assert.equal(backendDisposals, 1);
+
+  const replacement = new CursorSdkAdapter({
+    bridge: fixture.bridge,
+    credentialSource: fixtureCredentialSource(),
+    sdkVersion: "1.0.28",
+    storeDirectory: fixture.storeDirectory,
+    provenanceFile: fixture.provenanceFile,
+    targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
+    privateState: fixtureFileSystem(dirname(fixture.provenanceFile)),
+  });
+  t.after(() => replacement.destroy());
+  await replacement.open();
+  await replacement.close();
+});
+
 test("Cursor SDK provenance retains its lease when release fails before unlocking", async (t) => {
   let acquisitions = 0;
   let releaseCalls = 0;
   const fixture = await makeFixture(t, {}, {
-    fs: fixtureFileSystem({
-      async acquireInstanceLock(path, options) {
-        await assertAnchoredPrivateState(options);
-        acquisitions += 1;
-        const lease = await acquireInstanceLock(path, { prepareDirectory: false });
-        return {
-          ...lease,
-          async release() {
-            releaseCalls += 1;
-            if (releaseCalls === 1) throw new Error("synthetic pre-unlock release failure");
-            await lease.release();
-          },
-        };
-      },
-    }),
+    privateStateFactory(directory) {
+      const privateState = fixtureFileSystem(directory);
+      const acquire = privateState.acquireWriterLock.bind(privateState);
+      return {
+        ...privateState,
+        async acquireWriterLock(name) {
+          acquisitions += 1;
+          const lease = await acquire(name);
+          return {
+            ...lease,
+            async release() {
+              releaseCalls += 1;
+              if (releaseCalls === 1) throw new Error("synthetic pre-unlock release failure");
+              await lease.release();
+            },
+          };
+        },
+      };
+    },
   });
 
   await assert.rejects(fixture.adapter.close(), /synthetic pre-unlock release failure/);
@@ -1155,7 +1305,7 @@ test("Cursor SDK close drains in-flight bridge work before releasing its writer 
     storeDirectory: first.storeDirectory,
     provenanceFile: first.provenanceFile,
     targets: [{ id: "workspace-a", cwd: first.cwd, profiles: ["safe"] }],
-    fs: fixtureFileSystem(),
+    privateState: fixtureFileSystem(dirname(first.provenanceFile)),
   });
   const launch = first.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   await started;
@@ -1188,12 +1338,44 @@ test("Cursor SDK malformed provenance suppresses capabilities and fails closed",
     storeDirectory: join(directory, "sdk-store"),
     provenanceFile,
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
-    fs: fixtureFileSystem(),
+    privateState: fixtureFileSystem(privateDirectory),
   });
   assert.equal(adapter.launchCapabilities(), null);
   await assert.rejects(adapter.open(), /invalid Cursor SDK provenance state/);
   assert.equal(adapter.launchCapabilities(), null);
   assert.equal((await readFile(provenanceFile, "utf8")).includes("must-not-reset"), true);
+});
+
+test("Cursor SDK does not treat a post-read identity failure as missing provenance", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-post-read-identity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  const storeDirectory = join(directory, "sdk-store");
+  const privateDirectory = join(directory, "private");
+  await mkdir(cwd);
+  await mkdir(storeDirectory, { mode: 0o700 });
+  await mkdir(privateDirectory, { mode: 0o700 });
+  const missing = Object.assign(new Error("provenance identity disappeared"), { code: "ENOENT" });
+  let identityChecks = 0;
+  const adapter = new CursorSdkAdapter({
+    bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
+    credentialSource: fixtureCredentialSource(),
+    sdkVersion: "1.0.28",
+    storeDirectory,
+    provenanceFile: join(privateDirectory, "provenance.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+    privateState: fixtureFileSystem(privateDirectory, {
+      async readFileBounded() { return JSON.stringify({ schemaVersion: 1, records: [] }); },
+      async assertCurrent() {
+        identityChecks += 1;
+        if (identityChecks === 3) throw missing;
+      },
+    }),
+  });
+  t.after(() => adapter.destroy());
+  await assert.rejects(adapter.open(), (error) => error === missing);
+  assert.equal(identityChecks, 3);
+  assert.equal(adapter.launchCapabilities(), null);
 });
 
 test("Cursor SDK provenance write failure occurs before bridge invocation", async (t) => {
@@ -1221,9 +1403,9 @@ test("Cursor SDK provenance write failure occurs before bridge invocation", asyn
     storeDirectory: join(directory, "sdk-store"),
     provenanceFile: join(directory, "private", "provenance.json"),
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
-    fs: fixtureFileSystem({
-      async readPrivateFileBounded() { throw missing; },
-      async writePrivateFileAtomic() { throw new Error("synthetic atomic write failure"); },
+    privateState: fixtureFileSystem(join(directory, "private"), {
+      async readFileBounded() { throw missing; },
+      async writeFileAtomic() { throw new Error("synthetic atomic write failure"); },
     }),
   });
   await adapter.open();
@@ -1292,7 +1474,7 @@ test("Cursor SDK provenance capacity rejects before bridge invocation", async (t
     storeDirectory: fixture.storeDirectory,
     provenanceFile: fixture.provenanceFile,
     targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
-    fs: fixtureFileSystem(),
+    privateState: fixtureFileSystem(dirname(fixture.provenanceFile)),
   });
   await adapter.open();
   await assert.rejects(
@@ -1345,6 +1527,82 @@ test("injected Cursor SDK adapter composes with the durable launch coordinator",
   assert.equal(JSON.stringify(agent.metadata).includes("fixture-secret"), false);
 });
 
+async function makeLeaseCleanupFixture(t, { failurePoint, releaseFailure }) {
+  const directory = await mkdtemp(join(tmpdir(), `agent-host-cursor-sdk-${failurePoint}-${releaseFailure}-`));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  const storeDirectory = join(directory, "sdk-store");
+  const privateDirectory = join(directory, "private");
+  await mkdir(cwd);
+  await mkdir(storeDirectory, { mode: 0o700 });
+  await mkdir(privateDirectory, { mode: 0o700 });
+  const base = fixtureFileSystem(privateDirectory);
+  const acquire = base.acquireWriterLock.bind(base);
+  const read = base.readFileBounded.bind(base);
+  const assertCurrent = base.assertCurrent.bind(base);
+  const cleanupError = new Error(`synthetic ${failurePoint} cleanup failure`);
+  let reads = 0;
+  let identityChecks = 0;
+  let acquisitions = 0;
+  let releaseCalls = 0;
+  let backendCloses = 0;
+  let underlyingLease;
+  const privateState = {
+    ...base,
+    async readFileBounded(name, maximumBytes) {
+      reads += 1;
+      if (failurePoint === "load" && reads === 1) throw cleanupError;
+      return read(name, maximumBytes);
+    },
+    async assertCurrent() {
+      identityChecks += 1;
+      if (failurePoint === "assert" && identityChecks === 1) throw cleanupError;
+      return assertCurrent();
+    },
+    async acquireWriterLock(name) {
+      acquisitions += 1;
+      underlyingLease = await acquire(name);
+      return {
+        isHeld: () => underlyingLease.isHeld(),
+        async release() {
+          releaseCalls += 1;
+          if (releaseFailure === "pre-unlock") {
+            throw new Error("synthetic pre-unlock release failure");
+          }
+          await underlyingLease.release();
+          if (releaseCalls === 1) throw new Error("synthetic post-unlock release failure");
+        },
+      };
+    },
+    async close() {
+      backendCloses += 1;
+      if (underlyingLease?.isHeld()) await underlyingLease.release();
+    },
+  };
+  const bridge = { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} };
+  const options = {
+    bridge,
+    credentialSource: fixtureCredentialSource(),
+    sdkVersion: "1.0.28",
+    storeDirectory,
+    provenanceFile: join(privateDirectory, "provenance.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+    privateState,
+  };
+  return {
+    adapter: new CursorSdkAdapter(options),
+    bridge,
+    cwd,
+    storeDirectory,
+    privateDirectory,
+    provenanceFile: options.provenanceFile,
+    cleanupError,
+    acquisitions: () => acquisitions,
+    releaseCalls: () => releaseCalls,
+    backendCloses: () => backendCloses,
+  };
+}
+
 async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-"));
   const agents = new Map();
@@ -1365,13 +1623,14 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
   const provenanceFile = join(directory, "private", "cursor-sdk-provenance.json");
   await mkdir(storeDirectory, { mode: 0o700 });
   await mkdir(join(directory, "private"), { mode: 0o700 });
-  const fileSystem = adapterOptions.fs ?? fixtureFileSystem(adapterOptions.afterProvenanceWrite ? {
-    async writePrivateFileAtomic(...args) {
-      await assertAnchoredPrivateState(args[2]);
-      await writePrivateFileAtomic(args[0], args[1]);
-      await adapterOptions.afterProvenanceWrite({ cwd });
-    },
-  } : {});
+  const privateState = adapterOptions.privateState
+    ?? adapterOptions.privateStateFactory?.(dirname(provenanceFile))
+    ?? fixtureFileSystem(dirname(provenanceFile), adapterOptions.afterProvenanceWrite ? {
+      async writeFileAtomic(name, contents) {
+        await writePrivateFileAtomic(join(dirname(provenanceFile), name), contents);
+        await adapterOptions.afterProvenanceWrite({ cwd });
+      },
+    } : {});
   const adapter = new CursorSdkAdapter({
     bridge,
     credentialSource: adapterOptions.credentialSource ?? fixtureCredentialSource(),
@@ -1380,30 +1639,50 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
     provenanceFile,
     targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
     now: adapterOptions.now,
-    fs: fileSystem,
+    privateState,
   });
   await adapter.open();
   t.after(async () => {
     try { await adapter.destroy(); }
+    catch (error) {
+      if (!adapterOptions.expectDestroyFailure) throw error;
+    }
     finally { await rm(directory, { recursive: true, force: true }); }
   });
   return { adapter, bridge, agents, cwd, directory, storeDirectory, provenanceFile };
 }
 
-function fixtureFileSystem(overrides = {}) {
+function fixtureFileSystem(directory, overrides = {}) {
+  directory = realpathSync(directory);
+  const identity = lstatSync(directory);
   return {
-    async readPrivateFileBounded(path, maximumBytes, options) {
-      await assertAnchoredPrivateState(options);
-      return readPrivateFileBounded(path, maximumBytes);
+    directory,
+    identity: { dev: identity.dev, ino: identity.ino },
+    async readFileBounded(name, maximumBytes) {
+      return readPrivateFileBounded(join(directory, basename(name)), maximumBytes);
     },
-    async writePrivateFileAtomic(path, contents, options) {
-      await assertAnchoredPrivateState(options);
-      return writePrivateFileAtomic(path, contents);
+    async writeFileAtomic(name, contents) {
+      return writePrivateFileAtomic(join(directory, basename(name)), contents);
     },
-    async acquireInstanceLock(path, options) {
-      await assertAnchoredPrivateState(options);
-      return acquireInstanceLock(path, { prepareDirectory: false });
+    async acquireWriterLock(name) {
+      const lease = await acquireInstanceLock(join(directory, basename(name)), { prepareDirectory: false });
+      let held = true;
+      return {
+        async release() {
+          if (!held) return;
+          try { await lease.release(); }
+          finally { held = false; }
+        },
+        isHeld() { return held; },
+      };
     },
+    async assertCurrent() {
+      const current = await lstat(directory);
+      if (current.dev !== identity.dev || current.ino !== identity.ino || !current.isDirectory() || current.isSymbolicLink()) {
+        throw new Error("Cursor SDK provenance changed after configuration");
+      }
+    },
+    async close() {},
     ...overrides,
   };
 }

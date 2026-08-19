@@ -202,6 +202,9 @@ async function releaseFixture(t) {
   await mkdir(join(root, "scripts"), { recursive: true });
   await cp(join(repository, "scripts", "build-release.js"), join(root, "scripts", "build-release.js"));
   await cp(join(repository, "scripts", "release-artifact-policy.js"), join(root, "scripts", "release-artifact-policy.js"));
+  await cp(join(repository, "scripts", "build-anchored-private-state-helper.js"),
+    join(root, "scripts", "build-anchored-private-state-helper.js"));
+  await cp(join(repository, "native"), join(root, "native"), { recursive: true });
   await writeFile(join(root, "scripts", "manage-installation.js"), "");
   for (const file of ["LICENSE", "README.md", "CHANGELOG.md"]) await writeFile(join(root, file), "fixture\n");
   for (const directory of ["src", "docs", "dashboard-source/dist"]) await mkdir(join(root, directory), { recursive: true });

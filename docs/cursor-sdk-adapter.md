@@ -44,14 +44,16 @@ identity is redacted and therefore rejected rather than trusted. This credential
 does not approve an SDK dependency, bridge implementation, normal-runtime registration,
 distribution model, or use of `Cursor.auth.login()`.
 
-Trusted composition must pre-create the dedicated store and provenance parent as
-owner-only canonical directories, inject bounded private-state read, atomic write, and
-writer-lock capabilities, and call `open()` successfully before registering the adapter.
+Trusted composition must pre-create the dedicated store and provenance directory,
+open the provenance directory with
+`openAnchoredPrivateState`, inject that scoped backend, and call `open()` successfully
+before registering the adapter.
 The adapter does not recursively create either directory. The injected state capabilities
 must keep every mutation anchored to the validated provenance directory, must not prepare
 its parent path, and must fail closed if that identity changes. This explicit capability
-boundary is required because Node's pathname APIs do not provide portable `openat`/
-`mkdirat` semantics against concurrent same-user path replacement. Capabilities remain
+boundary uses the repository's small POSIX helper because Node's pathname APIs do not
+provide portable `openat` semantics against concurrent same-user path replacement.
+Capabilities remain
 absent if opening fails. Every bridge invocation rechecks both the configured workspace
 and pre-created store identities and fails closed after replacement, symlink, or
 store-permission drift; the separately reviewed bridge owns its store mutation boundary.
@@ -76,6 +78,69 @@ version, the bridge namespace, a hash-derived store scope, canonical-target dige
 and derived agent IDs. It does not contain workspace or store paths, prompts, messages,
 credentials, or provider responses.
 
+## Anchored private-state backend
+
+The production backend supports Linux and macOS and fails closed elsewhere. It rejects
+root execution because root cannot be protected from a hostile process with the same UID.
+Build the auditable C helper on the target platform, then install the binary and state
+root through a privileged provisioning step:
+
+```sh
+npm run native:build -- /tmp/agent-host-anchored-state
+sudo install -d -o root -g root -m 0755 /opt/agent-host /opt/agent-host/bin /opt/agent-host/state
+sudo install -o root -g root -m 0555 /tmp/agent-host-anchored-state /opt/agent-host/bin/anchored-private-state
+sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0700 "/opt/agent-host/state/$(id -u)"
+```
+
+Use the platform's root group (`wheel` on typical macOS installations) where it differs.
+The builder requires a C11 compiler and refuses to replace an existing output. The
+release archive contains the builder and reviewed C source, not a cross-platform binary.
+The installed helper must be a root-owned, executable, non-writable regular file. Every
+ancestor of both the helper and state directory must be root-owned, group/other
+non-writable, and not writable by the effective user (including through an ACL). The
+final state directory alone is current-user-owned mode `0700`. Paths under a home,
+workspace, `/tmp`, or another user-writable ancestor are rejected rather than accepted
+with a pathname-only fallback.
+
+```js
+import { openAnchoredPrivateState } from "./src/anchored-private-state.js";
+
+const privateState = await openAnchoredPrivateState(provenanceDirectory, {
+  helperPath: "/opt/agent-host/bin/anchored-private-state",
+});
+const adapter = new CursorSdkAdapter({
+  bridge, sdkVersion, storeDirectory, provenanceFile, targets, privateState,
+});
+await adapter.open();
+```
+
+One persistent native helper owns the directory `flock` and performs every read, bounded
+write, `0600` temporary creation, file fsync, same-directory rename, directory fsync, and
+lock-metadata update for that lease. Node and the helper exchange one sequential request
+at a time through a versioned fixed-header binary protocol; basenames are at most 200
+bytes and payloads at most 1,000,000 bytes. There is no second mutation process between a
+pathname check and a write. The helper opens the canonical state path component by
+component with no-follow semantics and compares the protected parent entry with its held
+directory identity immediately before mutation.
+
+Unexpected helper exit permanently poisons that private-state object. An in-flight write
+is ambiguous and is never retried. A later newly opened object may acquire the kernel
+lock and removes only validated, current-user-owned, single-link `0600`
+`.agent-host-*.tmp` crash remnants before proceeding. Symlinks, hard links, FIFOs,
+unsafe modes, malformed/oversized protocol frames, and unsupported platforms terminate
+the session fail-closed. Contention is reported as `instance_already_running`.
+
+Adapter and provenance-store `close()` release the current writer lease without disposing
+the injected backend, so a later `open()` creates a fresh persistent helper session.
+Adapter `destroy()` is terminal and disposes the backend; a poisoned backend remains
+poisoned across `close()` and cannot be reopened. Lock metadata is retained for diagnostics;
+release never unlinks a pathname that another process may have replaced.
+
+The protected-parent contract prevents a same-UID process from renaming the final state
+directory. It does not claim integrity against a same-UID process that directly edits
+files inside a directory it owns. That stronger boundary requires a separate privileged
+broker, a separate UID, or an OS mandatory-access-control policy.
+
 ## Supported-runtime gate
 
 Do not add the Cursor SDK to the normal or optional dependency graph, automatically
@@ -99,3 +164,5 @@ Updating dashboard inputs or output therefore requires an explicit reviewed comp
 change; enabling a provider also requires a reviewed policy-version change. This negative
 artifact proof only establishes absence from a disabled release; it does not approve the
 SDK's license/TOS, dependency risk, credentials, transport, or redistribution.
+The anchored private-state backend closes only the provenance-storage prerequisite; it
+does not close these SDK runtime gates.

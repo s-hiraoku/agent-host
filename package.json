@@ -13,6 +13,8 @@
     "soak": "node --expose-gc scripts/soak.js --cycles=28800",
     "soak:quick": "node --expose-gc scripts/soak.js --cycles=2000",
     "release:build": "node scripts/build-release.js",
+    "native:build": "node scripts/build-anchored-private-state-helper.js",
+    "test:native:privileged": "node --test test/anchored-private-state.test.js test/cursor-sdk.test.js",
     "list": "node src/cli.js list",
     "test": "node --expose-gc --test test/**/*.test.js",
     "check": "find src -name '*.js' -exec node --check {} \\; && npm test"
