@@ -556,20 +556,24 @@ test("Cursor SDK owned discovery preserves healthy records when one bridge looku
   assert.equal(agents[1].discovery.confidence, "high");
 });
 
-test("Cursor SDK owned discovery propagates cancellation instead of returning stale", async (t) => {
+test("Cursor SDK owned discovery sanitizes cancellation before mapping", async (t) => {
   const fixture = await makeFixture(t);
   const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   fixture.bridge.getLocal = async () => { throw new Error("synthetic bridge cancellation"); };
   const controller = new AbortController();
-  controller.abort(new Error("synthetic discovery abort"));
+  const secret = "pre-mapper-abort-secret";
+  controller.abort(new Error(secret));
 
   await assert.rejects(
     fixture.adapter.discoverOwned([ledgerRecord(owned)], { signal: controller.signal }),
-    /synthetic discovery abort/,
+    (error) => error.code === "cursor_operation_cancelled"
+      && error.message === "Cursor SDK operation was cancelled"
+      && !error.message.includes(secret)
+      && !JSON.stringify(error).includes(secret),
   );
 });
 
-test("Cursor SDK owned discovery propagates cancellation after a late lookup result", async (t) => {
+test("Cursor SDK owned discovery sanitizes cancellation during a lookup", async (t) => {
   const fixture = await makeFixture(t);
   const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   let lookupStarted;
@@ -582,13 +586,21 @@ test("Cursor SDK owned discovery propagates cancellation after a late lookup res
     return fixture.agents.get(agentId) ?? null;
   };
   const controller = new AbortController();
-  const abortReason = new Error("synthetic delayed discovery abort");
+  const secret = "in-flight-abort-secret";
+  const abortReason = new Error(secret);
   const discovery = fixture.adapter.discoverOwned([ledgerRecord(owned)], { signal: controller.signal });
   await started;
   controller.abort(abortReason);
   finishLookup();
 
-  await assert.rejects(discovery, (error) => error === abortReason);
+  await assert.rejects(
+    discovery,
+    (error) => error !== abortReason
+      && error.code === "cursor_operation_cancelled"
+      && error.message === "Cursor SDK operation was cancelled"
+      && !error.message.includes(secret)
+      && !JSON.stringify(error).includes(secret),
+  );
 });
 
 test("Cursor SDK owned discovery bounds bridge concurrency", async (t) => {

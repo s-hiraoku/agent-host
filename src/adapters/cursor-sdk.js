@@ -210,14 +210,14 @@ export class CursorSdkAdapter {
           throwIfAborted(signal);
         }
         catch (error) {
-          throwIfAborted(signal, error);
+          throwIfAborted(signal);
           return this.#agent(record, provenance);
         }
         try {
           await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
           throwIfAborted(signal);
         } catch (error) {
-          throwIfAborted(signal, error);
+          throwIfAborted(signal);
           throw error;
         }
         let result;
@@ -230,7 +230,7 @@ export class CursorSdkAdapter {
           throwIfAborted(signal);
         }
         catch (error) {
-          throwIfAborted(signal, error);
+          throwIfAborted(signal);
           return this.#agent(record, provenance);
         }
         if (!result) return this.#agent(record, provenance);
@@ -800,8 +800,8 @@ function sameIntent(left, right) {
   ]
     .every((key) => left[key] === right[key]);
 }
-function throwIfAborted(signal, fallback = new Error("Cursor SDK discovery was aborted")) {
-  if (signal?.aborted) throw signal.reason ?? fallback;
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw publicCredentialError(credentialCancellation());
 }
 async function mapConcurrent(values, concurrency, mapper) {
   const results = new Array(values.length);
