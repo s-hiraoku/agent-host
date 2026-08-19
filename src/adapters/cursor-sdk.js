@@ -381,6 +381,8 @@ export class CursorSdkProvenanceStore {
   #privateState;
   #now;
   #lease;
+  #disposing;
+  #disposed = false;
   #tail = Promise.resolve();
 
   constructor(file, privateState, now = Date.now) {
@@ -487,11 +489,24 @@ export class CursorSdkProvenanceStore {
   }
 
   async dispose() {
-    await this.close();
-    return this.#exclusive(async () => {
-      if (typeof this.#privateState.dispose === "function") await this.#privateState.dispose();
-      else await this.#privateState.close();
+    if (this.#disposing) return this.#disposing;
+    this.#disposed = true;
+    const disposing = this.#exclusive(async () => {
+      const errors = [];
+      const lease = this.#lease;
+      this.#lease = undefined;
+      if (lease) {
+        try { await lease.release(); }
+        catch (error) { errors.push(error); }
+      }
+      try {
+        if (typeof this.#privateState.dispose === "function") await this.#privateState.dispose();
+        else await this.#privateState.close();
+      } catch (error) { errors.push(error); }
+      throwDisposalErrors(errors);
     });
+    this.#disposing = disposing;
+    return disposing;
   }
 
   async #load() {
@@ -524,6 +539,7 @@ export class CursorSdkProvenanceStore {
     await this.#assertOpen();
   }
   async #open() {
+    if (this.#disposed) throw new Error("Cursor SDK provenance store is disposed");
     if (this.#lease) {
       await this.#assertOpen();
       return;

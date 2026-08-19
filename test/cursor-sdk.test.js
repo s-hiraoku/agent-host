@@ -47,7 +47,7 @@ test("Cursor SDK adapter rejects absent or unbranded credential sources", async 
     storeDirectory: fixture.storeDirectory,
     provenanceFile: fixture.provenanceFile,
     targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
-    fs: fixtureFileSystem(),
+    privateState: fixtureFileSystem(dirname(fixture.provenanceFile)),
   };
   assert.throws(
     () => new CursorSdkAdapter(options),
@@ -1133,6 +1133,56 @@ test("Cursor SDK close releases only its lease and destroy terminates the inject
   await assert.rejects(fixture.adapter.open(), /destroyed/);
 });
 
+test("Cursor SDK terminal destroy abandons a lease after graceful release fails", async (t) => {
+  let backendDisposals = 0;
+  let underlyingLease;
+  const fixture = await makeFixture(t, {}, {
+    expectDestroyFailure: true,
+    privateStateFactory(directory) {
+      const privateState = fixtureFileSystem(directory);
+      const acquire = privateState.acquireWriterLock.bind(privateState);
+      return {
+        ...privateState,
+        async acquireWriterLock(name) {
+          underlyingLease = await acquire(name);
+          return {
+            isHeld: () => underlyingLease.isHeld(),
+            async release() { throw new Error("synthetic held-lease release failure"); },
+          };
+        },
+        async dispose() {
+          backendDisposals += 1;
+          await underlyingLease.release();
+          throw new Error("synthetic backend disposal failure");
+        },
+      };
+    },
+  });
+
+  const first = fixture.adapter.destroy();
+  const second = fixture.adapter.destroy();
+  assert.equal(second, first);
+  for (const disposal of [first, second]) {
+    await assert.rejects(disposal, (error) => error instanceof AggregateError
+      && error.errors.some((entry) => /held-lease release failure/.test(entry.message))
+      && error.errors.some((entry) => /backend disposal failure/.test(entry.message)));
+  }
+  assert.equal(backendDisposals, 1);
+
+  const replacement = new CursorSdkAdapter({
+    bridge: fixture.bridge,
+    credentialSource: fixtureCredentialSource(),
+    sdkVersion: "1.0.28",
+    storeDirectory: fixture.storeDirectory,
+    provenanceFile: fixture.provenanceFile,
+    targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
+    privateState: fixtureFileSystem(dirname(fixture.provenanceFile)),
+  });
+  t.after(() => replacement.destroy());
+  await replacement.open();
+  await replacement.close();
+});
+
 test("Cursor SDK provenance retains its lease when release fails before unlocking", async (t) => {
   let acquisitions = 0;
   let releaseCalls = 0;
@@ -1418,6 +1468,9 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
   await adapter.open();
   t.after(async () => {
     try { await adapter.destroy(); }
+    catch (error) {
+      if (!adapterOptions.expectDestroyFailure) throw error;
+    }
     finally { await rm(directory, { recursive: true, force: true }); }
   });
   return { adapter, bridge, agents, cwd, directory, storeDirectory, provenanceFile };
