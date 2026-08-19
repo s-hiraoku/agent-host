@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   readOrCreateToken, readPrivateFile, readPrivateFileBufferBounded, readPrivateFileTail, rotateToken,
+  readStrictPrivateFileBufferBounded,
 } from "../src/secure-state.js";
 
 test("token bootstrap and rotation are atomic and owner-only", async (t) => {
@@ -52,6 +53,18 @@ test("token reader rejects an empty persistent token", async (t) => {
   const tokenFile = join(home, "token");
   await writeFile(tokenFile, "\n", { mode: 0o600 });
   await assert.rejects(readOrCreateToken(tokenFile), /token file is empty/);
+});
+
+test("strict credential readers reject disclosed Bridge and API key files instead of repairing them", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-strict-credentials-"));
+  t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));
+  for (const name of ["cursor-bridge.token", "cursor-api.key"]) {
+    const path = join(home, name);
+    await writeFile(path, "credential-value\n", { mode: 0o600 });
+    await chmod(path, 0o640);
+    await assert.rejects(readStrictPrivateFileBufferBounded(path, 100), /must not grant group or other access/);
+    assert.equal((await lstat(path)).mode & 0o777, 0o640);
+  }
 });
 
 test("secure state refuses to change permissions on an existing shared directory", async (t) => {

@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { request as httpRequest } from "node:http";
+import { createRedactor } from "../operations/redact.js";
 import { claimCursorSdkCredentialSource } from "./cursor-sdk.js";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -18,8 +20,6 @@ export function createCursorSdkBridgeClient(options = {}) {
   const endpoint = loopbackEndpoint(options.endpoint);
   const sdkVersion = version(options.sdkVersion);
   const bearerToken = claimCursorSdkCredentialSource(options.bearerTokenSource);
-  const request = options.fetch ?? globalThis.fetch;
-  if (typeof request !== "function") throw new TypeError("Cursor SDK Bridge requires fetch");
   const timeoutMs = positiveInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, "timeoutMs");
   const namespace = `sdkv1-${createHash("sha256").update(endpoint.origin).digest("hex").slice(0, 16)}`;
   let ready = false;
@@ -31,8 +31,10 @@ export function createCursorSdkBridgeClient(options = {}) {
     if (body.length > MAX_REQUEST_BYTES) throw bridgeError("cursor_bridge_request_too_large");
     try {
       return await bearerToken.use(async (token) => {
-        const authorization = `Bearer ${token.toString("utf8")}`;
-        const response = await request(new URL(method, endpoint), {
+        const tokenText = token.toString("utf8");
+        const authorization = `Bearer ${tokenText}`;
+        const redact = createRedactor({ secrets: [tokenText] });
+        const response = await directRequest(new URL(method, endpoint), {
           method: "POST",
           redirect: "error",
           headers: {
@@ -44,12 +46,29 @@ export function createCursorSdkBridgeClient(options = {}) {
           signal: combinedSignal(signal, timeoutMs),
         });
         const parsed = await boundedJson(response, MAX_RESPONSE_BYTES);
-        if (!response.ok) throw connectError(parsed, response.status);
-        return parsed;
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw connectError(parsed, response.statusCode);
+        }
+        return redact(parsed);
       }, signal);
     } finally {
       body.fill(0);
     }
+  };
+
+  const resumeLocal = async ({ agentId, cwd, storeDirectory, credential, signal }) => {
+    assertReady(ready, destroyed);
+    validateOperation(agentId, cwd, storeDirectory, "owned", credential);
+    const resumed = await call(METHODS.resume, {
+      agentId,
+      options: {
+        agentId,
+        apiKey: credential.toString("utf8"),
+        local: { cwd: [cwd], store: { type: "jsonl", rootDir: storeDirectory } },
+      },
+    }, signal);
+    if (resumed?.agentId !== agentId) throw bridgeError("cursor_bridge_agent_mismatch");
+    return { agentId: resumed.agentId };
   };
 
   const client = {
@@ -97,19 +116,12 @@ export function createCursorSdkBridgeClient(options = {}) {
         result = await call(METHODS.get, { agentId, options: { cwd, apiKey } }, signal);
       } catch (error) {
         if (error?.code !== "cursor_bridge_not_found") throw error;
-        const resumed = await call(METHODS.resume, {
-          agentId,
-          options: {
-            agentId,
-            apiKey,
-            local: { cwd: [cwd], store: { type: "jsonl", rootDir: storeDirectory } },
-          },
-        }, signal);
-        if (resumed?.agentId !== agentId) throw bridgeError("cursor_bridge_agent_mismatch");
+        await resumeLocal({ agentId, cwd, storeDirectory, credential, signal });
         result = await call(METHODS.get, { agentId, options: { cwd, apiKey } }, signal);
       }
       return mapAgent(result?.agent, agentId, cwd);
     },
+    resumeLocal,
     async close() {
       await opening?.catch(() => {});
       ready = false;
@@ -165,15 +177,14 @@ function combinedSignal(signal, timeoutMs) {
 }
 
 async function boundedJson(response, maximumBytes) {
-  if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+  if (!header(response, "content-type")?.toLowerCase().startsWith("application/json")) {
     throw bridgeError("cursor_bridge_invalid_response");
   }
-  const declared = Number(response.headers.get("content-length"));
+  const declared = Number(header(response, "content-length"));
   if (Number.isFinite(declared) && declared > maximumBytes) throw bridgeError("cursor_bridge_response_too_large");
-  if (!response.body) throw bridgeError("cursor_bridge_invalid_response");
   const chunks = [];
   let bytes = 0;
-  for await (const chunk of response.body) {
+  for await (const chunk of response) {
     bytes += chunk.length;
     if (bytes > maximumBytes) throw bridgeError("cursor_bridge_response_too_large");
     chunks.push(chunk);
@@ -187,6 +198,24 @@ async function boundedJson(response, maximumBytes) {
     throw bridgeError("cursor_bridge_invalid_response");
   }
   return parsed;
+}
+
+function directRequest(url, { method, headers, body, signal }) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(url, {
+      method,
+      headers: { ...headers, "content-length": body.length },
+      signal,
+      agent: false,
+    }, resolve);
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
+function header(response, name) {
+  const value = response.headers?.[name];
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function connectError(payload, status) {

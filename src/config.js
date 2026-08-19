@@ -315,11 +315,18 @@ function resolveCursorSdkBridge(value, baseDirectory) {
       profiles: Object.freeze([...target.profiles]),
     });
   });
+  const bearerTokenFile = resolveConfiguredPath(
+    value.bearerTokenFile, baseDirectory, "cursorSdkBridge.bearerTokenFile",
+  );
+  const apiKeyFile = resolveConfiguredPath(value.apiKeyFile, baseDirectory, "cursorSdkBridge.apiKeyFile");
+  if (bearerTokenFile === apiKeyFile) {
+    throw new ConfigurationError("cursorSdkBridge bearer token and API key files must be separate");
+  }
   return Object.freeze({
     endpoint: endpoint.origin,
     sdkVersion: value.sdkVersion,
-    bearerTokenFile: resolveConfiguredPath(value.bearerTokenFile, baseDirectory, "cursorSdkBridge.bearerTokenFile"),
-    apiKeyFile: resolveConfiguredPath(value.apiKeyFile, baseDirectory, "cursorSdkBridge.apiKeyFile"),
+    bearerTokenFile,
+    apiKeyFile,
     helperPath: resolveConfiguredPath(value.helperPath, baseDirectory, "cursorSdkBridge.helperPath"),
     storeDirectory: resolveConfiguredPath(value.storeDirectory, baseDirectory, "cursorSdkBridge.storeDirectory"),
     provenanceFile: resolveConfiguredPath(value.provenanceFile, baseDirectory, "cursorSdkBridge.provenanceFile"),

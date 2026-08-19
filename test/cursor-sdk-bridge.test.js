@@ -2,8 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { chmod, lstat, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createCursorSdkBridgeClient } from "../src/adapters/cursor-sdk-transport.js";
+import { CursorSdkBridgeRuntimeAdapter } from "../src/adapters/cursor-sdk-runtime.js";
 import { createCursorSdkCredentialSource } from "../src/adapters/cursor-sdk.js";
+import { readStrictPrivateFileBufferBounded } from "../src/secure-state.js";
 
 const TOKEN = "bridge-token-value";
 const API_KEY = "cursor-api-key-value";
@@ -20,6 +25,28 @@ test("bridge client requires an exact literal loopback origin", () => {
   assert.match(valid.namespace, /^sdkv1-[a-f0-9]{16}$/);
 });
 
+test("runtime preflights both credential files without repairing unsafe modes", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-bridge-preflight-"));
+  t.after(() => import("node:fs/promises").then(({ rm }) => rm(directory, { recursive: true })));
+  for (const unsafe of ["bearerTokenFile", "apiKeyFile"]) {
+    const bearerTokenFile = join(directory, `${unsafe}-bridge.token`);
+    const apiKeyFile = join(directory, `${unsafe}-cursor.key`);
+    await writeFile(bearerTokenFile, TOKEN, { mode: 0o600 });
+    await writeFile(apiKeyFile, API_KEY, { mode: 0o600 });
+    const unsafePath = unsafe === "bearerTokenFile" ? bearerTokenFile : apiKeyFile;
+    await chmod(unsafePath, 0o640);
+    const subject = new CursorSdkBridgeRuntimeAdapter({
+      endpoint: "http://127.0.0.1:40555", sdkVersion: "1.0.28",
+      bearerTokenFile, apiKeyFile, helperPath: "/unreached/helper",
+      provenanceFile: "/unreached/state/provenance.json", storeDirectory: "/unreached/store",
+      targets: [{ id: "main", cwd: "/unreached/workspace", profiles: ["model"] }],
+    });
+    await assert.rejects(subject.open(), (error) => error.code === "cursor_sdk_credential_unavailable");
+    assert.equal((await lstat(unsafePath)).mode & 0o777, 0o640);
+    await subject.destroy();
+  }
+});
+
 test("bridge client probes sdk.v1 and performs only explicit owned-agent calls", async (t) => {
   const requests = [];
   const bridge = await fakeBridge(async (req, body, response) => {
@@ -32,7 +59,7 @@ test("bridge client probes sdk.v1 and performs only explicit owned-agent calls",
     if (req.url.endsWith("/CreateAgent")) return json(response, 200, { agentId: body.options.agentId });
     if (req.url.endsWith("/GetAgent")) {
       return json(response, 200, { agent: {
-        agentId: body.agentId, name: "Owned Cursor", status: "AGENT_INFO_STATUS_RUNNING",
+        agentId: body.agentId, name: `Owned Cursor ${TOKEN}`, status: "AGENT_INFO_STATUS_RUNNING",
         lastModified: "2026-08-20T00:00:00Z", local: { cwd: body.options.cwd },
       } });
     }
@@ -50,7 +77,7 @@ test("bridge client probes sdk.v1 and performs only explicit owned-agent calls",
   assert.deepEqual(await subject.getLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store", credential: getCredential,
   }), {
-    agentId: "agent-owned", status: "working", name: "Owned Cursor",
+    agentId: "agent-owned", status: "working", name: "Owned Cursor [REDACTED]",
     lastActivityAt: "2026-08-20T00:00:00.000Z",
   });
   assert.deepEqual(requests.map((entry) => entry.url), [
@@ -124,6 +151,108 @@ test("bridge client bounds responses and never retries a failed transport call",
   await subject.destroy();
 });
 
+test("bridge client maps authentication failure without exposing or retrying credentials", async (t) => {
+  let calls = 0;
+  const bridge = await fakeBridge(async (_req, _body, response) => {
+    calls += 1;
+    json(response, 401, { code: "unauthenticated", message: TOKEN });
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await assert.rejects(subject.open(), (error) => {
+    assert.equal(error.code, "cursor_bridge_unauthenticated");
+    assert.equal(String(error).includes(TOKEN), false);
+    return true;
+  });
+  assert.equal(calls, 1);
+  await subject.destroy();
+});
+
+test("bridge client times out and does not retry an ambiguous request", async (t) => {
+  let calls = 0;
+  const server = createServer(async (request) => {
+    calls += 1;
+    for await (const _chunk of request) { /* consume the issued request */ }
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const { port } = server.address();
+  const subject = createCursorSdkBridgeClient({
+    endpoint: `http://127.0.0.1:${port}`,
+    sdkVersion: "1.0.28",
+    timeoutMs: 20,
+    bearerTokenSource: createCursorSdkCredentialSource(TOKEN),
+  });
+  await assert.rejects(subject.open());
+  assert.equal(calls, 1);
+  await subject.destroy();
+});
+
+test("bridge client never retries an ambiguous CreateAgent disconnect", async (t) => {
+  let creates = 0;
+  const bridge = await fakeBridge(async (req, _body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    creates += 1;
+    response.socket.destroy();
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  await assert.rejects(subject.createLocal({
+    agentId: "agent-owned", attemptId: "attempt:00000000-0000-4000-8000-000000000001",
+    cwd: "/workspace", storeDirectory: "/store", profile: "cursor-model", credential: Buffer.from(API_KEY),
+  }));
+  assert.equal(creates, 1);
+  await subject.destroy();
+});
+
+test("bridge client rejects malformed response media without interpreting it", async (t) => {
+  const bridge = await fakeBridge(async (_req, _body, response) => {
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.end('{"message":"pong"}');
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await assert.rejects(subject.open(), (error) => error.code === "cursor_bridge_invalid_response");
+  await subject.destroy();
+});
+
+test("official Cursor SDK Bridge conformance is available as an explicit live opt-in", {
+  skip: !liveConfiguration(),
+}, async () => {
+  const config = liveConfiguration();
+  const subject = createCursorSdkBridgeClient({
+    endpoint: config.endpoint,
+    sdkVersion: process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_VERSION ?? "1.0.28",
+    bearerTokenSource: createCursorSdkCredentialSource(
+      () => readStrictPrivateFileBufferBounded(config.tokenFile, 16_385),
+    ),
+  });
+  const apiKeyFile = await readStrictPrivateFileBufferBounded(config.apiKeyFile, 16_385);
+  const apiKey = trimBuffer(apiKeyFile);
+  try {
+    await subject.open();
+    await subject.createLocal({
+      agentId: config.agentId,
+      attemptId: "attempt:00000000-0000-4000-8000-000000000001",
+      cwd: config.cwd,
+      storeDirectory: config.storeDirectory,
+      profile: config.profile,
+      credential: apiKey,
+    });
+    assert.equal((await subject.getLocal({ ...config, credential: apiKey })).agentId, config.agentId);
+    assert.equal((await subject.resumeLocal({ ...config, credential: apiKey })).agentId, config.agentId);
+    assert.equal((await subject.getLocal({ ...config, credential: apiKey })).agentId, config.agentId);
+  } finally {
+    apiKeyFile.fill(0);
+    await subject.destroy();
+  }
+});
+
 function client(endpoint) {
   return createCursorSdkBridgeClient({
     endpoint,
@@ -154,4 +283,25 @@ function json(response, status, body) {
   const encoded = JSON.stringify(body);
   response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(encoded) });
   response.end(encoded);
+}
+
+function liveConfiguration() {
+  const config = {
+    endpoint: process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_ENDPOINT,
+    tokenFile: process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_TOKEN_FILE,
+    apiKeyFile: process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_API_KEY_FILE,
+    agentId: process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_AGENT_ID,
+    cwd: process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_CWD,
+    storeDirectory: process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_STORE_DIRECTORY,
+    profile: process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_PROFILE,
+  };
+  return Object.values(config).every(Boolean) ? config : undefined;
+}
+
+function trimBuffer(bytes) {
+  let start = 0;
+  let end = bytes.length;
+  while (start < end && [0x09, 0x0a, 0x0d, 0x20].includes(bytes[start])) start += 1;
+  while (end > start && [0x09, 0x0a, 0x0d, 0x20].includes(bytes[end - 1])) end -= 1;
+  return bytes.subarray(start, end);
 }

@@ -52,6 +52,17 @@ export async function readPrivateFileBufferBounded(path, maxBytes) {
   }
 }
 
+export async function readStrictPrivateFileBufferBounded(path, maxBytes) {
+  if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new RangeError("maxBytes must be a positive integer");
+  const { handle, stat } = await openPrivateFile(path, { tighten: false });
+  try {
+    if (stat.size > maxBytes) throw new Error("private state exceeds its size limit");
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function readPrivateFileTail(path, maxBytes) {
   if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new RangeError("maxBytes must be a positive integer");
   const { handle, stat } = await openPrivateFile(path);
@@ -71,7 +82,7 @@ export async function readPrivateFileTail(path, maxBytes) {
   }
 }
 
-async function openPrivateFile(path) {
+async function openPrivateFile(path, { tighten = true } = {}) {
   let handle;
   try {
     const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
@@ -83,7 +94,10 @@ async function openPrivateFile(path) {
       throw new Error(`private state must be a regular file: ${path}`);
     }
     assertOwned(stat, path);
-    if ((stat.mode & 0o077) !== 0) await handle.chmod(0o600);
+    if ((stat.mode & 0o077) !== 0) {
+      if (!tighten) throw new Error(`private state must not grant group or other access: ${path}`);
+      await handle.chmod(0o600);
+    }
     return { handle, stat };
   } catch (error) {
     await handle?.close().catch(() => {});

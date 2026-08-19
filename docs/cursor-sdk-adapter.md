@@ -14,7 +14,9 @@ private auth-token file. Agent Host accepts only a canonical `http://127.0.0.1:<
 `http://[::1]:<port>` origin. Hostnames, remote addresses, TLS endpoints, URL credentials,
 paths, queries, fragments, redirects, and proxy discovery are rejected. Startup sends
 authenticated `Ping` and `GetVersion` calls and requires `protocolVersion: sdk.v1` plus
-the exact configured Bridge version before publishing launch capabilities.
+the exact configured Bridge version before publishing launch capabilities. The transport
+uses a direct one-shot `node:http` socket and does not inherit `fetch`, dispatcher, proxy,
+or agent configuration from the host process.
 
 Both credential files must be owner-only regular files. They are independent: the
 Bridge bearer token authenticates the local transport, while the Cursor API key is sent
@@ -51,6 +53,17 @@ one exact ID from the configured store. It never calls `ListAgents`, adopts arbi
 Bridge agents, or correlates desktop conversations. Prompt, read, interrupt, archive,
 delete, cloud mode, managed Bridge lifecycle, and existing Cursor desktop sessions remain
 out of scope. Transport failures after `CreateAgent` are uncertain and are not retried.
+
+An optional live Create/Get/Resume/Get probe can be included in the normal test command
+by setting `AGENT_HOST_CURSOR_BRIDGE_TEST_ENDPOINT`,
+`AGENT_HOST_CURSOR_BRIDGE_TEST_TOKEN_FILE`, `AGENT_HOST_CURSOR_BRIDGE_TEST_API_KEY_FILE`,
+`AGENT_HOST_CURSOR_BRIDGE_TEST_AGENT_ID`, `AGENT_HOST_CURSOR_BRIDGE_TEST_CWD`,
+`AGENT_HOST_CURSOR_BRIDGE_TEST_STORE_DIRECTORY`, and
+`AGENT_HOST_CURSOR_BRIDGE_TEST_PROFILE`; the version defaults to `1.0.28` and can be
+overridden with `AGENT_HOST_CURSOR_BRIDGE_TEST_VERSION`. Both secrets remain in
+owner-only files. The operator must use a dedicated store and agent ID because this
+explicit conformance test creates local durable state. Without every required value the
+case is skipped.
 
 The boundary accepts only an explicitly injected bridge namespace with an exact
 `sdkVersion` and two operations: create a deterministic local agent ID and inspect that

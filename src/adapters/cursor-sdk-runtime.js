@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import { openAnchoredPrivateState } from "../anchored-private-state.js";
-import { readPrivateFileBufferBounded } from "../secure-state.js";
+import { readStrictPrivateFileBufferBounded } from "../secure-state.js";
 import { createCursorSdkBridgeClient } from "./cursor-sdk-transport.js";
 import { CursorSdkAdapter, createCursorSdkCredentialSource } from "./cursor-sdk.js";
 
@@ -33,6 +33,10 @@ export class CursorSdkBridgeRuntimeAdapter {
 
   async #create() {
     const config = this.#configuration;
+    await Promise.all([
+      preflightCredentialFile(config.bearerTokenFile),
+      preflightCredentialFile(config.apiKeyFile),
+    ]);
     const bearerTokenSource = fileCredentialSource(config.bearerTokenFile);
     const credentialSource = fileCredentialSource(config.apiKeyFile);
     let bridge;
@@ -105,7 +109,7 @@ export class CursorSdkBridgeRuntimeAdapter {
 
 function fileCredentialSource(path) {
   return createCursorSdkCredentialSource(async () => {
-    const bytes = await readPrivateFileBufferBounded(path, MAX_CREDENTIAL_BYTES + 1);
+    const bytes = await readStrictPrivateFileBufferBounded(path, MAX_CREDENTIAL_BYTES + 1);
     let start = 0;
     let end = bytes.length;
     while (start < end && whitespace(bytes[start])) start += 1;
@@ -118,4 +122,20 @@ function fileCredentialSource(path) {
 
 function whitespace(byte) {
   return byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x20;
+}
+
+async function preflightCredentialFile(path) {
+  let bytes;
+  try {
+    bytes = await readStrictPrivateFileBufferBounded(path, MAX_CREDENTIAL_BYTES + 1);
+    let start = 0;
+    let end = bytes.length;
+    while (start < end && whitespace(bytes[start])) start += 1;
+    while (end > start && whitespace(bytes[end - 1])) end -= 1;
+    if (end - start < 8 || end - start > MAX_CREDENTIAL_BYTES) throw new Error("invalid credential");
+  } catch {
+    throw Object.assign(new Error("Cursor SDK credential unavailable"), { code: "cursor_sdk_credential_unavailable" });
+  } finally {
+    bytes?.fill(0);
+  }
 }
