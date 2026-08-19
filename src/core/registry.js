@@ -72,6 +72,8 @@ export class AgentRegistry {
   #refreshPromise;
   #initialLoading = true;
   #closed = false;
+  #opened = false;
+  #opening;
   #revision = 0;
   #repositoryRevision = 0;
   #adapterUnsubscribers = [];
@@ -241,6 +243,27 @@ export class AgentRegistry {
       const capabilities = adapter.launchCapabilities();
       return capabilities ? [capabilities] : [];
     });
+  }
+
+  async open() {
+    if (this.#closed) throw new Error("registry is closed");
+    if (this.#opened) return;
+    if (this.#opening) return this.#opening;
+    this.#opening = (async () => {
+      const opened = [];
+      try {
+        for (const adapter of this.#adapters.values()) {
+          await adapter.open?.();
+          opened.push(adapter);
+        }
+        this.#opened = true;
+      } catch (error) {
+        await Promise.allSettled(opened.map((adapter) => adapter.close?.()));
+        throw error;
+      }
+    })();
+    try { await this.#opening; }
+    finally { this.#opening = undefined; }
   }
 
   async launch(provider, record, options = {}) {
@@ -700,7 +723,10 @@ export class AgentRegistry {
     this.#closeController.abort();
     for (const flight of this.#adapterFlights.values()) flight.controller.abort();
     for (const controller of this.#historyControllers) controller.abort();
-    await Promise.allSettled([...this.#adapters.values()].map((adapter) => adapter.close?.()));
+    await this.#opening?.catch(() => {});
+    await Promise.allSettled([...this.#adapters.values()].map((adapter) => (
+      typeof adapter.destroy === "function" ? adapter.destroy() : adapter.close?.()
+    )));
     await Promise.allSettled([this.#refreshPromise, this.#historyPromise].filter(Boolean));
     this.#adapterFlights.clear();
     this.#historyControllers.clear();

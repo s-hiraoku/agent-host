@@ -107,9 +107,10 @@ scheduler lane and the ledger's single-writer lease until the original promise r
 settles; this deliberately blocks replacement work instead of risking overlapping
 execution or lease-transfer races.
 
-The repository also contains a dependency-free, explicitly injected Cursor SDK adapter
-boundary for contract testing. It is not registered by the normal runtime and does not
-make the currently blocked Cursor SDK a supported dependency. See
+The repository also contains a dependency-free Cursor SDK adapter. It can be registered
+only through the explicit `cursor-sdk-bridge` runtime configuration and attaches to an
+operator-managed, loopback-only official `sdk.v1` Bridge; it never downloads, spawns, or
+packages the Bridge or `@cursor/sdk`. See
 [`docs/cursor-sdk-adapter.md`](docs/cursor-sdk-adapter.md) for its safety boundary and
 explicit no-fallback credential source contract, protected-parent persistent Linux/macOS
 provenance backend, and upstream gates.
@@ -358,7 +359,7 @@ settings are:
 | `port` | `--port` / `AGENT_HOST_PORT` | HTTP port |
 | `refreshMs` | `--refresh-ms` / `AGENT_HOST_REFRESH_MS` | periodic refresh interval |
 | `adapterTimeoutMs` | `--adapter-timeout-ms` / `AGENT_HOST_ADAPTER_TIMEOUT_MS` | per-adapter timeout |
-| `enabledAdapters` | `--enabled-adapters` / `AGENT_HOST_ENABLED_ADAPTERS` | comma-separated `codex,herdr,process,cursor-desktop` subset; Cursor is excluded from the default |
+| `enabledAdapters` | `--enabled-adapters` / `AGENT_HOST_ENABLED_ADAPTERS` | comma-separated `codex,herdr,process,cursor-desktop,cursor-sdk-bridge` subset; Cursor adapters are excluded from the default |
 | `codexTransport` | `--codex-transport` / `AGENT_HOST_CODEX_TRANSPORT` | `owned` or `control` |
 | `codexSocket` | `--codex-socket` / `AGENT_HOST_CODEX_SOCKET` | control-mode Unix socket |
 | `tokenFile` | `--token-file` / `AGENT_HOST_TOKEN_FILE` | private bearer token file |
@@ -370,6 +371,7 @@ settings are:
 | — | `--cursor-user-data-dir` / `AGENT_HOST_CURSOR_USER_DATA_DIR` | optional Cursor user-data root; CLI/environment only |
 | — | `--cursor-projects-dir` / `AGENT_HOST_CURSOR_PROJECTS_DIR` | optional Cursor projects/artifacts root; CLI/environment only |
 | `allowedOrigins` | repeatable `--allowed-origin` / `AGENT_HOST_ALLOWED_ORIGINS` | additional canonical browser origins |
+| `cursorSdkBridge` | JSON file only | explicit external Bridge, credential files, anchored state, targets, and pinned SDK version; required only when `cursor-sdk-bridge` is enabled |
 
 Relative paths in the JSON file resolve from the configuration directory. CLI and
 environment paths resolve from the current working directory. State directories are

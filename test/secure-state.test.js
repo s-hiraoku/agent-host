@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readOrCreateToken, readPrivateFile, readPrivateFileTail, rotateToken } from "../src/secure-state.js";
+import {
+  readOrCreateToken, readPrivateFile, readPrivateFileBufferBounded, readPrivateFileTail, rotateToken,
+} from "../src/secure-state.js";
 
 test("token bootstrap and rotation are atomic and owner-only", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "agent-host-token-"));
@@ -38,6 +40,8 @@ test("private file readers validate and tighten the opened file", async (t) => {
   await writeFile(path, "first\nsecond\n", { mode: 0o644 });
 
   assert.equal(await readPrivateFile(path), "first\nsecond\n");
+  assert.deepEqual(await readPrivateFileBufferBounded(path, 20), Buffer.from("first\nsecond\n"));
+  await assert.rejects(readPrivateFileBufferBounded(path, 3), /size limit/);
   assert.equal((await lstat(path)).mode & 0o777, 0o600);
   assert.equal(await readPrivateFileTail(path, 8), "second\n");
 });

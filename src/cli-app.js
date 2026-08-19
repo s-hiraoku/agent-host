@@ -129,6 +129,7 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
   if (parsed.command === "list") {
     const registry = makeRegistry(configuration, false, dependencies.makeRegistry);
     try {
+      await registry.open?.();
       await registry.refresh();
       print({ agents: (await registry.listView("recent")).agents });
       return 0;
@@ -140,6 +141,7 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
     const payload = rest.length ? JSON.parse(rest.join(" ")) : undefined;
     const registry = makeRegistry(configuration, false, dependencies.makeRegistry);
     try {
+      await registry.open?.();
       await registry.refresh();
       const result = await registry.action(id, action, payload);
       print(result);
@@ -278,6 +280,7 @@ function makeRegistry(configuration, demoMode, factory, operations) {
     codexSocket: configuration.codexSocket,
     cursorUserDataDirectory: configuration.cursorUserDataDirectory,
     cursorProjectsDirectory: configuration.cursorProjectsDirectory,
+    cursorSdkBridge: configuration.cursorSdkBridge,
     enabledAdapters: configuration.enabledAdapters,
   }), { adapterTimeoutMs: configuration.adapterTimeoutMs, operations });
 }
@@ -330,6 +333,7 @@ function diagnosticConfiguration(configuration) {
     dashboardUrl: configuration.dashboardUrl,
     dashboardDirectory: configuration.dashboardDirectory,
     allowedOrigins: configuration.allowedOrigins,
+    cursorSdkBridgeConfigured: Boolean(configuration.cursorSdkBridge),
   };
 }
 
@@ -340,6 +344,12 @@ function privatePaths(configuration) {
     configuration.lockFile,
     configuration.logFile,
     configuration.dashboardDirectory,
+    configuration.cursorSdkBridge?.bearerTokenFile,
+    configuration.cursorSdkBridge?.apiKeyFile,
+    configuration.cursorSdkBridge?.helperPath,
+    configuration.cursorSdkBridge?.storeDirectory,
+    configuration.cursorSdkBridge?.provenanceFile,
+    ...(configuration.cursorSdkBridge?.targets?.map((target) => target.cwd) ?? []),
   ]
     .filter(Boolean);
 }

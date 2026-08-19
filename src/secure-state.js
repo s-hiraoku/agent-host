@@ -41,6 +41,17 @@ export async function readPrivateFileBounded(path, maxBytes) {
   }
 }
 
+export async function readPrivateFileBufferBounded(path, maxBytes) {
+  if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new RangeError("maxBytes must be a positive integer");
+  const { handle, stat } = await openPrivateFile(path);
+  try {
+    if (stat.size > maxBytes) throw new Error("private state exceeds its size limit");
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function readPrivateFileTail(path, maxBytes) {
   if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new RangeError("maxBytes must be a positive integer");
   const { handle, stat } = await openPrivateFile(path);
