@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { CursorSdkAdapter } from "../src/adapters/cursor-sdk.js";
+import { CursorSdkAdapter, createCursorSdkCredentialSource } from "../src/adapters/cursor-sdk.js";
 import { AgentRegistry } from "../src/core/registry.js";
 import { LaunchCoordinator } from "../src/core/launch-coordinator.js";
 import { noCapabilities } from "../src/core/types.js";
@@ -23,6 +23,446 @@ test("Cursor SDK adapter is explicit-injection only and advertises both local ri
     ] }],
   });
   assert.deepEqual(await fixture.adapter.discover(), []);
+});
+
+test("Cursor SDK credential sources are explicit, bounded, and opaque to serialization", async () => {
+  for (const value of [undefined, null, {}, [], "", "short", "x".repeat(16_385)]) {
+    assert.throws(
+      () => createCursorSdkCredentialSource(value),
+      /explicit secret or secret callback|invalid credential/,
+    );
+  }
+  const secret = "cursor-fixture-secret";
+  const source = createCursorSdkCredentialSource(secret);
+  assert.equal(JSON.stringify(source), "{}");
+  assert.equal(JSON.stringify({ credentialSource: source }).includes(secret), false);
+});
+
+test("Cursor SDK adapter rejects absent or unbranded credential sources", async (t) => {
+  const fixture = await makeFixture(t);
+  const options = {
+    bridge: { ...fixture.bridge, namespace: "credential-validation" },
+    sdkVersion: "1.0.28",
+    storeDirectory: fixture.storeDirectory,
+    provenanceFile: fixture.provenanceFile,
+    targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
+    fs: fixtureFileSystem(),
+  };
+  assert.throws(
+    () => new CursorSdkAdapter(options),
+    /explicitly injected credential source/,
+  );
+  assert.throws(
+    () => new CursorSdkAdapter({ ...options, credentialSource: { secret: "cursor-fixture-secret" } }),
+    /explicitly injected credential source/,
+  );
+  assert.throws(
+    () => new CursorSdkAdapter({ ...options, credentialSource: Object.freeze({}) }),
+    /explicitly injected credential source/,
+  );
+  let propertyReads = 0;
+  const proxy = new Proxy({}, {
+    get() {
+      propertyReads += 1;
+      return { claim() { return {}; } };
+    },
+  });
+  assert.throws(
+    () => new CursorSdkAdapter({ ...options, credentialSource: proxy }),
+    /explicitly injected credential source/,
+  );
+  assert.equal(propertyReads, 0);
+  const source = fixtureCredentialSource();
+  const assigned = new CursorSdkAdapter({ ...options, credentialSource: source });
+  t.after(() => assigned.destroy());
+  assert.throws(
+    () => new CursorSdkAdapter({ ...options, credentialSource: new Proxy(source, {
+      get() { propertyReads += 1; return undefined; },
+    }) }),
+    /explicitly injected credential source/,
+  );
+  assert.equal(propertyReads, 0);
+  assert.throws(
+    () => new CursorSdkAdapter({ ...options, credentialSource: source }),
+    /already assigned to an adapter/,
+  );
+});
+
+test("Cursor SDK supplies credentials transiently and redacts bridge results", async (t) => {
+  const secret = "cursor-fixture-secret";
+  let observedCredential;
+  const fixture = await makeFixture(t, {
+    async createLocal(input) {
+      observedCredential = input.credential;
+      assert.ok(Buffer.isBuffer(input.credential));
+      assert.equal(input.credential.toString("utf8"), secret);
+      return { agentId: input.agentId, name: `created with ${secret}` };
+    },
+    async getLocal({ agentId, credential }) {
+      observedCredential = credential;
+      assert.equal(credential.toString("utf8"), secret);
+      return { agentId, status: "idle", name: `owned with ${secret}` };
+    },
+  }, { credentialSource: createCursorSdkCredentialSource(secret) });
+
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+  const agents = await fixture.adapter.discoverOwned([ledgerRecord(owned)]);
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+  assert.equal(JSON.stringify(agents).includes(secret), false);
+  assert.equal(agents[0].name, "owned with [REDACTED]");
+  assert.equal((await readFile(fixture.provenanceFile, "utf8")).includes(secret), false);
+  assert.equal(JSON.stringify(owned).includes(secret), false);
+});
+
+test("Cursor SDK redacts accepted multibyte credentials shorter than eight characters", async (t) => {
+  const secret = "\u79d8\u5bc6\u9375";
+  assert.ok(Buffer.byteLength(secret, "utf8") >= 8);
+  assert.ok(secret.length < 8);
+  const fixture = await makeFixture(t, {
+    async createLocal(input) {
+      return { agentId: input.agentId, name: `created with ${secret}` };
+    },
+    async getLocal({ agentId }) {
+      return { agentId, status: "idle", name: `owned with ${secret}` };
+    },
+  }, { credentialSource: createCursorSdkCredentialSource(secret) });
+
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  const agents = await fixture.adapter.discoverOwned([ledgerRecord(owned)]);
+  assert.equal(agents[0].name, "owned with [REDACTED]");
+  assert.equal(JSON.stringify(agents).includes(secret), false);
+});
+
+test("Cursor SDK redacts creation, reconciliation, discovery, and cancellation failures", async (t) => {
+  const secret = "cursor-fixture-secret";
+  let observedCredential;
+  const failed = await makeFixture(t, {
+    async createLocal({ credential }) {
+      observedCredential = credential;
+      throw new Error(`provider rejected ${secret}`);
+    },
+    async getLocal({ credential }) {
+      observedCredential = credential;
+      throw new Error(`provider rejected ${secret}`);
+    },
+  }, { credentialSource: createCursorSdkCredentialSource(() => secret) });
+  await assert.rejects(
+    failed.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    (error) => error.code === "cursor_bridge_failed"
+      && error.message === "Cursor SDK bridge createLocal failed"
+      && !JSON.stringify(error).includes(secret),
+  );
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+  await assert.rejects(
+    failed.adapter.reconcileLaunch({ id: LAUNCH_ID, attemptId: ATTEMPT_ID, request: resolvedRequest() }),
+    (error) => error.code === "cursor_bridge_failed"
+      && error.message === "Cursor SDK bridge getLocal failed"
+      && !JSON.stringify(error).includes(secret),
+  );
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+
+  const owned = await makeFixture(t, {}, { credentialSource: createCursorSdkCredentialSource(secret) });
+  const launched = await owned.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  owned.bridge.getLocal = async ({ credential }) => {
+    observedCredential = credential;
+    throw new Error(secret);
+  };
+  const stale = await owned.adapter.discoverOwned([ledgerRecord(launched)]);
+  assert.equal(stale[0].status, "unknown");
+  assert.equal(stale[0].discovery.confidence, "low");
+  assert.equal(JSON.stringify(stale).includes(secret), false);
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+
+  const controller = new AbortController();
+  controller.abort(new Error(secret));
+  await assert.rejects(
+    owned.adapter.reconcileLaunch(ledgerRecord(launched), { signal: controller.signal }),
+    (error) => error.code === "cursor_operation_cancelled" && !error.message.includes(secret),
+  );
+});
+
+test("Cursor SDK launch sanitizes an abort racing with bridge rejection", async (t) => {
+  const secret = "launch-abort-reason-secret";
+  let lookupStarted;
+  const started = new Promise((resolve) => { lookupStarted = resolve; });
+  let finishBridge;
+  const bridgeFinished = new Promise((resolve) => { finishBridge = resolve; });
+  const fixture = await makeFixture(t, {
+    async createLocal() {
+      lookupStarted();
+      await bridgeFinished;
+      throw new Error("bridge rejected after abort");
+    },
+  });
+  const attemptId = `attempt:${uuidFor(940)}`;
+  const launchId = `launch:${uuidFor(940)}`;
+  const controller = new AbortController();
+  const launch = fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId, launchId, signal: controller.signal },
+  );
+  await started;
+  controller.abort(new Error(secret));
+  finishBridge();
+
+  await assert.rejects(
+    launch,
+    (error) => error.code === "cursor_operation_cancelled"
+      && error.message === "Cursor SDK operation was cancelled"
+      && !error.message.includes(secret)
+      && !JSON.stringify(error).includes(secret),
+  );
+  const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records.find((record) => record.attemptId === attemptId)?.state, "intent");
+  assert.equal(JSON.stringify(state).includes(secret), false);
+});
+
+test("Cursor SDK reconciliation sanitizes an abort racing with bridge rejection", async (t) => {
+  const secret = "reconcile-abort-reason-secret";
+  const fixture = await makeFixture(t);
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  let lookupStarted;
+  const started = new Promise((resolve) => { lookupStarted = resolve; });
+  let finishBridge;
+  const bridgeFinished = new Promise((resolve) => { finishBridge = resolve; });
+  fixture.bridge.getLocal = async () => {
+    lookupStarted();
+    await bridgeFinished;
+    throw new Error("bridge rejected after abort");
+  };
+  const controller = new AbortController();
+  const reconciliation = fixture.adapter.reconcileLaunch(
+    ledgerRecord(owned),
+    { signal: controller.signal },
+  );
+  await started;
+  controller.abort(new Error(secret));
+  finishBridge();
+
+  await assert.rejects(
+    reconciliation,
+    (error) => error.code === "cursor_operation_cancelled"
+      && error.message === "Cursor SDK operation was cancelled"
+      && !error.message.includes(secret)
+      && !JSON.stringify(error).includes(secret),
+  );
+  const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records.find((record) => record.attemptId === ATTEMPT_ID)?.state, "owned");
+  assert.equal(JSON.stringify(state).includes(secret), false);
+});
+
+test("Cursor SDK masks credential callback failures without fallback", async (t) => {
+  const secret = "cursor-fixture-secret";
+  const fixture = await makeFixture(t, {}, {
+    credentialSource: createCursorSdkCredentialSource(() => { throw new Error(secret); }),
+  });
+  await assert.rejects(
+    fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
+    (error) => error.code === "cursor_credential_unavailable"
+      && error.message === "Cursor SDK credential source is unavailable"
+      && !error.message.includes(secret),
+  );
+  assert.equal((await readFile(fixture.provenanceFile, "utf8")).includes(secret), false);
+});
+
+test("Cursor SDK rejects spoofed public credential error codes", async (t) => {
+  const secret = "cursor-fixture-secret";
+  for (const code of [
+    "cursor_credential_invalid",
+    "cursor_credential_unavailable",
+    "cursor_operation_cancelled",
+  ]) {
+    const callbackError = new Error(`callback leaked ${secret}`);
+    callbackError.code = code;
+    const callbackFixture = await makeFixture(t, {}, {
+      credentialSource: createCursorSdkCredentialSource(() => { throw callbackError; }),
+    });
+    await assert.rejects(
+      callbackFixture.adapter.launch(resolvedRequest(), {
+        attemptId: `attempt:${uuidFor(910 + code.length)}`,
+        launchId: `launch:${uuidFor(910 + code.length)}`,
+      }),
+      (error) => error.code === "cursor_credential_unavailable"
+        && error.message === "Cursor SDK credential source is unavailable"
+        && !error.message.includes(secret),
+    );
+
+    const bridgeError = new Error(`bridge leaked ${secret}`);
+    bridgeError.code = code;
+    const bridgeFixture = await makeFixture(t, {
+      async createLocal() { throw bridgeError; },
+    }, { credentialSource: createCursorSdkCredentialSource(secret) });
+    await assert.rejects(
+      bridgeFixture.adapter.launch(resolvedRequest(), {
+        attemptId: `attempt:${uuidFor(920 + code.length)}`,
+        launchId: `launch:${uuidFor(920 + code.length)}`,
+      }),
+      (error) => error.code === "cursor_bridge_failed"
+        && error.message === "Cursor SDK bridge createLocal failed"
+        && !error.message.includes(secret),
+    );
+  }
+});
+
+test("Cursor SDK rejects captured, mutated, and replayed credential errors", async (t) => {
+  const secret = "cursor-replayed-secret";
+  let replayed;
+  let invocation = 0;
+  const fixture = await makeFixture(t, {}, {
+    credentialSource: createCursorSdkCredentialSource(() => {
+      invocation += 1;
+      if (invocation === 1) return "short";
+      throw replayed;
+    }),
+  });
+
+  await assert.rejects(
+    fixture.adapter.launch(resolvedRequest(), {
+      attemptId: `attempt:${uuidFor(930)}`,
+      launchId: `launch:${uuidFor(930)}`,
+    }),
+    (error) => {
+      replayed = error;
+      return error.code === "cursor_credential_invalid"
+        && error.message === "Cursor SDK credential source returned an invalid credential";
+    },
+  );
+  replayed.code = "cursor_operation_cancelled";
+  replayed.message = secret;
+
+  await assert.rejects(
+    fixture.adapter.launch(resolvedRequest(), {
+      attemptId: `attempt:${uuidFor(931)}`,
+      launchId: `launch:${uuidFor(931)}`,
+    }),
+    (error) => error !== replayed
+      && error.code === "cursor_credential_unavailable"
+      && error.message === "Cursor SDK credential source is unavailable"
+      && !error.message.includes(secret),
+  );
+});
+
+test("Cursor SDK does not consult Proxy properties when classifying external errors", async (t) => {
+  const secret = "cursor-proxy-secret";
+  let propertyReads = 0;
+  const proxyError = () => new Proxy(new Error("untrusted"), {
+    get(target, property, receiver) {
+      propertyReads += 1;
+      if (typeof property === "symbol") return true;
+      if (property === "message" || property === "code") return secret;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+
+  const callbackFixture = await makeFixture(t, {}, {
+    credentialSource: createCursorSdkCredentialSource(() => { throw proxyError(); }),
+  });
+  await assert.rejects(
+    callbackFixture.adapter.launch(resolvedRequest(), {
+      attemptId: `attempt:${uuidFor(932)}`,
+      launchId: `launch:${uuidFor(932)}`,
+    }),
+    (error) => error.code === "cursor_credential_unavailable"
+      && error.message === "Cursor SDK credential source is unavailable"
+      && !error.message.includes(secret),
+  );
+  assert.equal(propertyReads, 0);
+
+  const bridgeFixture = await makeFixture(t, {
+    async createLocal() { throw proxyError(); },
+  }, { credentialSource: createCursorSdkCredentialSource("cursor-fixture-secret") });
+  await assert.rejects(
+    bridgeFixture.adapter.launch(resolvedRequest(), {
+      attemptId: `attempt:${uuidFor(933)}`,
+      launchId: `launch:${uuidFor(933)}`,
+    }),
+    (error) => error.code === "cursor_bridge_failed"
+      && error.message === "Cursor SDK bridge createLocal failed"
+      && !error.message.includes(secret),
+  );
+  assert.equal(propertyReads, 0);
+});
+
+test("Cursor SDK close is reopenable and destroy is terminal", async (t) => {
+  const secret = "cursor-fixture-secret";
+  let observedCredential;
+  const fixture = await makeFixture(t, {
+    async createLocal(input) {
+      observedCredential = input.credential;
+      const agent = { agentId: input.agentId, status: "idle" };
+      fixture.agents.set(input.agentId, agent);
+      return agent;
+    },
+    async getLocal({ agentId, credential }) {
+      observedCredential = credential;
+      return fixture.agents.get(agentId) ?? null;
+    },
+  }, { credentialSource: createCursorSdkCredentialSource(secret) });
+
+  await fixture.adapter.close();
+  assert.equal(fixture.adapter.launchCapabilities(), null);
+  await fixture.adapter.open();
+  assert.ok(fixture.adapter.launchCapabilities());
+  const attemptId = `attempt:${uuidFor(901)}`;
+  const launchId = `launch:${uuidFor(901)}`;
+  const launched = await fixture.adapter.launch(resolvedRequest(), { attemptId, launchId });
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+  assert.deepEqual(await fixture.adapter.reconcileLaunch({
+    id: launchId,
+    attemptId,
+    state: "owned",
+    agentId: launched.agentId,
+    providerAgentId: launched.providerAgentId,
+    request: resolvedRequest(),
+  }), launched);
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+
+  await fixture.adapter.destroy();
+  await fixture.adapter.destroy();
+  assert.equal(fixture.adapter.launchCapabilities(), null);
+  await assert.rejects(fixture.adapter.open(), /adapter is destroyed/);
+});
+
+test("Cursor SDK concurrent destroy callers share the in-flight destruction", async (t) => {
+  let finishCreate;
+  const createBlocked = new Promise((resolve) => { finishCreate = resolve; });
+  const fixture = await makeFixture(t, {
+    async createLocal(input) {
+      await createBlocked;
+      return { agentId: input.agentId, status: "idle" };
+    },
+  });
+  const launch = fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const first = fixture.adapter.destroy();
+  const second = fixture.adapter.destroy();
+  assert.equal(second, first);
+  let secondSettled = false;
+  void second.finally(() => { secondSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondSettled, false);
+
+  finishCreate();
+  await Promise.all([launch, first, second]);
+  assert.equal(secondSettled, true);
+  await assert.rejects(fixture.adapter.open(), /adapter is destroyed/);
 });
 
 test("Cursor SDK launch persists intent before invocation and proves owned discovery", async (t) => {
@@ -59,7 +499,7 @@ test("Cursor SDK reconciliation never recreates an unconfirmed intent", async (t
   });
   await assert.rejects(
     fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID }),
-    /transport lost/,
+    /bridge createLocal failed/,
   );
   const result = await fixture.adapter.reconcileLaunch({
     id: LAUNCH_ID,
@@ -212,20 +652,24 @@ test("Cursor SDK owned discovery preserves healthy records when one bridge looku
   assert.equal(agents[1].discovery.confidence, "high");
 });
 
-test("Cursor SDK owned discovery propagates cancellation instead of returning stale", async (t) => {
+test("Cursor SDK owned discovery sanitizes cancellation before mapping", async (t) => {
   const fixture = await makeFixture(t);
   const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   fixture.bridge.getLocal = async () => { throw new Error("synthetic bridge cancellation"); };
   const controller = new AbortController();
-  controller.abort(new Error("synthetic discovery abort"));
+  const secret = "pre-mapper-abort-secret";
+  controller.abort(new Error(secret));
 
   await assert.rejects(
     fixture.adapter.discoverOwned([ledgerRecord(owned)], { signal: controller.signal }),
-    /synthetic discovery abort/,
+    (error) => error.code === "cursor_operation_cancelled"
+      && error.message === "Cursor SDK operation was cancelled"
+      && !error.message.includes(secret)
+      && !JSON.stringify(error).includes(secret),
   );
 });
 
-test("Cursor SDK owned discovery propagates cancellation after a late lookup result", async (t) => {
+test("Cursor SDK owned discovery sanitizes cancellation during a lookup", async (t) => {
   const fixture = await makeFixture(t);
   const owned = await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
   let lookupStarted;
@@ -238,13 +682,21 @@ test("Cursor SDK owned discovery propagates cancellation after a late lookup res
     return fixture.agents.get(agentId) ?? null;
   };
   const controller = new AbortController();
-  const abortReason = new Error("synthetic delayed discovery abort");
+  const secret = "in-flight-abort-secret";
+  const abortReason = new Error(secret);
   const discovery = fixture.adapter.discoverOwned([ledgerRecord(owned)], { signal: controller.signal });
   await started;
   controller.abort(abortReason);
   finishLookup();
 
-  await assert.rejects(discovery, (error) => error === abortReason);
+  await assert.rejects(
+    discovery,
+    (error) => error !== abortReason
+      && error.code === "cursor_operation_cancelled"
+      && error.message === "Cursor SDK operation was cancelled"
+      && !error.message.includes(secret)
+      && !JSON.stringify(error).includes(secret),
+  );
 });
 
 test("Cursor SDK owned discovery bounds bridge concurrency", async (t) => {
@@ -425,6 +877,7 @@ test("Cursor SDK accepts pre-created private state below an ordinary ancestor", 
   await mkdir(provenanceDirectory, { mode: 0o700 });
   adapter = new CursorSdkAdapter({
     bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
+    credentialSource: fixtureCredentialSource(),
     sdkVersion: "1.0.28",
     storeDirectory,
     provenanceFile: join(provenanceDirectory, "cursor-sdk.json"),
@@ -570,6 +1023,7 @@ test("Cursor SDK provenance admits only one injected writer", async (t) => {
   const first = await makeFixture(t);
   const second = new CursorSdkAdapter({
     bridge: { ...first.bridge, namespace: "fixture-second" },
+    credentialSource: fixtureCredentialSource(),
     sdkVersion: "1.0.28",
     storeDirectory: first.storeDirectory,
     provenanceFile: first.provenanceFile,
@@ -696,6 +1150,7 @@ test("Cursor SDK close drains in-flight bridge work before releasing its writer 
   });
   second = new CursorSdkAdapter({
     bridge: { ...first.bridge, namespace: "fixture-second" },
+    credentialSource: fixtureCredentialSource(),
     sdkVersion: "1.0.28",
     storeDirectory: first.storeDirectory,
     provenanceFile: first.provenanceFile,
@@ -728,6 +1183,7 @@ test("Cursor SDK malformed provenance suppresses capabilities and fails closed",
   await writeFile(provenanceFile, JSON.stringify({ schemaVersion: 999, records: [], secret: "must-not-reset" }), { mode: 0o600 });
   adapter = new CursorSdkAdapter({
     bridge: { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} },
+    credentialSource: fixtureCredentialSource(),
     sdkVersion: "1.0.28",
     storeDirectory: join(directory, "sdk-store"),
     provenanceFile,
@@ -760,6 +1216,7 @@ test("Cursor SDK provenance write failure occurs before bridge invocation", asyn
       async createLocal() { creates += 1; },
       async getLocal() { return null; },
     },
+    credentialSource: fixtureCredentialSource(),
     sdkVersion: "1.0.28",
     storeDirectory: join(directory, "sdk-store"),
     provenanceFile: join(directory, "private", "provenance.json"),
@@ -830,6 +1287,7 @@ test("Cursor SDK provenance capacity rejects before bridge invocation", async (t
       async createLocal() { creates += 1; },
       async getLocal() { return null; },
     },
+    credentialSource: fixtureCredentialSource(),
     sdkVersion: "1.0.28",
     storeDirectory: fixture.storeDirectory,
     provenanceFile: fixture.provenanceFile,
@@ -859,8 +1317,16 @@ test("injected Cursor SDK adapter composes with the durable launch coordinator",
     if (failure) throw failure;
   });
   const fixture = await makeFixture(t);
+  const ledgerFile = join(fixture.directory, "launches.json");
+  const logs = [];
   registry = new AgentRegistry([fixture.adapter]);
-  coordinator = new LaunchCoordinator(registry, { ledgerFile: join(fixture.directory, "launches.json") });
+  coordinator = new LaunchCoordinator(registry, {
+    ledgerFile,
+    operations: {
+      logger: { log(...entries) { logs.push(entries); } },
+      metrics: { increment() {}, observe() {}, setGauge() {} },
+    },
+  });
   await coordinator.start();
   const accepted = await coordinator.submit({
     ...request(),
@@ -874,6 +1340,9 @@ test("injected Cursor SDK adapter composes with the durable launch coordinator",
   assert.equal(agent.provider, "cursor");
   assert.equal(agent.source, "cursor-sdk");
   assert.equal(agent.capabilities.read, false);
+  assert.equal((await readFile(ledgerFile, "utf8")).includes("fixture-secret"), false);
+  assert.equal(JSON.stringify(logs).includes("fixture-secret"), false);
+  assert.equal(JSON.stringify(agent.metadata).includes("fixture-secret"), false);
 });
 
 async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
@@ -905,6 +1374,7 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
   } : {});
   const adapter = new CursorSdkAdapter({
     bridge,
+    credentialSource: adapterOptions.credentialSource ?? fixtureCredentialSource(),
     sdkVersion: "1.0.28",
     storeDirectory,
     provenanceFile,
@@ -914,7 +1384,7 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
   });
   await adapter.open();
   t.after(async () => {
-    try { await adapter.close(); }
+    try { await adapter.destroy(); }
     finally { await rm(directory, { recursive: true, force: true }); }
   });
   return { adapter, bridge, agents, cwd, directory, storeDirectory, provenanceFile };
@@ -936,6 +1406,10 @@ function fixtureFileSystem(overrides = {}) {
     },
     ...overrides,
   };
+}
+
+function fixtureCredentialSource(value = "fixture-secret") {
+  return createCursorSdkCredentialSource(value);
 }
 
 function assertPrivateStateOptions(options) {

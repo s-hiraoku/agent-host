@@ -3,11 +3,14 @@ import { lstatSync, realpathSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { noCapabilities } from "../core/types.js";
+import { createRedactor } from "../operations/redact.js";
 
 const STATE_SCHEMA_VERSION = 1;
 const MAX_STATE_BYTES = 1_000_000;
 const MAX_RECORDS = 1_000;
 const DISCOVERY_CONCURRENCY = 8;
+const MIN_CREDENTIAL_BYTES = 8;
+const MAX_CREDENTIAL_BYTES = 16_384;
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const ATTEMPT_ID = /^attempt:[0-9a-f-]{36}$/;
 const LAUNCH_ID = /^launch:[0-9a-f-]{36}$/;
@@ -16,11 +19,66 @@ const RECORD_KEYS = new Set([
   "bridgeNamespace", "storeScope", "targetDigest", "state", "createdAt", "updatedAt",
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
+const CREDENTIAL_SOURCES = new WeakMap();
+const INTERNAL_CREDENTIAL_ERRORS = new WeakSet();
+
+export function createCursorSdkCredentialSource(secretOrCallback) {
+  if (typeof secretOrCallback !== "string" && typeof secretOrCallback !== "function") {
+    throw new TypeError("Cursor SDK credential source requires an explicit secret or secret callback");
+  }
+  let retained;
+  try {
+    retained = typeof secretOrCallback === "string"
+      ? credentialBytes(secretOrCallback)
+      : undefined;
+  } catch (error) {
+    if (isInternalCredentialError(error)) throw publicCredentialError(error);
+    throw error;
+  }
+  const callback = typeof secretOrCallback === "function" ? secretOrCallback : undefined;
+  let closed = false;
+  let claimed = false;
+  const source = {
+    claim() {
+      if (claimed) throw new TypeError("Cursor SDK credential source is already assigned to an adapter");
+      claimed = true;
+      return source;
+    },
+    async use(operation, signal) {
+      if (closed) throw new Error("Cursor SDK credential source is closed");
+      if (signal?.aborted) throw credentialCancellation();
+      let bytes;
+      try {
+        bytes = callback
+          ? credentialBytes(await callback({ signal }))
+          : Buffer.from(retained);
+      } catch (error) {
+        if (signal?.aborted) throw credentialCancellation();
+        if (isInternalCredentialError(error)) throw error;
+        throw credentialFailure();
+      }
+      try {
+        if (signal?.aborted) throw credentialCancellation();
+        return await operation(bytes);
+      } finally {
+        bytes.fill(0);
+      }
+    },
+    destroy() {
+      closed = true;
+      retained?.fill(0);
+    },
+  };
+  const wrapper = Object.freeze({});
+  CREDENTIAL_SOURCES.set(wrapper, source);
+  return wrapper;
+}
 
 export class CursorSdkAdapter {
   id = "cursor-sdk";
   discoveryHealth = "internal";
   #bridge;
+  #credentialSource;
   #targets;
   #state;
   #storeDirectory;
@@ -30,6 +88,8 @@ export class CursorSdkAdapter {
   #now;
   #activeOperations = new Set();
   #closing;
+  #destroying;
+  #destroyed = false;
   #lifecycleGeneration = 0;
   #ready = false;
 
@@ -55,6 +115,7 @@ export class CursorSdkAdapter {
     }
     this.#state = new CursorSdkProvenanceStore(provenanceFile, options.fs, this.#now);
     this.#scope = createHash("sha256").update(this.#storeDirectory).digest("base64url").slice(0, 16);
+    this.#credentialSource = validateCredentialSource(options.credentialSource);
   }
 
   launchCapabilities() {
@@ -73,8 +134,10 @@ export class CursorSdkAdapter {
   async discover() { return []; }
 
   async open() {
+    if (this.#destroyed) throw new Error("Cursor SDK adapter is destroyed");
     const generation = this.#lifecycleGeneration;
     await this.#closing;
+    if (this.#destroyed) throw new Error("Cursor SDK adapter is destroyed");
     await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
     for (const target of this.#targets.values()) {
       if (pathsOverlap(target.cwd, this.#storeDirectory)) {
@@ -102,14 +165,13 @@ export class CursorSdkAdapter {
       });
       if (!reserved.created) throw new Error("Cursor SDK launch attempt already has durable provenance");
       await this.#assertBridgeDirectories(target);
-      const result = await this.#bridge.createLocal({
+      const result = await this.#callBridge("createLocal", {
         agentId: providerAgentId,
         attemptId,
         cwd: target.cwd,
         storeDirectory: this.#storeDirectory,
         profile: request.profile,
-        signal,
-      });
+      }, signal);
       assertProviderAgent(result, providerAgentId);
       await this.#state.markOwned(attemptId);
       return { status: "owned", providerAgentId, agentId };
@@ -125,12 +187,11 @@ export class CursorSdkAdapter {
       const target = this.#targets.get(provenance.target);
       if (!target) return { status: "uncertain", code: "cursor_target_unavailable" };
       await this.#assertBridgeDirectories(target);
-      const result = await this.#bridge.getLocal({
+      const result = await this.#callBridge("getLocal", {
         agentId: provenance.providerAgentId,
         cwd: target.cwd,
         storeDirectory: this.#storeDirectory,
-        signal,
-      });
+      }, signal);
       if (!result) return { status: "uncertain", code: "cursor_agent_unconfirmed" };
       assertProviderAgent(result, provenance.providerAgentId);
       if (provenance.state !== "owned") await this.#state.markOwned(record.attemptId);
@@ -151,28 +212,27 @@ export class CursorSdkAdapter {
           throwIfAborted(signal);
         }
         catch (error) {
-          throwIfAborted(signal, error);
+          throwIfAborted(signal);
           return this.#agent(record, provenance);
         }
         try {
           await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
           throwIfAborted(signal);
         } catch (error) {
-          throwIfAborted(signal, error);
+          throwIfAborted(signal);
           throw error;
         }
         let result;
         try {
-          result = await this.#bridge.getLocal({
+          result = await this.#callBridge("getLocal", {
             agentId: provenance.providerAgentId,
             cwd: target.cwd,
             storeDirectory: this.#storeDirectory,
-            signal,
-          });
+          }, signal);
           throwIfAborted(signal);
         }
         catch (error) {
-          throwIfAborted(signal, error);
+          throwIfAborted(signal);
           return this.#agent(record, provenance);
         }
         if (!result) return this.#agent(record, provenance);
@@ -197,6 +257,17 @@ export class CursorSdkAdapter {
     this.#closing = closing;
     try { await closing; }
     finally { if (this.#closing === closing) this.#closing = undefined; }
+  }
+
+  destroy() {
+    if (this.#destroying) return this.#destroying;
+    if (this.#destroyed) return Promise.resolve();
+    this.#destroyed = true;
+    this.#destroying = (async () => {
+      try { await this.close(); }
+      finally { this.#credentialSource.destroy(); }
+    })();
+    return this.#destroying;
   }
 
   #verifiedProvenance(provenance, record) {
@@ -235,6 +306,24 @@ export class CursorSdkAdapter {
     await this.#state.assertCurrent();
     await assertDirectoryIdentity(target.cwd, target.identity, "target");
     await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
+  }
+
+  async #callBridge(operation, input, signal) {
+    try {
+      return await this.#credentialSource.use(
+        async (credential) => {
+          const redact = createRedactor({ secrets: [credential.toString("utf8")] });
+          return redact(await this.#bridge[operation]({ ...input, credential, signal }));
+        },
+        signal,
+      );
+    } catch (error) {
+      if (isInternalCredentialError(error)) throw publicCredentialError(error);
+      throwIfAborted(signal);
+      const failure = new Error(`Cursor SDK bridge ${operation} failed`);
+      failure.code = "cursor_bridge_failed";
+      throw failure;
+    }
   }
 
   #matchesConfiguration(provenance, record) {
@@ -497,6 +586,62 @@ function validateBridge(bridge) {
   return bridge;
 }
 
+function validateCredentialSource(source) {
+  const implementation = CREDENTIAL_SOURCES.get(source);
+  if (!implementation) {
+    throw new TypeError("Cursor SDK adapter requires an explicitly injected credential source");
+  }
+  return implementation.claim();
+}
+
+function credentialBytes(value) {
+  if (typeof value !== "string") throw invalidCredential();
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length < MIN_CREDENTIAL_BYTES || bytes.length > MAX_CREDENTIAL_BYTES) {
+    bytes.fill(0);
+    throw invalidCredential();
+  }
+  return bytes;
+}
+
+function invalidCredential() {
+  return internalCredentialError(
+    "cursor_credential_invalid",
+    "Cursor SDK credential source returned an invalid credential",
+  );
+}
+
+function credentialFailure() {
+  return internalCredentialError(
+    "cursor_credential_unavailable",
+    "Cursor SDK credential source is unavailable",
+  );
+}
+
+function credentialCancellation() {
+  return internalCredentialError(
+    "cursor_operation_cancelled",
+    "Cursor SDK operation was cancelled",
+  );
+}
+
+function internalCredentialError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  INTERNAL_CREDENTIAL_ERRORS.add(error);
+  return error;
+}
+
+function isInternalCredentialError(error) {
+  return INTERNAL_CREDENTIAL_ERRORS.has(error);
+}
+
+function publicCredentialError(error) {
+  const failure = new Error(error.message);
+  failure.code = error.code;
+  return failure;
+}
+
 function normalizeTargets(targets) {
   if (!Array.isArray(targets) || targets.length === 0 || targets.length > 20) throw new TypeError("targets must contain 1-20 entries");
   const result = new Map();
@@ -659,8 +804,8 @@ function sameIntent(left, right) {
   ]
     .every((key) => left[key] === right[key]);
 }
-function throwIfAborted(signal, fallback = new Error("Cursor SDK discovery was aborted")) {
-  if (signal?.aborted) throw signal.reason ?? fallback;
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw publicCredentialError(credentialCancellation());
 }
 async function mapConcurrent(values, concurrency, mapper) {
   const results = new Array(values.length);
