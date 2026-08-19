@@ -26,8 +26,9 @@ before(async () => {
 
 after(async () => { await rm(localDirectory, { recursive: true, force: true }); });
 
-test("production backend rejects unprivileged helper and writable ancestor paths", async () => {
-  await assert.rejects(openAnchoredPrivateState(localDirectory, { helperPath: localHelper }), /root-owned|ancestor/);
+test("production backend rejects root execution or unprivileged paths", async () => {
+  const expected = process.geteuid() === 0 ? /rejects root execution/ : /root-owned|ancestor/;
+  await assert.rejects(openAnchoredPrivateState(localDirectory, { helperPath: localHelper }), expected);
 });
 
 test("persistent anchored private-state integration", { skip: !privileged }, async (t) => {
