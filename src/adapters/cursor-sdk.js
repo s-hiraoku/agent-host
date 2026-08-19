@@ -405,8 +405,7 @@ export class CursorSdkProvenanceStore {
       await this.#open();
       try { await this.#load(); }
       catch (error) {
-        await this.#lease?.release().catch(() => {});
-        this.#lease = undefined;
+        await this.#releaseLease().catch(() => {});
         throw error;
       }
     });
@@ -472,19 +471,7 @@ export class CursorSdkProvenanceStore {
 
   async close() {
     return this.#exclusive(async () => {
-      const lease = this.#lease;
-      if (!lease) {
-        this.#lease = undefined;
-        return;
-      }
-      try { await lease.release(); }
-      catch (error) {
-        if (lease.isHeld?.() !== true) {
-          this.#lease = undefined;
-        }
-        throw error;
-      }
-      this.#lease = undefined;
+      await this.#releaseLease();
     });
   }
 
@@ -560,6 +547,19 @@ export class CursorSdkProvenanceStore {
       throw new Error("Cursor SDK provenance store is not open");
     }
     await this.#privateState.assertCurrent();
+  }
+  async #releaseLease() {
+    const lease = this.#lease;
+    if (!lease) {
+      this.#lease = undefined;
+      return;
+    }
+    try { await lease.release(); }
+    catch (error) {
+      if (lease.isHeld?.() !== true && this.#lease === lease) this.#lease = undefined;
+      throw error;
+    }
+    if (this.#lease === lease) this.#lease = undefined;
   }
   #exclusive(operation) {
     const next = this.#tail.then(operation, operation);
