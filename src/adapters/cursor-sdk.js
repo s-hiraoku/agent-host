@@ -481,15 +481,13 @@ export class CursorSdkProvenanceStore {
     const disposing = this.#exclusive(async () => {
       const errors = [];
       const lease = this.#lease;
-      this.#lease = undefined;
-      if (lease) {
-        try { await lease.release(); }
-        catch (error) { errors.push(error); }
-      }
+      try { await this.#releaseLease(); }
+      catch (error) { errors.push(error); }
       try {
         if (typeof this.#privateState.dispose === "function") await this.#privateState.dispose();
         else await this.#privateState.close();
       } catch (error) { errors.push(error); }
+      finally { if (this.#lease === lease) this.#lease = undefined; }
       throwDisposalErrors(errors);
     });
     this.#disposing = disposing;
@@ -537,8 +535,7 @@ export class CursorSdkProvenanceStore {
     try {
       await this.#privateState.assertCurrent();
     } catch (error) {
-      await this.#lease.release().catch(() => {});
-      this.#lease = undefined;
+      await this.#releaseLease().catch(() => {});
       throw error;
     }
   }

@@ -1111,79 +1111,9 @@ test("Cursor SDK provenance reopen reacquires its lease after release fails", as
 });
 
 test("Cursor SDK initial-load cleanup retains only a still-held writer lease", async (t) => {
-  async function setup(t, releaseFailure) {
-    const directory = await mkdtemp(join(tmpdir(), `agent-host-cursor-sdk-initial-${releaseFailure}-`));
-    t.after(() => rm(directory, { recursive: true, force: true }));
-    const cwd = join(directory, "workspace");
-    const storeDirectory = join(directory, "sdk-store");
-    const privateDirectory = join(directory, "private");
-    await mkdir(cwd);
-    await mkdir(storeDirectory, { mode: 0o700 });
-    await mkdir(privateDirectory, { mode: 0o700 });
-    const base = fixtureFileSystem(privateDirectory);
-    const acquire = base.acquireWriterLock.bind(base);
-    const read = base.readFileBounded.bind(base);
-    const initialLoadError = new Error(`synthetic ${releaseFailure} initial load failure`);
-    let reads = 0;
-    let acquisitions = 0;
-    let releaseCalls = 0;
-    let backendCloses = 0;
-    let underlyingLease;
-    const privateState = {
-      ...base,
-      async readFileBounded(name, maximumBytes) {
-        reads += 1;
-        if (reads === 1) throw initialLoadError;
-        return read(name, maximumBytes);
-      },
-      async acquireWriterLock(name) {
-        acquisitions += 1;
-        underlyingLease = await acquire(name);
-        return {
-          isHeld: () => underlyingLease.isHeld(),
-          async release() {
-            releaseCalls += 1;
-            if (releaseFailure === "pre-unlock") {
-              throw new Error("synthetic pre-unlock release failure");
-            }
-            await underlyingLease.release();
-            if (releaseCalls === 1) throw new Error("synthetic post-unlock release failure");
-          },
-        };
-      },
-      async close() {
-        backendCloses += 1;
-        if (underlyingLease?.isHeld()) await underlyingLease.release();
-      },
-    };
-    const bridge = { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} };
-    const options = {
-      bridge,
-      credentialSource: fixtureCredentialSource(),
-      sdkVersion: "1.0.28",
-      storeDirectory,
-      provenanceFile: join(privateDirectory, "provenance.json"),
-      targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
-      privateState,
-    };
-    const adapter = new CursorSdkAdapter(options);
-    return {
-      adapter,
-      bridge,
-      cwd,
-      storeDirectory,
-      privateDirectory,
-      provenanceFile: options.provenanceFile,
-      initialLoadError,
-      acquisitions: () => acquisitions,
-      releaseCalls: () => releaseCalls,
-      backendCloses: () => backendCloses,
-    };
-  }
-
   await t.test("a pre-unlock failure is retained for retry and terminal backend cleanup", async (t) => {
-    const fixture = await setup(t, "pre-unlock");
-    await assert.rejects(fixture.adapter.open(), (error) => error === fixture.initialLoadError);
+    const fixture = await makeLeaseCleanupFixture(t, { failurePoint: "load", releaseFailure: "pre-unlock" });
+    await assert.rejects(fixture.adapter.open(), (error) => error === fixture.cleanupError);
     await fixture.adapter.open();
     assert.equal(fixture.acquisitions(), 1);
     await assert.rejects(fixture.adapter.destroy(), /synthetic pre-unlock release failure/);
@@ -1204,8 +1134,42 @@ test("Cursor SDK initial-load cleanup retains only a still-held writer lease", a
   });
 
   await t.test("a post-unlock failure clears the lease and reacquires on retry", async (t) => {
-    const fixture = await setup(t, "post-unlock");
-    await assert.rejects(fixture.adapter.open(), (error) => error === fixture.initialLoadError);
+    const fixture = await makeLeaseCleanupFixture(t, { failurePoint: "load", releaseFailure: "post-unlock" });
+    await assert.rejects(fixture.adapter.open(), (error) => error === fixture.cleanupError);
+    await fixture.adapter.open();
+    assert.equal(fixture.acquisitions(), 2);
+    await fixture.adapter.destroy();
+    assert.equal(fixture.releaseCalls(), 2);
+    assert.equal(fixture.backendCloses(), 1);
+  });
+});
+
+test("Cursor SDK post-acquire identity cleanup retains only a still-held writer lease", async (t) => {
+  await t.test("a pre-unlock failure retains the lease for retry and terminal cleanup", async (t) => {
+    const fixture = await makeLeaseCleanupFixture(t, { failurePoint: "assert", releaseFailure: "pre-unlock" });
+    await assert.rejects(fixture.adapter.open(), (error) => error === fixture.cleanupError);
+    await fixture.adapter.open();
+    assert.equal(fixture.acquisitions(), 1);
+    await assert.rejects(fixture.adapter.destroy(), /synthetic pre-unlock release failure/);
+    assert.equal(fixture.releaseCalls(), 2);
+    assert.equal(fixture.backendCloses(), 1);
+
+    const replacement = new CursorSdkAdapter({
+      bridge: fixture.bridge,
+      credentialSource: fixtureCredentialSource(),
+      sdkVersion: "1.0.28",
+      storeDirectory: fixture.storeDirectory,
+      provenanceFile: fixture.provenanceFile,
+      targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
+      privateState: fixtureFileSystem(fixture.privateDirectory),
+    });
+    await replacement.open();
+    await replacement.destroy();
+  });
+
+  await t.test("a post-unlock failure clears the lease and reacquires on retry", async (t) => {
+    const fixture = await makeLeaseCleanupFixture(t, { failurePoint: "assert", releaseFailure: "post-unlock" });
+    await assert.rejects(fixture.adapter.open(), (error) => error === fixture.cleanupError);
     await fixture.adapter.open();
     assert.equal(fixture.acquisitions(), 2);
     await fixture.adapter.destroy();
@@ -1562,6 +1526,82 @@ test("injected Cursor SDK adapter composes with the durable launch coordinator",
   assert.equal(JSON.stringify(logs).includes("fixture-secret"), false);
   assert.equal(JSON.stringify(agent.metadata).includes("fixture-secret"), false);
 });
+
+async function makeLeaseCleanupFixture(t, { failurePoint, releaseFailure }) {
+  const directory = await mkdtemp(join(tmpdir(), `agent-host-cursor-sdk-${failurePoint}-${releaseFailure}-`));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = join(directory, "workspace");
+  const storeDirectory = join(directory, "sdk-store");
+  const privateDirectory = join(directory, "private");
+  await mkdir(cwd);
+  await mkdir(storeDirectory, { mode: 0o700 });
+  await mkdir(privateDirectory, { mode: 0o700 });
+  const base = fixtureFileSystem(privateDirectory);
+  const acquire = base.acquireWriterLock.bind(base);
+  const read = base.readFileBounded.bind(base);
+  const assertCurrent = base.assertCurrent.bind(base);
+  const cleanupError = new Error(`synthetic ${failurePoint} cleanup failure`);
+  let reads = 0;
+  let identityChecks = 0;
+  let acquisitions = 0;
+  let releaseCalls = 0;
+  let backendCloses = 0;
+  let underlyingLease;
+  const privateState = {
+    ...base,
+    async readFileBounded(name, maximumBytes) {
+      reads += 1;
+      if (failurePoint === "load" && reads === 1) throw cleanupError;
+      return read(name, maximumBytes);
+    },
+    async assertCurrent() {
+      identityChecks += 1;
+      if (failurePoint === "assert" && identityChecks === 1) throw cleanupError;
+      return assertCurrent();
+    },
+    async acquireWriterLock(name) {
+      acquisitions += 1;
+      underlyingLease = await acquire(name);
+      return {
+        isHeld: () => underlyingLease.isHeld(),
+        async release() {
+          releaseCalls += 1;
+          if (releaseFailure === "pre-unlock") {
+            throw new Error("synthetic pre-unlock release failure");
+          }
+          await underlyingLease.release();
+          if (releaseCalls === 1) throw new Error("synthetic post-unlock release failure");
+        },
+      };
+    },
+    async close() {
+      backendCloses += 1;
+      if (underlyingLease?.isHeld()) await underlyingLease.release();
+    },
+  };
+  const bridge = { namespace: "fixture", sdkVersion: "1.0.28", async createLocal() {}, async getLocal() {} };
+  const options = {
+    bridge,
+    credentialSource: fixtureCredentialSource(),
+    sdkVersion: "1.0.28",
+    storeDirectory,
+    provenanceFile: join(privateDirectory, "provenance.json"),
+    targets: [{ id: "workspace-a", cwd, profiles: ["safe"] }],
+    privateState,
+  };
+  return {
+    adapter: new CursorSdkAdapter(options),
+    bridge,
+    cwd,
+    storeDirectory,
+    privateDirectory,
+    provenanceFile: options.provenanceFile,
+    cleanupError,
+    acquisitions: () => acquisitions,
+    releaseCalls: () => releaseCalls,
+    backendCloses: () => backendCloses,
+  };
+}
 
 async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-sdk-"));
