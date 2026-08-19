@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { openAnchoredPrivateState } from "../src/anchored-private-state.js";
-import { CursorSdkAdapter } from "../src/adapters/cursor-sdk.js";
+import { CursorSdkAdapter, createCursorSdkCredentialSource } from "../src/adapters/cursor-sdk.js";
 
 const repository = join(dirname(fileURLToPath(import.meta.url)), "..");
 const privilegedDirectory = process.env.AGENT_HOST_PRIVILEGED_STATE_DIR;
@@ -74,6 +74,7 @@ test("persistent anchored private-state integration", { skip: !privileged }, asy
     const privateState = await productionState();
     const adapter = new CursorSdkAdapter({
       bridge,
+      credentialSource: createCursorSdkCredentialSource("privileged-fixture-secret"),
       sdkVersion: "1.0.28",
       storeDirectory,
       provenanceFile: join(privilegedDirectory, "lifecycle-provenance.json"),
@@ -104,8 +105,8 @@ test("persistent anchored private-state integration", { skip: !privileged }, asy
       providerAgentId: owned.providerAgentId,
       request,
     }), owned);
-    await adapter.dispose();
-    await assert.rejects(adapter.open(), /disposed/);
+    await adapter.destroy();
+    await assert.rejects(adapter.open(), /destroyed/);
   });
 
   await t.test("directory flock serializes sessions and maps contention", async () => {
