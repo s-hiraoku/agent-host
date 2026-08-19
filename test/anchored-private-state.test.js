@@ -2,13 +2,14 @@ import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { link, lstat, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { openAnchoredPrivateState } from "../src/anchored-private-state.js";
+import { CursorSdkAdapter } from "../src/adapters/cursor-sdk.js";
 
 const repository = join(dirname(fileURLToPath(import.meta.url)), "..");
 const privilegedDirectory = process.env.AGENT_HOST_PRIVILEGED_STATE_DIR;
@@ -51,6 +52,59 @@ test("persistent anchored private-state integration", { skip: !privileged }, asy
     assert.equal(await state.readFileBounded("basic.json", 32), "hello");
     await lease.release();
     await state.dispose();
+  });
+
+  await t.test("real backend supports adapter close, reopen, launch, and reconcile", async () => {
+    const workspace = join(privilegedDirectory, "lifecycle-workspace");
+    const storeDirectory = join(privilegedDirectory, "lifecycle-store");
+    await mkdir(workspace, { mode: 0o700 });
+    await mkdir(storeDirectory, { mode: 0o700 });
+    const agents = new Map();
+    const bridge = {
+      namespace: "privileged-fixture",
+      sdkVersion: "1.0.28",
+      async createLocal(input) {
+        const agent = { agentId: input.agentId, status: "idle" };
+        agents.set(input.agentId, agent);
+        return agent;
+      },
+      async getLocal({ agentId }) { return agents.get(agentId) ?? null; },
+    };
+    const privateState = await productionState();
+    const adapter = new CursorSdkAdapter({
+      bridge,
+      sdkVersion: "1.0.28",
+      storeDirectory,
+      provenanceFile: join(privilegedDirectory, "lifecycle-provenance.json"),
+      targets: [{ id: "workspace-a", cwd: workspace, profiles: ["safe"] }],
+      privateState,
+    });
+    const request = {
+      provider: "cursor",
+      target: "workspace-a",
+      profile: "safe",
+      mode: "local",
+      capabilityVersion: "cursor-sdk-local-1.0.28",
+      risk: { localMutation: true, externalBillable: true },
+    };
+    const attemptId = "attempt:00000000-0000-4000-8000-000000000046";
+    const launchId = "launch:00000000-0000-4000-8000-000000000046";
+    await adapter.open();
+    await adapter.close();
+    await adapter.open();
+    const owned = await adapter.launch(request, { attemptId, launchId });
+    await adapter.close();
+    await adapter.open();
+    assert.deepEqual(await adapter.reconcileLaunch({
+      id: launchId,
+      attemptId,
+      state: "owned",
+      agentId: owned.agentId,
+      providerAgentId: owned.providerAgentId,
+      request,
+    }), owned);
+    await adapter.dispose();
+    await assert.rejects(adapter.open(), /disposed/);
   });
 
   await t.test("directory flock serializes sessions and maps contention", async () => {

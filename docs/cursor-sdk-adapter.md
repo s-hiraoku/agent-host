@@ -130,8 +130,10 @@ lock and removes only validated, current-user-owned, single-link `0600`
 unsafe modes, malformed/oversized protocol frames, and unsupported platforms terminate
 the session fail-closed. Contention is reported as `instance_already_running`.
 
-`close()` releases the current lease and leaves the object reusable for the adapter's
-close/open lifecycle. `dispose()` is terminal. Lock metadata is retained for diagnostics;
+Adapter and provenance-store `close()` release the current writer lease without disposing
+the injected backend, so a later `open()` creates a fresh persistent helper session.
+Adapter `destroy()` is terminal and disposes the backend; a poisoned backend remains
+poisoned across `close()` and cannot be reopened. Lock metadata is retained for diagnostics;
 release never unlinks a pathname that another process may have replaced.
 
 The protected-parent contract prevents a same-UID process from renaming the final state

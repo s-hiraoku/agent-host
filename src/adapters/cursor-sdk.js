@@ -264,8 +264,20 @@ export class CursorSdkAdapter {
     if (this.#destroyed) return Promise.resolve();
     this.#destroyed = true;
     this.#destroying = (async () => {
-      try { await this.close(); }
-      finally { this.#credentialSource.destroy(); }
+      const errors = [];
+      this.#lifecycleGeneration += 1;
+      this.#ready = false;
+      if (this.#closing) {
+        try { await this.#closing; }
+        catch (error) { errors.push(error); }
+      } else {
+        await Promise.allSettled([...this.#activeOperations]);
+      }
+      try { await this.#state.dispose(); }
+      catch (error) { errors.push(error); }
+      try { this.#credentialSource.destroy(); }
+      catch (error) { errors.push(error); }
+      throwDisposalErrors(errors);
     })();
     return this.#destroying;
   }
@@ -461,19 +473,24 @@ export class CursorSdkProvenanceStore {
       const lease = this.#lease;
       if (!lease) {
         this.#lease = undefined;
-        await this.#privateState.close();
         return;
       }
       try { await lease.release(); }
       catch (error) {
         if (lease.isHeld?.() !== true) {
           this.#lease = undefined;
-          await this.#privateState.close();
         }
         throw error;
       }
       this.#lease = undefined;
-      await this.#privateState.close();
+    });
+  }
+
+  async dispose() {
+    await this.close();
+    return this.#exclusive(async () => {
+      if (typeof this.#privateState.dispose === "function") await this.#privateState.dispose();
+      else await this.#privateState.close();
     });
   }
 
@@ -511,7 +528,6 @@ export class CursorSdkProvenanceStore {
       await this.#assertOpen();
       return;
     }
-    await this.#privateState.assertCurrent();
     this.#lease = await this.#privateState.acquireWriterLock(this.#lockFile);
     try {
       await this.#privateState.assertCurrent();
@@ -532,6 +548,11 @@ export class CursorSdkProvenanceStore {
     this.#tail = next.catch(() => {});
     return next;
   }
+}
+
+function throwDisposalErrors(errors) {
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "Cursor SDK terminal disposal failed");
 }
 
 function validateBridge(bridge) {

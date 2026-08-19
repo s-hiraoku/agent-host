@@ -1110,6 +1110,29 @@ test("Cursor SDK provenance reopen reacquires its lease after release fails", as
   assert.equal(acquisitions, 2);
 });
 
+test("Cursor SDK close releases only its lease and destroy terminates the injected backend", async (t) => {
+  let backendCloses = 0;
+  let backendDisposals = 0;
+  const fixture = await makeFixture(t, {}, {
+    privateStateFactory(directory) {
+      return {
+        ...fixtureFileSystem(directory),
+        async close() { backendCloses += 1; },
+        async dispose() { backendDisposals += 1; },
+      };
+    },
+  });
+
+  await fixture.adapter.close();
+  assert.equal(backendCloses, 0);
+  await fixture.adapter.open();
+  await fixture.adapter.launch(resolvedRequest(), { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID });
+  await fixture.adapter.destroy();
+  assert.equal(backendCloses, 0);
+  assert.equal(backendDisposals, 1);
+  await assert.rejects(fixture.adapter.open(), /destroyed/);
+});
+
 test("Cursor SDK provenance retains its lease when release fails before unlocking", async (t) => {
   let acquisitions = 0;
   let releaseCalls = 0;
