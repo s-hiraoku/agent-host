@@ -26,52 +26,76 @@ export async function openAnchoredPrivateState(directory, options = {}) {
   if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > DEFAULT_MAX_BYTES) {
     throw new RangeError(`maxBytes must be an integer from 1 to ${DEFAULT_MAX_BYTES}`);
   }
-  return new AnchoredPrivateState(state.path, state.identity, helper, maxBytes);
+  if (options.afterAcquireForTest !== undefined && typeof options.afterAcquireForTest !== "function") {
+    throw new TypeError("afterAcquireForTest must be a function");
+  }
+  return new AnchoredPrivateState(state.path, state.identity, helper, maxBytes, options.afterAcquireForTest);
 }
 
 class AnchoredPrivateState {
   #helper;
   #maxBytes;
   #session;
+  #acquiring;
+  #disposing;
   #poison;
   #disposed = false;
+  #afterAcquireForTest;
 
-  constructor(directory, identity, helper, maxBytes) {
+  constructor(directory, identity, helper, maxBytes, afterAcquireForTest) {
     this.directory = directory;
     this.identity = Object.freeze(identity);
     this.#helper = helper;
     this.#maxBytes = maxBytes;
+    this.#afterAcquireForTest = afterAcquireForTest;
   }
 
   async acquireWriterLock(name) {
     this.#assertUsable();
     validateName(name);
-    if (this.#session) throw Object.assign(new Error("anchored writer lock is already held"), { code: "instance_already_running" });
+    if (this.#session || this.#acquiring) {
+      throw Object.assign(new Error("anchored writer lock is already held"), { code: "instance_already_running" });
+    }
     const session = new NativeSession(this.directory, this.#helper, this.#maxBytes, (error) => {
       this.#poison ??= error;
     });
+    const provisional = { session, promise: undefined };
+    this.#acquiring = provisional;
+    provisional.promise = this.#finishAcquire(name, provisional);
+    return provisional.promise;
+  }
+
+  async #finishAcquire(name, provisional) {
+    const { session } = provisional;
     try {
       await session.acquire(name);
+      await this.#afterAcquireForTest?.();
+      if (this.#disposed || this.#acquiring !== provisional) {
+        throw new Error("anchored private state is disposed");
+      }
+      this.#session = session;
+      let released = false;
+      return {
+        release: async () => {
+          if (released) return;
+          try {
+            await session.close();
+            released = true;
+            if (this.#session === session) this.#session = undefined;
+          } catch (error) {
+            if (!session.held && this.#session === session) this.#session = undefined;
+            throw error;
+          }
+        },
+        isHeld: () => !released && session.held,
+      };
     } catch (error) {
       await session.abandon();
+      if (this.#disposed) throw new Error("anchored private state is disposed", { cause: error });
       throw error;
+    } finally {
+      if (this.#acquiring === provisional) this.#acquiring = undefined;
     }
-    this.#session = session;
-    let released = false;
-    return {
-      release: async () => {
-        if (released) return;
-        try {
-          await session.close();
-          released = true;
-          if (this.#session === session) this.#session = undefined;
-        } catch (error) {
-          if (!session.held && this.#session === session) this.#session = undefined;
-          throw error;
-        }
-      },
-      isHeld: () => !released && session.held,
-    };
   }
 
   async readFileBounded(name, maximumBytes) {
@@ -105,17 +129,28 @@ class AnchoredPrivateState {
     }
   }
 
-  async dispose() {
-    if (this.#disposed) return;
-    try { await this.close(); }
-    catch (error) {
-      const session = this.#session;
-      if (session) {
-        await session.abandon();
-        if (this.#session === session) this.#session = undefined;
+  dispose() {
+    if (this.#disposing) return this.#disposing;
+    if (this.#disposed) return Promise.resolve();
+    this.#disposed = true;
+    const disposing = (async () => {
+      const acquiring = this.#acquiring;
+      if (acquiring) {
+        await acquiring.session.abandon();
+        await acquiring.promise.catch(() => {});
       }
-      throw error;
-    } finally { this.#disposed = true; }
+      try { await this.close(); }
+      catch (error) {
+        const session = this.#session;
+        if (session) {
+          await session.abandon();
+          if (this.#session === session) this.#session = undefined;
+        }
+        throw error;
+      }
+    })();
+    this.#disposing = disposing;
+    return disposing;
   }
 
   #active() {

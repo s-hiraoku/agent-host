@@ -55,6 +55,37 @@ test("persistent anchored private-state integration", { skip: !privileged }, asy
     await state.dispose();
   });
 
+  await t.test("terminal disposal abandons an in-flight acquisition before it can publish", async () => {
+    let acquisitionEntered;
+    let continueAcquisition;
+    const entered = new Promise((resolve) => { acquisitionEntered = resolve; });
+    const continuation = new Promise((resolve) => { continueAcquisition = resolve; });
+    const state = await productionState({
+      async afterAcquireForTest() {
+        acquisitionEntered();
+        await continuation;
+      },
+    });
+    const acquiring = state.acquireWriterLock("dispose-race.lock");
+    const rejected = assert.rejects(acquiring, /disposed/);
+    await entered;
+    await assert.rejects(state.acquireWriterLock("dispose-race.lock"),
+      (error) => error.code === "instance_already_running");
+    const firstDisposal = state.dispose();
+    const secondDisposal = state.dispose();
+    assert.equal(secondDisposal, firstDisposal);
+    continueAcquisition();
+    await rejected;
+    await firstDisposal;
+    await assert.rejects(state.acquireWriterLock("dispose-race.lock"), /disposed/);
+
+    const replacement = await productionState();
+    const lease = await replacement.acquireWriterLock("dispose-race.lock");
+    assert.equal(lease.isHeld(), true);
+    await lease.release();
+    await replacement.dispose();
+  });
+
   await t.test("real backend supports adapter close, reopen, launch, and reconcile", async () => {
     const workspace = join(privilegedDirectory, "lifecycle-workspace");
     const storeDirectory = join(privilegedDirectory, "lifecycle-store");
