@@ -23,3 +23,33 @@ test("process adapter can keep supported control-provider processes raw-only", a
   assert.equal(agents.find((agent) => agent.provider === "codex").discovery.visibility, "raw");
   assert.equal(agents.find((agent) => agent.provider === "claude").discovery.visibility, "active");
 });
+
+test("process adapter names use a path leaf or pid, never undefined", async () => {
+  const execFile = async () => ({
+    stdout: [
+      "100 1 ttys001 /opt/homebrew/bin/claude",
+      "101 1 ttys002 /opt/homebrew/bin/claude",
+      "102 1 ttys003 /opt/homebrew/bin/claude",
+      "103 1 ttys004 /opt/homebrew/bin/claude",
+      "104 1 ttys005 /opt/homebrew/bin/claude",
+    ].join("\n"),
+  });
+  const cwds = {
+    100: "/Users/me/agent-host",
+    101: "/",
+    102: undefined,
+    103: "",
+    104: "/Users/me/agent-host/",
+  };
+  const adapter = new ProcessAdapter({
+    execFile,
+    cwdFor: async (pid) => cwds[pid],
+  });
+  const names = Object.fromEntries((await adapter.discover()).map((agent) => [agent.pid, agent.name]));
+  assert.equal(names[100], "claude · agent-host");
+  assert.equal(names[101], "claude · 101");
+  assert.equal(names[102], "claude · 102");
+  assert.equal(names[103], "claude · 103");
+  assert.equal(names[104], "claude · agent-host");
+  assert.equal(Object.values(names).some((name) => name.includes("undefined")), false);
+});

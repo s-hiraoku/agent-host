@@ -118,8 +118,9 @@ provenance backend, and upstream gates.
 filters, plus `view`, `cwd`, free-text `q`, `sort`, `direction`, `limit`, and an opaque
 `cursor`. The allowlisted sorts are `attention`, `activity`, `name`, `provider`, and
 `status`; direction is `asc` or `desc`. The default is `attention asc`, except
-`activity` defaults to `desc`. Sorting is applied to the complete filtered snapshot
-before pagination.
+`activity` defaults to `desc`. Attention ranks blocked, working, then idle ahead of
+unknown detection-only records, even when those processes are marked live. Sorting is
+applied to the complete filtered snapshot before pagination.
 
 Responses include the current snapshot `revision` and revision-consistent `providers`
 and `statuses` facets. Provider facets apply every filter except `provider`; status

@@ -23,6 +23,11 @@ const PROVIDERS = new Map([
 ]);
 const SCRIPT_RUNNERS = new Set(["node", "bun", "deno"]);
 
+function processDisplayName(provider, pid, cwd) {
+  const leaf = typeof cwd === "string" && cwd.length > 0 ? basename(cwd) : "";
+  return `${provider} · ${leaf || String(pid)}`;
+}
+
 export function classifyProcessCommand(command) {
   if (/agent-host|codex\s+app-server\b/i.test(command)) return undefined;
   const tokens = command.trim().split(/\s+/);
@@ -93,7 +98,7 @@ export class ProcessAdapter {
         id: `process:${provider}:${pid}`,
         provider,
         source: this.id,
-        name: `${provider}${cwd ? ` · ${cwd.split("/").filter(Boolean).at(-1)}` : ` · ${pid}`}`,
+        name: processDisplayName(provider, pid, cwd),
         status: "unknown",
         capabilities: noCapabilities(),
         pid,

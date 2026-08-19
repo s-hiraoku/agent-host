@@ -52,6 +52,27 @@ test("attention sorting ranks valid timestamps ahead of invalid values consisten
   assert.equal(Math.sign(compareAgents(valid, invalid)), -1);
 });
 
+test("attention sorting ranks controllable idle agents ahead of live detection-only processes", () => {
+  const working = {
+    id: "codex:busy", status: "working", capabilities: { prompt: true, read: true },
+    discovery: { kind: "native", visibility: "active" }, lastActivityAt: "2026-07-01T00:00:00Z",
+  };
+  const idle = {
+    id: "herdr:1", status: "idle", capabilities: { prompt: true, read: true },
+    discovery: { kind: "native", visibility: "recent" }, lastActivityAt: "2026-08-01T00:00:00Z",
+  };
+  const detected = {
+    id: "process:claude:1", status: "unknown", capabilities: {},
+    discovery: { kind: "process", visibility: "active" }, lastActivityAt: "2026-08-19T00:00:00Z",
+  };
+  assert.equal(Math.sign(compareAgents(working, idle)), -1);
+  assert.equal(Math.sign(compareAgents(idle, detected)), -1);
+  const query = parseAgentListQuery(new URLSearchParams(), 1);
+  assert.deepEqual(pageAgents([detected, idle, working], query, 1).agents.map((agent) => agent.id), [
+    "codex:busy", "herdr:1", "process:claude:1",
+  ]);
+});
+
 test("project identity preserves significant cwd whitespace", () => {
   const base = {
     id: "fixture:project", provider: "fixture", source: "fixture", name: "Project",
