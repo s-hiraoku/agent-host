@@ -19,7 +19,7 @@ const RECORD_KEYS = new Set([
   "bridgeNamespace", "storeScope", "targetDigest", "state", "createdAt", "updatedAt",
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
-const CREDENTIAL_SOURCE = Symbol("CursorSdkCredentialSource");
+const CREDENTIAL_SOURCES = new WeakMap();
 const INTERNAL_CREDENTIAL_ERRORS = new WeakSet();
 
 export function createCursorSdkCredentialSource(secretOrCallback) {
@@ -69,7 +69,9 @@ export function createCursorSdkCredentialSource(secretOrCallback) {
       retained?.fill(0);
     },
   };
-  return Object.freeze(Object.defineProperty({}, CREDENTIAL_SOURCE, { value: source }));
+  const wrapper = Object.freeze({});
+  CREDENTIAL_SOURCES.set(wrapper, source);
+  return wrapper;
 }
 
 export class CursorSdkAdapter {
@@ -317,6 +319,7 @@ export class CursorSdkAdapter {
       );
     } catch (error) {
       if (isInternalCredentialError(error)) throw publicCredentialError(error);
+      throwIfAborted(signal);
       const failure = new Error(`Cursor SDK bridge ${operation} failed`);
       failure.code = "cursor_bridge_failed";
       throw failure;
@@ -584,10 +587,11 @@ function validateBridge(bridge) {
 }
 
 function validateCredentialSource(source) {
-  if (!source || typeof source[CREDENTIAL_SOURCE]?.claim !== "function") {
+  const implementation = CREDENTIAL_SOURCES.get(source);
+  if (!implementation) {
     throw new TypeError("Cursor SDK adapter requires an explicitly injected credential source");
   }
-  return source[CREDENTIAL_SOURCE].claim();
+  return implementation.claim();
 }
 
 function credentialBytes(value) {

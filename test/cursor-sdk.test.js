@@ -56,9 +56,32 @@ test("Cursor SDK adapter rejects absent or unbranded credential sources", async 
     () => new CursorSdkAdapter({ ...options, credentialSource: { secret: "cursor-fixture-secret" } }),
     /explicitly injected credential source/,
   );
+  assert.throws(
+    () => new CursorSdkAdapter({ ...options, credentialSource: Object.freeze({}) }),
+    /explicitly injected credential source/,
+  );
+  let propertyReads = 0;
+  const proxy = new Proxy({}, {
+    get() {
+      propertyReads += 1;
+      return { claim() { return {}; } };
+    },
+  });
+  assert.throws(
+    () => new CursorSdkAdapter({ ...options, credentialSource: proxy }),
+    /explicitly injected credential source/,
+  );
+  assert.equal(propertyReads, 0);
   const source = fixtureCredentialSource();
   const assigned = new CursorSdkAdapter({ ...options, credentialSource: source });
-  t.after(() => assigned.close());
+  t.after(() => assigned.destroy());
+  assert.throws(
+    () => new CursorSdkAdapter({ ...options, credentialSource: new Proxy(source, {
+      get() { propertyReads += 1; return undefined; },
+    }) }),
+    /explicitly injected credential source/,
+  );
+  assert.equal(propertyReads, 0);
   assert.throws(
     () => new CursorSdkAdapter({ ...options, credentialSource: source }),
     /already assigned to an adapter/,
@@ -166,6 +189,79 @@ test("Cursor SDK redacts creation, reconciliation, discovery, and cancellation f
     owned.adapter.reconcileLaunch(ledgerRecord(launched), { signal: controller.signal }),
     (error) => error.code === "cursor_operation_cancelled" && !error.message.includes(secret),
   );
+});
+
+test("Cursor SDK launch sanitizes an abort racing with bridge rejection", async (t) => {
+  const secret = "launch-abort-reason-secret";
+  let lookupStarted;
+  const started = new Promise((resolve) => { lookupStarted = resolve; });
+  let finishBridge;
+  const bridgeFinished = new Promise((resolve) => { finishBridge = resolve; });
+  const fixture = await makeFixture(t, {
+    async createLocal() {
+      lookupStarted();
+      await bridgeFinished;
+      throw new Error("bridge rejected after abort");
+    },
+  });
+  const attemptId = `attempt:${uuidFor(940)}`;
+  const launchId = `launch:${uuidFor(940)}`;
+  const controller = new AbortController();
+  const launch = fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId, launchId, signal: controller.signal },
+  );
+  await started;
+  controller.abort(new Error(secret));
+  finishBridge();
+
+  await assert.rejects(
+    launch,
+    (error) => error.code === "cursor_operation_cancelled"
+      && error.message === "Cursor SDK operation was cancelled"
+      && !error.message.includes(secret)
+      && !JSON.stringify(error).includes(secret),
+  );
+  const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records.find((record) => record.attemptId === attemptId)?.state, "intent");
+  assert.equal(JSON.stringify(state).includes(secret), false);
+});
+
+test("Cursor SDK reconciliation sanitizes an abort racing with bridge rejection", async (t) => {
+  const secret = "reconcile-abort-reason-secret";
+  const fixture = await makeFixture(t);
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  let lookupStarted;
+  const started = new Promise((resolve) => { lookupStarted = resolve; });
+  let finishBridge;
+  const bridgeFinished = new Promise((resolve) => { finishBridge = resolve; });
+  fixture.bridge.getLocal = async () => {
+    lookupStarted();
+    await bridgeFinished;
+    throw new Error("bridge rejected after abort");
+  };
+  const controller = new AbortController();
+  const reconciliation = fixture.adapter.reconcileLaunch(
+    ledgerRecord(owned),
+    { signal: controller.signal },
+  );
+  await started;
+  controller.abort(new Error(secret));
+  finishBridge();
+
+  await assert.rejects(
+    reconciliation,
+    (error) => error.code === "cursor_operation_cancelled"
+      && error.message === "Cursor SDK operation was cancelled"
+      && !error.message.includes(secret)
+      && !JSON.stringify(error).includes(secret),
+  );
+  const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records.find((record) => record.attemptId === ATTEMPT_ID)?.state, "owned");
+  assert.equal(JSON.stringify(state).includes(secret), false);
 });
 
 test("Cursor SDK masks credential callback failures without fallback", async (t) => {
