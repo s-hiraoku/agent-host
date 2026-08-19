@@ -15,6 +15,30 @@
     "repository": "s-hiraoku/agent-host-dashboard",
     "commit": "f641cb09e144490297fb3fe6759bac42aeb8e799",
     "version": "0.1.0",
-    "apiVersions": ["1"]
+    "apiVersions": ["1"],
+    "buildInputs": {
+      "packageJsonSha256": "ffe21c36e565393eacbeff3e7225f23947b22ff86a71bb1686c4927c54e040be",
+      "packageLockSha256": "c85bc3a054d9c527ae3f50650811eefed2eddcb5e5e74ec548c904896375e073"
+    },
+    "artifact": {
+      "schemaVersion": 1,
+      "files": [
+        {
+          "path": "assets/index-D5U4DQKM.js",
+          "bytes": 310711,
+          "sha256": "18bba1c4f3e37e56878a5dbb38a639f028b04df59b7000e8702021f7af2666b4"
+        },
+        {
+          "path": "assets/index-DbpilHqa.css",
+          "bytes": 26450,
+          "sha256": "af65e21a5a99542d8c3cbdfe400e441a0891bf26d478fede6ef3d73a4ecf9860"
+        },
+        {
+          "path": "index.html",
+          "bytes": 507,
+          "sha256": "242a0a2c82de0f02bfcaf9b573c8f7478987f7e44ea8d103d081ccef0b1f6b44"
+        }
+      ]
+    }
   }
 }
