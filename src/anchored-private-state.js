@@ -155,6 +155,7 @@ class NativeSession {
     this.#maxBytes = maxBytes;
     this.#onUnexpected = onUnexpected;
     this.#child = this.#spawn(directory);
+    this.#child.stdin.on("error", (error) => this.#inputFailed(error));
     this.#child.stdout.on("data", (chunk) => this.#consume(chunk));
     this.#child.stderr.resume();
     this.#exit = new Promise((resolve) => {
@@ -220,8 +221,12 @@ class NativeSession {
     const response = new Promise((resolve, reject) => { this.#pending = { operation, request, resolve, reject }; });
     const frame = Buffer.concat([header, nameBytes, auxiliaryBytes, payload]);
     try { await writeTo(this.#child.stdin, frame); }
-    catch (error) { this.#fail(error); }
+    catch (error) { this.#inputFailed(error); }
     return response;
+  }
+
+  #inputFailed(error) {
+    this.#fail(new Error("anchored private-state helper input failed", { cause: error }));
   }
 
   #consume(chunk) {

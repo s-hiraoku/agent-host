@@ -157,6 +157,23 @@ test("persistent anchored private-state integration", { skip: !privileged }, asy
     await assert.rejects(state.acquireWriterLock("death.lock"), /poisoned/);
   });
 
+  await t.test("helper death while a large request is flushing cannot crash or retry", async () => {
+    const state = await productionState();
+    const lease = await state.acquireWriterLock("input-death.lock");
+    await state.writeFileAtomic("input-death.json", "original");
+    const metadata = await readFile(join(privilegedDirectory, "input-death.lock"), "utf8");
+    const helperPid = Number(/^helper_pid=(\d+)$/m.exec(metadata)?.[1]);
+    process.kill(helperPid, "SIGSTOP");
+    const writing = state.writeFileAtomic("input-death.json", Buffer.alloc(1_000_000, 0x78));
+    await delay(20);
+    process.kill(helperPid, "SIGKILL");
+    await assert.rejects(writing, /helper (?:input failed|exited unexpectedly)/);
+    await waitFor(() => !lease.isHeld());
+    assert.equal(await readFile(join(privilegedDirectory, "input-death.json"), "utf8"), "original");
+    await assert.rejects(state.assertCurrent(), /poisoned/);
+    await assert.rejects(lease.release(), /helper (?:input failed|exited unexpectedly)/);
+  });
+
   await t.test("SIGKILL during streamed mutation preserves old value and next writer recovers temp", async () => {
     let state = await productionState();
     let lease = await state.acquireWriterLock("crash-seed.lock");
