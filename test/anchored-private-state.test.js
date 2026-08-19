@@ -1,7 +1,8 @@
-import test, { before, after } from "node:test";
+import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import { link, lstat, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,201 +11,196 @@ import { promisify } from "node:util";
 import { openAnchoredPrivateState } from "../src/anchored-private-state.js";
 
 const repository = join(dirname(fileURLToPath(import.meta.url)), "..");
-let suiteDirectory;
-let helperPath;
+const privilegedDirectory = process.env.AGENT_HOST_PRIVILEGED_STATE_DIR;
+const privilegedHelper = process.env.AGENT_HOST_PRIVILEGED_STATE_HELPER;
+const privileged = Boolean(privilegedDirectory && privilegedHelper);
+let localDirectory;
+let localHelper;
 
 before(async () => {
-  suiteDirectory = await realpath(await mkdtemp(join(tmpdir(), "agent-host-anchored-state-tests-")));
-  helperPath = join(suiteDirectory, "anchored-private-state");
-  await promisify(execFile)(process.execPath, [
-    join(repository, "scripts", "build-anchored-private-state-helper.js"), helperPath,
-  ]);
+  localDirectory = await realpath(await mkdtemp(join(tmpdir(), "agent-host-anchored-negative-")));
+  localHelper = join(localDirectory, "anchored-private-state");
+  await promisify(execFile)(process.execPath, [join(repository, "scripts", "build-anchored-private-state-helper.js"), localHelper]);
 });
 
-after(async () => {
-  await rm(suiteDirectory, { recursive: true, force: true });
+after(async () => { await rm(localDirectory, { recursive: true, force: true }); });
+
+test("production backend rejects unprivileged helper and writable ancestor paths", async () => {
+  await assert.rejects(openAnchoredPrivateState(localDirectory, { helperPath: localHelper }), /root-owned|ancestor/);
 });
 
-test("anchored private state atomically writes and bounds owner-only regular files", async (t) => {
-  const { directory, state } = await fixture(t, { maxBytes: 32 });
-  await state.writeFileAtomic("provenance.json", "hello");
-  assert.equal(await state.readFileBounded("provenance.json", 32), "hello");
-  assert.equal((await lstat(join(directory, "provenance.json"))).mode & 0o777, 0o600);
-  await assert.rejects(state.readFileBounded("provenance.json", 4), /size limit/);
-  await assert.rejects(state.writeFileAtomic("large", "x".repeat(33)), /size limit/);
-  assert.deepEqual(await readFile(join(directory, "provenance.json"), "utf8"), "hello");
-});
-
-test("anchored private state accepts basenames only", async (t) => {
-  const { state } = await fixture(t);
-  for (const name of ["", ".", "..", "/absolute", "child/file", "nul\0name"]) {
-    await assert.rejects(state.readFileBounded(name, 10), /basename/);
-    await assert.rejects(state.writeFileAtomic(name, "x"), /basename/);
-    await assert.rejects(state.acquireWriterLock(name), /basename/);
-  }
-});
-
-test("anchored private state rejects symlinks and unsafe file permissions", async (t) => {
-  const { directory, state } = await fixture(t);
-  await writeFile(join(directory, "target"), "secret", { mode: 0o600 });
-  await symlink("target", join(directory, "linked"));
-  await assert.rejects(state.readFileBounded("linked", 100), /cannot open private state|regular file/);
-  await assert.rejects(state.writeFileAtomic("linked", "replacement"), /owner-only regular file/);
-  await writeFile(join(directory, "public"), "unsafe", { mode: 0o644 });
-  await assert.rejects(state.readFileBounded("public", 100), /owner-only regular file/);
-});
-
-test("directory replacement receives no descriptor-relative write or lock mutation", async (t) => {
-  const { directory, state } = await fixture(t);
-  const captured = `${directory}-captured`;
-  await rename(directory, captured);
-  await mkdir(directory, { mode: 0o700 });
-  t.after(() => rm(captured, { recursive: true, force: true }));
-  await assert.rejects(state.writeFileAtomic("provenance.json", "captured"), /pathname changed/);
-  await assert.rejects(state.acquireWriterLock("writer.lock"), /pathname changed/);
-  await assert.rejects(readFile(join(captured, "provenance.json")), { code: "ENOENT" });
-  await assert.rejects(readFile(join(directory, "provenance.json")), { code: "ENOENT" });
-  await assert.rejects(lstat(join(captured, "writer.lock")), { code: "ENOENT" });
-  await assert.rejects(lstat(join(directory, "writer.lock")), { code: "ENOENT" });
-});
-
-test("writer acquisition rechecks the configured pathname after helper readiness", async (t) => {
-  const gateDirectory = await realpath(await mkdtemp(join(tmpdir(), "agent-host-lock-gate-")));
-  const spawned = join(gateDirectory, "spawned");
-  const proceed = join(gateDirectory, "proceed");
-  const wrapper = join(gateDirectory, "anchored-private-state-wrapper");
-  await writeFile(wrapper, `#!/bin/sh
-if [ "$1" = "lock" ]; then
-  : > ${shellQuote(spawned)}
-  while [ ! -e ${shellQuote(proceed)} ]; do :; done
-fi
-exec ${shellQuote(helperPath)} "$@"
-`, { mode: 0o500 });
-  await chmod(wrapper, 0o500);
-
-  const directory = await realpath(await mkdtemp(join(tmpdir(), "agent-host-anchored-state-")));
-  const captured = `${directory}-captured`;
-  const replacement = `${directory}-replacement`;
-  const state = await openAnchoredPrivateState(directory, { helperPath: wrapper });
-  t.after(async () => {
-    await state.close();
-    await rm(directory, { recursive: true, force: true });
-    await rm(captured, { recursive: true, force: true });
-    await rm(replacement, { recursive: true, force: true });
-    await rm(gateDirectory, { recursive: true, force: true });
+test("persistent anchored private-state integration", { skip: !privileged }, async (t) => {
+  await t.test("helper rejects root execution", async () => {
+    await assert.rejects(promisify(execFile)("sudo", ["-n", privilegedHelper, "serve", privilegedDirectory]));
   });
 
-  const acquisition = state.acquireWriterLock("writer.lock");
-  await waitFor(() => lstat(spawned).then(() => true, () => false));
-  await rename(directory, captured);
-  await mkdir(directory, { mode: 0o700 });
-  await writeFile(proceed, "go");
-  await assert.rejects(acquisition, /pathname changed/);
-  await assert.rejects(lstat(join(directory, "writer.lock")), { code: "ENOENT" });
-
-  await rename(directory, replacement);
-  await rename(captured, directory);
-  const lease = await Promise.race([
-    state.acquireWriterLock("writer.lock"),
-    delay(1_000).then(() => { throw new Error("reacquisition timed out"); }),
-  ]);
-  await lease.release();
-});
-
-test("writer locks serialize helpers and release never unlinks a replacement", async (t) => {
-  const { directory, state } = await fixture(t);
-  const second = await openAnchoredPrivateState(directory, { helperPath });
-  t.after(() => second.close());
-  const firstLease = await state.acquireWriterLock("writer.lock");
-  assert.equal(firstLease.isHeld(), true);
-  await assert.rejects(second.acquireWriterLock("writer.lock"),
-    (error) => error.code === "instance_already_running" && /already held/.test(error.message));
-  await rename(join(directory, "writer.lock"), join(directory, "held.lock"));
-  await writeFile(join(directory, "writer.lock"), "replacement", { mode: 0o600 });
-  await assert.rejects(second.acquireWriterLock("writer.lock"), /already held/);
-  await firstLease.release();
-  assert.equal(firstLease.isHeld(), false);
-  assert.equal(await readFile(join(directory, "writer.lock"), "utf8"), "replacement");
-  const secondLease = await second.acquireWriterLock("writer.lock");
-  await secondLease.release();
-});
-
-test("writer-lock metadata rejects hard links without corrupting their target", async (t) => {
-  const { directory, state } = await fixture(t);
-  const provenance = join(directory, "provenance.json");
-  await writeFile(provenance, "durable provenance", { mode: 0o600 });
-  await link(provenance, join(directory, "writer.lock"));
-  await assert.rejects(state.acquireWriterLock("writer.lock"), /must not be hard-linked/);
-  assert.equal(await readFile(provenance, "utf8"), "durable provenance");
-  assert.equal(await readFile(join(directory, "writer.lock"), "utf8"), "durable provenance");
-});
-
-test("writer-lock helper termination invalidates the state and release observes an earlier close", async (t) => {
-  const { directory, state } = await fixture(t);
-  await state.writeFileAtomic("provenance.json", "original");
-  const lease = await state.acquireWriterLock("writer.lock");
-  const metadata = await readFile(join(directory, "writer.lock"), "utf8");
-  const helperPid = Number(/^helper_pid=(\d+)$/m.exec(metadata)?.[1]);
-  assert.ok(Number.isSafeInteger(helperPid) && helperPid > 0);
-  process.kill(helperPid, "SIGKILL");
-  await waitFor(async () => {
-    try { await state.assertCurrent(); return false; }
-    catch (error) { return /writer lock was lost/.test(error.message); }
+  await t.test("trusted helper still rejects a state directory below a writable ancestor", async () => {
+    await assert.rejects(openAnchoredPrivateState(localDirectory, { helperPath: privilegedHelper }), /state directory ancestor/);
   });
-  assert.equal(lease.isHeld(), false);
-  await assert.rejects(state.writeFileAtomic("provenance.json", "mutated"), /writer lock was lost/);
-  await assert.rejects(Promise.race([
-    lease.release(),
-    delay(1_000).then(() => { throw new Error("release timed out"); }),
-  ]), (error) => !/release timed out/.test(error.message));
-  await assert.rejects(state.assertCurrent(), /writer lock was lost/);
-  assert.equal(await readFile(join(directory, "provenance.json"), "utf8"), "original");
-});
 
-test("opening rejects non-canonical, linked, or accessible directories and mutable helpers", async (t) => {
-  const ordinary = await realpath(await mkdtemp(join(tmpdir(), "agent-host-anchored-input-")));
-  t.after(() => rm(ordinary, { recursive: true, force: true }));
-  await chmod(ordinary, 0o755);
-  await assert.rejects(openAnchoredPrivateState(ordinary, { helperPath }), /group or other access/);
-  await chmod(ordinary, 0o700);
-  const linked = `${ordinary}-link`;
-  await symlink(ordinary, linked);
-  t.after(() => rm(linked, { force: true }));
-  await assert.rejects(openAnchoredPrivateState(linked, { helperPath }), /real directory/);
-  await chmod(helperPath, 0o700);
-  await assert.rejects(openAnchoredPrivateState(ordinary, { helperPath }), /non-writable regular file/);
-  await chmod(helperPath, 0o500);
-  const linkedHelper = join(ordinary, "linked-helper");
-  await symlink(helperPath, linkedHelper);
-  await assert.rejects(openAnchoredPrivateState(ordinary, { helperPath: linkedHelper }), /must not be a symlink/);
-  const localHelper = join(ordinary, "local-helper");
-  await promisify(execFile)(process.execPath, [
-    join(repository, "scripts", "build-anchored-private-state-helper.js"), localHelper,
-  ]);
-  const state = await openAnchoredPrivateState(ordinary, { helperPath: localHelper });
-  t.after(() => state.close());
-  await rename(localHelper, `${localHelper}-replaced`);
-  await assert.rejects(state.readFileBounded("state", 10), /helper changed after opening/);
-});
-
-async function fixture(t, options = {}) {
-  const directory = await realpath(await mkdtemp(join(tmpdir(), "agent-host-anchored-state-")));
-  await chmod(directory, 0o700);
-  const state = await openAnchoredPrivateState(directory, { helperPath, ...options });
-  t.after(async () => {
-    await state.close();
-    await rm(directory, { recursive: true, force: true });
+  await t.test("one session owns bounded IO and supports lease close/open", async () => {
+    const state = await productionState({ maxBytes: 32 });
+    let lease = await state.acquireWriterLock("basic.lock");
+    await state.writeFileAtomic("basic.json", "hello");
+    assert.equal(await state.readFileBounded("basic.json", 32), "hello");
+    await assert.rejects(state.writeFileAtomic("basic-large.json", "x".repeat(33)), /size limit/);
+    await assert.rejects(state.writeFileAtomic(".agent-host-reserved.tmp", "x"), /reserved/);
+    assert.equal(lease.isHeld(), true);
+    await lease.release();
+    lease = await state.acquireWriterLock("basic.lock");
+    assert.equal(await state.readFileBounded("basic.json", 32), "hello");
+    await lease.release();
+    await state.dispose();
   });
-  return { directory, state };
+
+  await t.test("directory flock serializes sessions and maps contention", async () => {
+    const first = await productionState();
+    const second = await productionState();
+    const firstLease = await first.acquireWriterLock("contention.lock");
+    await assert.rejects(second.acquireWriterLock("contention.lock"), (error) => error.code === "instance_already_running");
+    await firstLease.release();
+    const secondLease = await second.acquireWriterLock("contention.lock");
+    await secondLease.release();
+  });
+
+  await t.test("symlink, hardlink, FIFO, and hard-linked metadata fail closed", async () => {
+    await writeFile(join(privilegedDirectory, "special-target"), "secret", { mode: 0o600 });
+    await symlink("special-target", join(privilegedDirectory, "special-symlink"));
+    let state = await productionState();
+    let lease = await state.acquireWriterLock("special-symlink.lock");
+    await assert.rejects(state.readFileBounded("special-symlink", 100), /unexpectedly/);
+    assert.equal(lease.isHeld(), false);
+
+    await link(join(privilegedDirectory, "special-target"), join(privilegedDirectory, "special-hardlink"));
+    state = await productionState();
+    lease = await state.acquireWriterLock("special-hardlink.lock");
+    await assert.rejects(state.readFileBounded("special-hardlink", 100), /unexpectedly/);
+    assert.equal(await readFile(join(privilegedDirectory, "special-target"), "utf8"), "secret");
+
+    await promisify(execFile)("mkfifo", [join(privilegedDirectory, "special-fifo")]);
+    state = await productionState();
+    lease = await state.acquireWriterLock("special-fifo.lock");
+    await assert.rejects(state.writeFileAtomic("special-fifo", "replacement"), /unexpectedly/);
+
+    await writeFile(join(privilegedDirectory, "hardlock-target"), "durable", { mode: 0o600 });
+    await link(join(privilegedDirectory, "hardlock-target"), join(privilegedDirectory, "hardlink.lock"));
+    state = await productionState();
+    await assert.rejects(state.acquireWriterLock("hardlink.lock"), /unexpectedly/);
+    assert.equal(await readFile(join(privilegedDirectory, "hardlock-target"), "utf8"), "durable");
+  });
+
+  await t.test("helper death permanently poisons an acquired session", async () => {
+    const state = await productionState();
+    const lease = await state.acquireWriterLock("death.lock");
+    const metadata = await readFile(join(privilegedDirectory, "death.lock"), "utf8");
+    const helperPid = Number(/^helper_pid=(\d+)$/m.exec(metadata)?.[1]);
+    process.kill(helperPid, "SIGKILL");
+    await waitFor(() => !lease.isHeld());
+    await assert.rejects(state.assertCurrent(), /poisoned/);
+    await assert.rejects(state.writeFileAtomic("death.json", "must-not-run"), /poisoned/);
+    await assert.rejects(lease.release(), /unexpectedly/);
+    await assert.rejects(state.acquireWriterLock("death.lock"), /poisoned/);
+  });
+
+  await t.test("SIGKILL during streamed mutation preserves old value and next writer recovers temp", async () => {
+    let state = await productionState();
+    let lease = await state.acquireWriterLock("crash-seed.lock");
+    await state.writeFileAtomic("crash.json", "original");
+    await lease.release();
+
+    const child = rawHelper();
+    child.stdin.write(frame(1, 1, "crash-writer.lock"));
+    assert.equal((await response(child)).error, 0);
+    const header = frame(3, 2, "crash.json", ".agent-host-crash.tmp", 1_000_000, 1_000_000, false);
+    child.stdin.write(Buffer.concat([header, Buffer.alloc(32_768, 0x78)]));
+    await waitFor(async () => (await readdir(privilegedDirectory)).includes(".agent-host-crash.tmp"));
+    child.kill("SIGKILL");
+    await childExit(child);
+
+    state = await productionState();
+    lease = await state.acquireWriterLock("crash-recovery.lock");
+    assert.equal(await state.readFileBounded("crash.json", 100), "original");
+    assert.equal((await readdir(privilegedDirectory)).includes(".agent-host-crash.tmp"), false);
+    await state.writeFileAtomic("crash.json", "recovered");
+    assert.equal(await state.readFileBounded("crash.json", 100), "recovered");
+    await lease.release();
+  });
+
+  await t.test("malformed and oversized frames terminate without a response", async () => {
+    let child = rawHelper();
+    child.stdin.end(Buffer.alloc(32, 0xff));
+    assert.notEqual((await childExit(child)).code, 0);
+    child = rawHelper();
+    const oversized = frame(1, 1, "oversized.lock");
+    oversized.writeUInt32BE(1_000_001, 20);
+    child.stdin.end(oversized);
+    assert.notEqual((await childExit(child)).code, 0);
+  });
+
+  await t.test("protected parent denies pathname replacement", async () => {
+    await assert.rejects(rename(privilegedDirectory, `${privilegedDirectory}-replacement`),
+      (error) => ["EACCES", "EPERM"].includes(error.code));
+    assert.equal((await lstat(privilegedDirectory)).isDirectory(), true);
+  });
+});
+
+async function productionState(options = {}) {
+  return openAnchoredPrivateState(privilegedDirectory, { helperPath: privilegedHelper, ...options });
 }
 
-async function waitFor(predicate, timeoutMs = 2_000) {
+function rawHelper() {
+  const child = spawn(privilegedHelper, ["serve", privilegedDirectory], { stdio: ["pipe", "pipe", "pipe"] });
+  child.stderr.resume();
+  return child;
+}
+
+function frame(operation, request, name = "", auxiliary = "", payloadLength = 0, limit = 0, includePayload = true) {
+  const nameBytes = Buffer.from(name, "ascii");
+  const auxiliaryBytes = Buffer.from(auxiliary, "ascii");
+  const header = Buffer.alloc(32);
+  header.writeUInt32BE(0x41485053, 0);
+  header.writeUInt16BE(1, 4);
+  header.writeUInt16BE(operation, 6);
+  header.writeUInt32BE(request, 8);
+  header.writeUInt32BE(nameBytes.length, 12);
+  header.writeUInt32BE(auxiliaryBytes.length, 16);
+  header.writeUInt32BE(payloadLength, 20);
+  header.writeUInt32BE(limit, 24);
+  return Buffer.concat([header, nameBytes, auxiliaryBytes, includePayload ? Buffer.alloc(payloadLength) : Buffer.alloc(0)]);
+}
+
+async function response(child) {
+  const header = await readBytes(child.stdout, 32);
+  const length = header.readUInt32BE(20);
+  return { error: header.readUInt32BE(24), payload: await readBytes(child.stdout, length) };
+}
+
+async function readBytes(stream, length) {
+  if (length === 0) return Buffer.alloc(0);
+  const chunks = [];
+  let total = 0;
+  while (total < length) {
+    const chunk = stream.read(length - total);
+    if (chunk) { chunks.push(chunk); total += chunk.length; continue; }
+    if (stream.readableEnded) throw new Error("helper exited before a complete response");
+    await Promise.race([once(stream, "readable"), once(stream, "end")]);
+  }
+  return Buffer.concat(chunks);
+}
+
+function childExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+}
+
+async function waitFor(predicate, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
-    await delay(10);
+    await delay(5);
   }
   throw new Error("condition was not met before timeout");
 }
-
-function shellQuote(value) { return `'${value.replaceAll("'", `'"'"'`)}'`; }

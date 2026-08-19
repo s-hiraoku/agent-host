@@ -22,15 +22,34 @@ jobs:
         with: { node-version: "${{ matrix.node }}" }
       - run: npm run check
 
-  native-state-macos:
-    runs-on: macos-latest
+  native-state-privileged:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }
       - uses: actions/setup-node@v4
-        with: { node-version: 22 }
-      - run: node --test test/anchored-private-state.test.js test/cursor-sdk.test.js
+        with: { node-version: 24 }
+      - name: Build and install trusted native helper and state root
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" in
+            *[!0-9-]*) exit 1 ;;
+          esac
+          native_root="/opt/agent-host-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          helper_build="$RUNNER_TEMP/anchored-private-state"
+          root_group="$(id -g root)"
+          npm run native:build -- "$helper_build"
+          sudo install -d -o root -g "$root_group" -m 0755 "$native_root" "$native_root/bin" "$native_root/state"
+          sudo install -o root -g "$root_group" -m 0555 "$helper_build" "$native_root/bin/anchored-private-state"
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0700 "$native_root/state/user"
+          echo "AGENT_HOST_PRIVILEGED_STATE_DIR=$native_root/state/user" >> "$GITHUB_ENV"
+          echo "AGENT_HOST_PRIVILEGED_STATE_HELPER=$native_root/bin/anchored-private-state" >> "$GITHUB_ENV"
+      - run: npm run test:native:privileged
 
   integrated-artifact:
     runs-on: ubuntu-latest
