@@ -11,7 +11,7 @@ const LEVELS = new Map([["debug", 10], ["info", 20], ["warn", 30], ["error", 40]
 const FIELDS = ["component", "requestId", "adapter", "actionKind", "outcome", "code", "durationMs", "details"];
 const ENUM_FIELDS = {
   component: new Set(["registry", "http", "cli", "service", "adapter", "other"]),
-  adapter: new Set(["codex", "herdr", "process", "demo", "other"]),
+  adapter: new Set(["codex", "cursor-sdk", "herdr", "process", "demo", "other"]),
   actionKind: new Set(["prompt", "send-keys", "approve", "reject", "interrupt", "focus", "read", "other"]),
   outcome: new Set(["success", "failure", "timeout", "error", "other"]),
 };

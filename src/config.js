@@ -4,7 +4,7 @@ import { readPrivateFile } from "./secure-state.js";
 
 export const CONFIG_SCHEMA_VERSION = 1;
 export const DEFAULT_ADAPTER_NAMES = ["codex", "herdr", "process"];
-export const AVAILABLE_ADAPTER_NAMES = [...DEFAULT_ADAPTER_NAMES, "cursor-desktop"];
+export const AVAILABLE_ADAPTER_NAMES = [...DEFAULT_ADAPTER_NAMES, "cursor-desktop", "cursor-sdk-bridge"];
 export const ADAPTER_NAMES = AVAILABLE_ADAPTER_NAMES;
 const LOG_LEVELS = new Set(["debug", "info", "warn", "error"]);
 const CONFIG_KEYS = new Set([
@@ -22,6 +22,7 @@ const CONFIG_KEYS = new Set([
   "logFile",
   "dashboardUrl",
   "allowedOrigins",
+  "cursorSdkBridge",
 ]);
 
 export class ConfigurationError extends Error {
@@ -154,6 +155,7 @@ export async function loadConfiguration({
     cursorUserDataDirectory: cursorPaths.userDataDirectory,
     cursorProjectsDirectory: cursorPaths.projectsDirectory,
     allowedOrigins: [],
+    cursorSdkBridge: undefined,
   };
   const merged = { ...defaults, ...fileConfig, ...environment, ...withoutUndefined(cli) };
   delete merged.configFile;
@@ -173,6 +175,9 @@ export async function loadConfiguration({
   merged.cursorProjectsDirectory = resolvePathBySource(
     "cursorProjectsDirectory", { cli, environment, fileConfig, defaults, baseDirectory },
   );
+  if (merged.cursorSdkBridge !== undefined) {
+    merged.cursorSdkBridge = resolveCursorSdkBridge(merged.cursorSdkBridge, baseDirectory);
+  }
   const configuration = validateConfiguration(merged);
   return { configuration, configFile, configExists, paths: { ...paths, stateDirectory: dirname(configFile) } };
 }
@@ -193,6 +198,7 @@ export function serializableConfiguration(configuration) {
     logFile: configuration.logFile,
     dashboardUrl: configuration.dashboardUrl,
     allowedOrigins: configuration.allowedOrigins,
+    cursorSdkBridge: configuration.cursorSdkBridge,
   }).filter(([, value]) => value !== undefined));
 }
 
@@ -242,6 +248,9 @@ function validateConfiguration(value) {
   configuration.refreshMs = integer(configuration.refreshMs, "refreshMs", 1);
   configuration.adapterTimeoutMs = integer(configuration.adapterTimeoutMs, "adapterTimeoutMs", 1);
   configuration.enabledAdapters = normalizeAdapters(configuration.enabledAdapters);
+  if (configuration.enabledAdapters.includes("cursor-sdk-bridge") && !configuration.cursorSdkBridge) {
+    throw new ConfigurationError("cursorSdkBridge is required when cursor-sdk-bridge is enabled");
+  }
   if (configuration.codexTransport !== "owned" && configuration.codexTransport !== "control") {
     throw new ConfigurationError("codexTransport must be owned or control");
   }
@@ -260,6 +269,70 @@ function validateConfiguration(value) {
     }
   }
   return Object.freeze(configuration);
+}
+
+function resolveCursorSdkBridge(value, baseDirectory) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ConfigurationError("cursorSdkBridge must be an object");
+  }
+  const allowed = new Set([
+    "endpoint", "sdkVersion", "bearerTokenFile", "apiKeyFile", "helperPath",
+    "storeDirectory", "provenanceFile", "timeoutMs", "targets",
+  ]);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw new ConfigurationError(`unknown cursorSdkBridge key: ${key}`);
+  }
+  let endpoint;
+  try { endpoint = new URL(value.endpoint); }
+  catch { throw new ConfigurationError("cursorSdkBridge.endpoint must be a literal loopback HTTP origin"); }
+  const literal = endpoint.hostname === "127.0.0.1" || endpoint.hostname === "[::1]";
+  if (endpoint.protocol !== "http:" || !literal || !endpoint.port || endpoint.username || endpoint.password
+    || endpoint.pathname !== "/" || endpoint.search || endpoint.hash || endpoint.origin !== value.endpoint) {
+    throw new ConfigurationError("cursorSdkBridge.endpoint must be a literal loopback HTTP origin");
+  }
+  if (typeof value.sdkVersion !== "string"
+    || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(value.sdkVersion)) {
+    throw new ConfigurationError("cursorSdkBridge.sdkVersion must be explicit semver");
+  }
+  if (!Array.isArray(value.targets) || value.targets.length < 1 || value.targets.length > 20) {
+    throw new ConfigurationError("cursorSdkBridge.targets must contain 1-20 targets");
+  }
+  const targetIds = new Set();
+  const targets = value.targets.map((target) => {
+    if (!target || typeof target !== "object" || Array.isArray(target)
+      || Object.keys(target).some((key) => !["id", "cwd", "profiles"].includes(key))
+      || typeof target.id !== "string" || !/^[A-Za-z0-9._:-]{1,100}$/.test(target.id)
+      || targetIds.has(target.id) || !Array.isArray(target.profiles) || target.profiles.length < 1
+      || target.profiles.length > 20 || new Set(target.profiles).size !== target.profiles.length
+      || target.profiles.some((profile) => typeof profile !== "string"
+        || !/^[A-Za-z0-9._:-]{1,100}$/.test(profile))) {
+      throw new ConfigurationError("cursorSdkBridge.targets contains an invalid or duplicate target");
+    }
+    targetIds.add(target.id);
+    return Object.freeze({
+      id: target.id,
+      cwd: resolveConfiguredPath(target.cwd, baseDirectory, "cursorSdkBridge.targets.cwd"),
+      profiles: Object.freeze([...target.profiles]),
+    });
+  });
+  const bearerTokenFile = resolveConfiguredPath(
+    value.bearerTokenFile, baseDirectory, "cursorSdkBridge.bearerTokenFile",
+  );
+  const apiKeyFile = resolveConfiguredPath(value.apiKeyFile, baseDirectory, "cursorSdkBridge.apiKeyFile");
+  if (bearerTokenFile === apiKeyFile) {
+    throw new ConfigurationError("cursorSdkBridge bearer token and API key files must be separate");
+  }
+  return Object.freeze({
+    endpoint: endpoint.origin,
+    sdkVersion: value.sdkVersion,
+    bearerTokenFile,
+    apiKeyFile,
+    helperPath: resolveConfiguredPath(value.helperPath, baseDirectory, "cursorSdkBridge.helperPath"),
+    storeDirectory: resolveConfiguredPath(value.storeDirectory, baseDirectory, "cursorSdkBridge.storeDirectory"),
+    provenanceFile: resolveConfiguredPath(value.provenanceFile, baseDirectory, "cursorSdkBridge.provenanceFile"),
+    timeoutMs: value.timeoutMs === undefined ? 10_000 : integer(value.timeoutMs, "cursorSdkBridge.timeoutMs", 1, 60_000),
+    targets: Object.freeze(targets),
+  });
 }
 
 function normalizeAdapters(value) {

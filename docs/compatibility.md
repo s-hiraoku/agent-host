@@ -28,10 +28,9 @@ directories, files, ownership, containment, and final-file no-follow behavior ar
 but same-user path replacement remains outside the threat model because Node does not expose
 the required descriptor-relative traversal for eliminating that TOCTOU class portably.
 
-`@cursor/sdk@1.0.28` was evaluated separately as a public-beta surface for agents created
-and owned by agent-host; it requires Node `>=22.13`. No production SDK adapter or dependency
-is shipped. The provider-neutral launch/ownership contract is implemented and proven only
-by the deterministic demo provider; it performs no local mutation, external execution, or
-billing. SDK agents are not correlated with existing desktop conversations. A future SDK
-adapter must use the durable owned-discovery boundary and separately configure local and
-cloud modes before advertising either. See `docs/spikes/cursor-sdk.md`.
+The opt-in `cursor-sdk-bridge` adapter supports only agent-host-owned local agents over an
+explicit, operator-managed official `sdk.v1` Bridge. It pins and probes the exact Bridge
+version, accepts literal loopback origins only, and uses the durable owned-discovery
+boundary. No Cursor package or binary is shipped. SDK agents are not correlated with
+existing desktop conversations; cloud mode and semantic actions are not advertised. See
+`docs/cursor-sdk-adapter.md` and `docs/spikes/cursor-sdk.md`.

@@ -156,9 +156,11 @@ test("operational metrics use bounded fixed label series and cumulative histogra
   metrics.increment("adapter_failures", { adapter: "unexpected", requestId: "unbounded-2" });
   metrics.observe("action_latency_ms", 25, { actionKind: "prompt", outcome: "success", agentId: "secret" });
   metrics.observe("action_latency_ms", 75, { actionKind: "prompt", outcome: "success", agentId: "different" });
+  metrics.observe("launch_latency_ms", 25, { provider: "cursor", outcome: "success" });
   metrics.setGauge("event_subscribers", 3, { clientId: "ignored" });
   const snapshot = metrics.snapshot();
-  assert.equal(snapshot.seriesCount, 4);
+  assert.equal(snapshot.seriesCount, 5);
+  assert.ok(snapshot.histograms.some((entry) => entry.labels.provider === "cursor"));
   assert.equal(snapshot.histograms[0].value.count, 2);
   assert.equal(snapshot.histograms[0].value.sum, 100);
   assert.equal(snapshot.histograms[0].value.buckets.find((bucket) => bucket.upperBound === 100).count, 2);

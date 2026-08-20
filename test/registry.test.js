@@ -690,3 +690,19 @@ test("forced follow-up does not adopt itself when adapter change queues another 
   assert.equal(calls, 3);
   await registry.close();
 });
+
+test("registry opens adapters before use and terminally destroys them on close", async () => {
+  const calls = [];
+  const adapter = {
+    id: "fixture",
+    async open() { calls.push("open"); },
+    async discover() { calls.push("discover"); return []; },
+    async destroy() { calls.push("destroy"); },
+    async close() { calls.push("close"); },
+  };
+  const registry = new AgentRegistry([adapter]);
+  await Promise.all([registry.open(), registry.open()]);
+  await registry.refresh();
+  await registry.close();
+  assert.deepEqual(calls, ["open", "discover", "destroy"]);
+});

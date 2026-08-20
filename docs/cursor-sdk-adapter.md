@@ -1,9 +1,69 @@
 # Cursor SDK injected adapter boundary
 
-`CursorSdkAdapter` is dependency-free preparation for an agent-host-owned Cursor agent
-provider. It is not registered by `createRuntimeAdapters`, does not load undeclared npm
-packages, and is not a supported instruction for installing `@cursor/sdk` into an
-agent-host release.
+`CursorSdkAdapter` is a dependency-free provider for agent-host-owned Cursor agents. The
+normal defaults do not register it. The explicit `cursor-sdk-bridge` runtime attaches to
+an already-running official `sdk.v1` Bridge on a literal loopback address. Agent Host
+does not download, locate, spawn, stop, or package that Bridge and does not install
+`@cursor/sdk`.
+
+## External Bridge runtime
+
+The operator must provision the official Bridge independently, pin the same release as
+`sdkVersion`, verify its published checksum and licensing, and start it with its own
+private auth-token file. Agent Host accepts only a canonical `http://127.0.0.1:<port>` or
+`http://[::1]:<port>` origin. Hostnames, remote addresses, TLS endpoints, URL credentials,
+paths, queries, fragments, redirects, and proxy discovery are rejected. Startup sends
+authenticated `Ping` and `GetVersion` calls and requires `protocolVersion: sdk.v1` plus
+the exact configured Bridge version before publishing launch capabilities. The transport
+uses a direct one-shot `node:http` socket and does not inherit `fetch`, dispatcher, proxy,
+or agent configuration from the host process.
+
+Both credential files must be owner-only regular files. They are independent: the
+Bridge bearer token authenticates the local transport, while the Cursor API key is sent
+only in the explicit SDK operation. They are read into bounded buffers for each use,
+trimmed, and zero-filled after the call. JavaScript and HTTP necessarily materialize
+short-lived strings; neither value is added to configuration diagnostics, logs,
+provenance, or agent metadata.
+
+Example schema-1 configuration (relative paths resolve from the config directory):
+
+```json
+{
+  "schemaVersion": 1,
+  "enabledAdapters": ["codex", "herdr", "process", "cursor-sdk-bridge"],
+  "cursorSdkBridge": {
+    "endpoint": "http://127.0.0.1:40555",
+    "sdkVersion": "1.0.28",
+    "bearerTokenFile": "secrets/cursor-bridge.token",
+    "apiKeyFile": "secrets/cursor-api.key",
+    "helperPath": "/opt/agent-host/bin/anchored-private-state",
+    "storeDirectory": "/opt/agent-host/cursor-store",
+    "provenanceFile": "/opt/agent-host/state/501/cursor-provenance.json",
+    "timeoutMs": 10000,
+    "targets": [
+      { "id": "main", "cwd": "/absolute/workspace", "profiles": ["composer-2"] }
+    ]
+  }
+}
+```
+
+The first slice exposes create/reconcile/discover only for IDs derived from Agent Host's
+durable launch ledger and private provenance. A not-found lookup may `ResumeAgent` that
+one exact ID from the configured store. It never calls `ListAgents`, adopts arbitrary
+Bridge agents, or correlates desktop conversations. Prompt, read, interrupt, archive,
+delete, cloud mode, managed Bridge lifecycle, and existing Cursor desktop sessions remain
+out of scope. Transport failures after `CreateAgent` are uncertain and are not retried.
+
+An optional live Create/Get/Resume/Get probe can be included in the normal test command
+by setting `AGENT_HOST_CURSOR_BRIDGE_TEST_ENDPOINT`,
+`AGENT_HOST_CURSOR_BRIDGE_TEST_TOKEN_FILE`, `AGENT_HOST_CURSOR_BRIDGE_TEST_API_KEY_FILE`,
+`AGENT_HOST_CURSOR_BRIDGE_TEST_AGENT_ID`, `AGENT_HOST_CURSOR_BRIDGE_TEST_CWD`,
+`AGENT_HOST_CURSOR_BRIDGE_TEST_STORE_DIRECTORY`, and
+`AGENT_HOST_CURSOR_BRIDGE_TEST_PROFILE`; the version defaults to `1.0.28` and can be
+overridden with `AGENT_HOST_CURSOR_BRIDGE_TEST_VERSION`. Both secrets remain in
+owner-only files. The operator must use a dedicated store and agent ID because this
+explicit conformance test creates local durable state. Without every required value the
+case is skipped.
 
 The boundary accepts only an explicitly injected bridge namespace with an exact
 `sdkVersion` and two operations: create a deterministic local agent ID and inspect that
@@ -141,15 +201,13 @@ directory. It does not claim integrity against a same-UID process that directly 
 files inside a directory it owns. That stronger boundary requires a separate privileged
 broker, a separate UID, or an OS mandatory-access-control policy.
 
-## Supported-runtime gate
+## Distribution boundary
 
 Do not add the Cursor SDK to the normal or optional dependency graph, automatically
-discover an operator-installed package, or register this adapter in the standard runtime
-until all gates recorded in the Cursor SDK spike are closed. In particular, the pinned
-SDK's transport dependency currently has unremediated High-severity advisories, release
-artifacts do not package dependencies, and SDK redistribution still requires explicit
-license/TOS review. A production integration must also supply and validate the anchored
-private-state capability; this repository intentionally provides only fixture plumbing.
+discover an operator-installed package or Bridge, or package either until all gates
+recorded in the Cursor SDK spike are closed. The attach-only runtime is a transport
+client, not approval to redistribute Cursor binaries or dependencies. It remains disabled
+unless the operator supplies the complete explicit configuration above.
 
 Release builds enforce disabled-policy schema v1 at three independent boundaries: the
 source `package.json`, the complete staged tree, and the contents of the final tar archive
@@ -164,5 +222,5 @@ Updating dashboard inputs or output therefore requires an explicit reviewed comp
 change; enabling a provider also requires a reviewed policy-version change. This negative
 artifact proof only establishes absence from a disabled release; it does not approve the
 SDK's license/TOS, dependency risk, credentials, transport, or redistribution.
-The anchored private-state backend closes only the provenance-storage prerequisite; it
-does not close these SDK runtime gates.
+The anchored private-state backend and attach transport close only host-side state and
+wire prerequisites; they do not approve Cursor SDK or Bridge redistribution.
