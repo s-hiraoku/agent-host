@@ -4,6 +4,10 @@ This project follows [Semantic Versioning](https://semver.org/). Breaking wire c
 
 ## Unreleased
 
+- Fix process-adapter display names so a root cwd renders as `provider · <pid>` instead of `provider · undefined`.
+- Rank default attention order by status and advertised capabilities before live-process
+  visibility, so detection-only Claude/Codex processes no longer bury idle Herdr/Codex.
+- Widen the Codex adapter range to `>=0.144.6 <0.148.0` after owned-mode dogfood on 0.147.0.
 - Add an authenticated explicit `POST /v1/launches` contract with durable idempotency,
   exact local-mutation/external-billing confirmations, restart reconciliation, and
   ledger-backed owned discovery proven by the deterministic demo provider.

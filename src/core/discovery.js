@@ -30,14 +30,22 @@ export function matchesView(agent, view) {
 }
 
 export function compareAgents(a, b) {
+  const status = (STATUS_RANK.get(a.status) ?? 6) - (STATUS_RANK.get(b.status) ?? 6);
+  if (status) return status;
+  const action = Number(hasAction(b)) - Number(hasAction(a));
+  if (action) return action;
   const aVisibility = a.discovery?.visibility === "active" ? 0 : 1;
   const bVisibility = b.discovery?.visibility === "active" ? 0 : 1;
   if (aVisibility !== bVisibility) return aVisibility - bVisibility;
-  const status = (STATUS_RANK.get(a.status) ?? 6) - (STATUS_RANK.get(b.status) ?? 6);
-  if (status) return status;
   const activity = compareActivity(a.lastActivityAt, b.lastActivityAt);
   if (activity) return activity;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function hasAction(agent) {
+  const capabilities = agent.capabilities;
+  if (!capabilities || typeof capabilities !== "object") return false;
+  return Object.values(capabilities).some(Boolean);
 }
 
 function compareActivity(left, right) {
