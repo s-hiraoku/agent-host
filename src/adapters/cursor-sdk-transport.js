@@ -26,7 +26,7 @@ export function createCursorSdkBridgeClient(options = {}) {
   let destroyed = false;
   let opening;
 
-  const call = async (method, payload, signal) => {
+  const call = async (method, payload, signal, validateResponse) => {
     const body = Buffer.from(JSON.stringify(payload), "utf8");
     if (body.length > MAX_REQUEST_BYTES) throw bridgeError("cursor_bridge_request_too_large");
     try {
@@ -49,6 +49,7 @@ export function createCursorSdkBridgeClient(options = {}) {
         if (response.statusCode < 200 || response.statusCode >= 300) {
           throw connectError(parsed, response.statusCode);
         }
+        validateResponse?.(parsed);
         return redact(parsed);
       }, signal);
     } finally {
@@ -113,13 +114,15 @@ export function createCursorSdkBridgeClient(options = {}) {
       const apiKey = credential.toString("utf8");
       let result;
       try {
-        result = await call(METHODS.get, { agentId, options: { cwd, apiKey } }, signal);
+        result = await call(METHODS.get, { agentId, options: { cwd, apiKey } }, signal,
+          (response) => assertAgentIdentity(response?.agent, agentId, cwd));
       } catch (error) {
         if (error?.code !== "cursor_bridge_not_found") throw error;
         await resumeLocal({ agentId, cwd, storeDirectory, credential, signal });
-        result = await call(METHODS.get, { agentId, options: { cwd, apiKey } }, signal);
+        result = await call(METHODS.get, { agentId, options: { cwd, apiKey } }, signal,
+          (response) => assertAgentIdentity(response?.agent, agentId, cwd));
       }
-      return mapAgent(result?.agent, agentId, cwd);
+      return mapAgent(result?.agent, agentId);
     },
     resumeLocal,
     async close() {
@@ -227,10 +230,14 @@ function connectError(payload, status) {
   return error;
 }
 
-function mapAgent(agent, expectedId, expectedCwd) {
+function assertAgentIdentity(agent, expectedId, expectedCwd) {
   if (!agent || agent.agentId !== expectedId || agent.local?.cwd !== expectedCwd) {
     throw bridgeError("cursor_bridge_agent_mismatch");
   }
+}
+
+function mapAgent(agent, expectedId) {
+  if (!agent || agent.agentId !== expectedId) throw bridgeError("cursor_bridge_agent_mismatch");
   const statuses = {
     AGENT_INFO_STATUS_RUNNING: "working",
     AGENT_INFO_STATUS_FINISHED: "done",

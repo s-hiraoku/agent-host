@@ -123,6 +123,31 @@ test("bridge client resumes only the requested owned agent after not-found", asy
   await subject.destroy();
 });
 
+test("bridge client validates the full workspace path before redacting the response", async (t) => {
+  const cwd = `/${"nested/".repeat(80)}workspace`;
+  let responseCwd = cwd;
+  const bridge = await fakeBridge(async (req, body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    return json(response, 200, { agent: {
+      agentId: body.agentId, status: "AGENT_INFO_STATUS_RUNNING", local: { cwd: responseCwd },
+    } });
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  assert.equal((await subject.getLocal({
+    agentId: "agent-owned", cwd, storeDirectory: "/store", credential: Buffer.from(API_KEY),
+  })).agentId, "agent-owned");
+  responseCwd = `${cwd}-different`;
+  await assert.rejects(subject.getLocal({
+    agentId: "agent-owned", cwd, storeDirectory: "/store", credential: Buffer.from(API_KEY),
+  }), (error) => error.code === "cursor_bridge_agent_mismatch");
+  await subject.destroy();
+});
+
 test("bridge client fails closed on version, response, and RPC errors without exposing credentials", async (t) => {
   const bridge = await fakeBridge(async (req, _body, response) => {
     if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
