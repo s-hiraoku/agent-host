@@ -19,7 +19,11 @@ in Cursor 3.15.19 on macOS. Codex 0.144.6 remains the control-socket protocol sm
 0.147.0 was confirmed healthy in host-owned App Server dogfood. The Cursor adapter is opt-in and depends on `node:sqlite`, which was added in Node 22.5 and no longer requires the experimental flag from Node 22.13. On older Node 22 minors the optional adapter reports `cursor_sqlite_unavailable`; it does not prevent the host or other adapters from operating. Cursor's artifact format is not a public compatibility API, so schema changes may degrade sessions to `unknown`, disable `read`, or mark the adapter unavailable rather than guessing.
 
 The Cursor adapter does not attach to live IDE agent sessions and cannot claim semantic
-control. Its `workspaceCandidate` is Cursor's encoded local project key with low
+control. On macOS it may advertise app-level `focus` when `Cursor.app` is installed;
+that action activates the application and does not target a conversation. The process
+adapter may advertise the same app-level `focus` for running `Claude.app` and
+`ChatGPT.app` main processes only. Its
+`workspaceCandidate` is Cursor's encoded local project key with low
 confidence, not a verified cwd or repository association. `raw` view still exposes only
 the normalized v1 agent model, never raw Cursor artifacts.
 

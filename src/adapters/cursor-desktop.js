@@ -7,6 +7,7 @@ import {
   inspectCursorTranscripts,
   readCursorConversationRows,
 } from "./cursor-artifacts.js";
+import { createMacAppFocus, MAC_DESKTOP_APPS } from "./mac-app-focus.js";
 
 const DEFAULT_RECENT_LIMIT = 100;
 const MAX_HISTORY_SESSIONS = 1_000;
@@ -44,6 +45,9 @@ export class CursorDesktopAdapter {
   #limits;
   #fsApi;
   #uid;
+  #appFocus;
+  #focusApp;
+  #focusAvailable = false;
 
   constructor(options = {}) {
     const defaults = defaultCursorDesktopPaths(options);
@@ -58,6 +62,8 @@ export class CursorDesktopAdapter {
     this.#limits = options.limits;
     this.#fsApi = options.fsApi;
     this.#uid = options.uid;
+    this.#appFocus = options.appFocus ?? createMacAppFocus(options.appFocusOptions);
+    this.#focusApp = options.focusApp ?? MAC_DESKTOP_APPS.cursor;
   }
 
   async discover(options = {}) {
@@ -97,6 +103,8 @@ export class CursorDesktopAdapter {
         signal: options.signal,
       },
     });
+    options.signal?.throwIfAborted();
+    this.#focusAvailable = await this.#appFocus.available(this.#focusApp);
     const discoveredAt = new Date().toISOString();
     return rows.map((row) => this.#agent(row, transcripts.get(row.id), scan, discoveredAt));
   }
@@ -106,6 +114,7 @@ export class CursorDesktopAdapter {
     const recent = this.#now() - row.updatedAt <= this.#recentMs;
     const capabilities = noCapabilities();
     capabilities.read = !scan.truncated && Boolean(transcript?.readable);
+    capabilities.focus = this.#focusAvailable;
     const conflict = Boolean(scan.truncated || transcript?.conflict);
     return {
       id: `cursor-desktop:${this.#profileScope}:${row.id}`,
@@ -155,10 +164,26 @@ export class CursorDesktopAdapter {
     };
   }
 
+  async focus(agent) {
+    if (!this.#focusAvailable) {
+      return failure(agent, "focus", "capability_not_available", "capability focus is not available");
+    }
+    const result = await this.#appFocus.activate(this.#focusApp);
+    if (!result.ok) {
+      return failure(
+        agent,
+        "focus",
+        result.code ?? "desktop_focus_failed",
+        "Cursor application could not be brought to the front",
+      );
+    }
+    return { ok: true, agentId: agent.id, action: "focus" };
+  }
+
   async read(agent, options = {}) {
     const sessionId = agent?.sessionId;
     if (!sessionId || agent?.metadata?.cursorDesktop?.profileScope !== this.#profileScope) {
-      return failure(agent, "cursor_transcript_unavailable", "Cursor transcript is unavailable");
+      return failure(agent, "read", "cursor_transcript_unavailable", "Cursor transcript is unavailable");
     }
     try {
       const scan = await this.#findTranscripts({
@@ -171,7 +196,7 @@ export class CursorDesktopAdapter {
         signal: options.signal,
       });
       if (scan.truncated) {
-        return failure(agent, "cursor_transcript_conflict", "Cursor transcript artifacts conflict");
+        return failure(agent, "read", "cursor_transcript_conflict", "Cursor transcript artifacts conflict");
       }
       const transcripts = await this.#inspectTranscripts({
         candidatesBySession: scan.bySession,
@@ -184,10 +209,10 @@ export class CursorDesktopAdapter {
       });
       const transcript = transcripts.get(sessionId);
       if (transcript?.conflict) {
-        return failure(agent, "cursor_transcript_conflict", "Cursor transcript artifacts conflict");
+        return failure(agent, "read", "cursor_transcript_conflict", "Cursor transcript artifacts conflict");
       }
       if (!transcript?.readable) {
-        return failure(agent, "cursor_transcript_unavailable", "Cursor transcript is unavailable");
+        return failure(agent, "read", "cursor_transcript_unavailable", "Cursor transcript is unavailable");
       }
       return {
         ok: true,
@@ -202,17 +227,17 @@ export class CursorDesktopAdapter {
       };
     } catch (error) {
       if (error?.name === "AbortError") throw error;
-      return failure(agent, error?.code ?? "cursor_transcript_unavailable", "Cursor transcript is unavailable");
+      return failure(agent, "read", error?.code ?? "cursor_transcript_unavailable", "Cursor transcript is unavailable");
     }
   }
 }
 
-function failure(agent, code, message) {
+function failure(agent, action, code, message) {
   return {
     ok: false,
     code,
     agentId: agent?.id,
-    action: "read",
+    action,
     message,
   };
 }
