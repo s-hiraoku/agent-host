@@ -28,6 +28,7 @@ class FakeCodexClient {
   resumeThreadHandler;
   loadedThreads = [];
   resumeFailures = new Set();
+  threadReadResult;
   generation = 1;
   defaultCanAcceptDirectInput = true;
   disconnectOnMethod;
@@ -76,7 +77,7 @@ class FakeCodexClient {
       return { turnId: params.expectedTurnId };
     }
     if (method === "turn/interrupt") return {};
-    if (method === "thread/read") return { thread: { id: params.threadId, turns: [] } };
+    if (method === "thread/read") return this.threadReadResult ?? { thread: { id: params.threadId, turns: [] } };
     return {};
   }
 
@@ -97,6 +98,25 @@ test("Codex adapter discovers threads and sends prompts", async () => {
   assert.equal(result.ok, true);
   assert.equal(client.requests.some((entry) => entry.method === "thread/resume"), true);
   assert.equal(client.requests.some((entry) => entry.method === "turn/start"), true);
+});
+
+test("Codex adapter preserves a live active turn discovered from thread/read", async () => {
+  const client = new FakeCodexClient();
+  client.threadListResult = {
+    data: [{ id: "thr_1", preview: "Active", status: { type: "notLoaded" } }],
+    nextCursor: null,
+  };
+  client.threadReadResult = {
+    thread: { id: "thr_1", turns: [{ id: "turn_live", status: "inProgress" }] },
+  };
+  const adapter = new CodexAdapter({ client });
+  const [agent] = await adapter.discover();
+  assert.equal(agent.status, "unknown");
+
+  await adapter.prompt(agent, "continue");
+  const [active] = await adapter.discover();
+  assert.equal(active.status, "working");
+  assert.equal(active.activeTurnId, "turn_live");
 });
 
 test("Codex adapter exposes and resolves semantic approvals", async () => {
@@ -461,6 +481,7 @@ test("Codex control mode subscribes only loaded threads and gates persisted-only
   assert.equal(loaded.capabilities.prompt, true);
   assert.equal(loaded.capabilities.read, true);
   assert.equal(loaded.discovery.provenance, "shared-control-socket");
+  assert.equal(persisted.status, "unknown");
   assert.deepEqual(persisted.capabilities, {
     prompt: false, sendKeys: false, approve: false, reject: false, interrupt: false, focus: false, read: false,
   });

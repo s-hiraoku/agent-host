@@ -116,7 +116,7 @@ test("canonical transcript comparison handles identical, prefix, divergent, part
   const partialParsed = await parseCursorTranscript(partial);
   const corruptParsed = await parseCursorTranscript(corrupt);
   assert.equal(completeParsed.status, "idle");
-  assert.equal(prefixParsed.status, "unknown");
+  assert.equal(prefixParsed.status, "working");
   assert.equal(partialParsed.valid, true);
   assert.equal(partialParsed.partial, true);
   assert.equal(partialParsed.status, "unknown");

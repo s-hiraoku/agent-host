@@ -16,10 +16,11 @@ const MAX_APPROVAL_FILES = 20;
 const MAX_THREAD_CWDS = 1_000;
 const TERMINAL_TURN_METHODS = new Set(["turn/completed", "turn/failed", "turn/aborted"]);
 
-function mapStatus(status, hasApproval) {
+function mapStatus(status, hasApproval, { live = false, activeTurn = false } = {}) {
   if (hasApproval) return "blocked";
+  if (activeTurn) return "working";
   switch (status?.type) {
-    case "active": return "working";
+    case "active": return live ? "working" : "unknown";
     case "idle": return "idle";
     case "systemError": return "error";
     case "notLoaded": return "unknown";
@@ -161,9 +162,12 @@ export class CodexAdapter {
     const status = this.#status.get(thread.id) ?? thread.status;
     const title = thread.name ?? thread.preview ?? thread.agentNickname ?? thread.id;
     const lastActivityAt = codexTimestamp(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt);
-    const mappedStatus = mapStatus(status, approvals.length > 0);
     const controllable = this.#mode === "owned"
       || this.#subscriptions.get(thread.id) === this.#connectionGeneration;
+    const mappedStatus = mapStatus(status, approvals.length > 0, {
+      live: controllable,
+      activeTurn: controllable && this.#activeTurns.has(thread.id),
+    });
     const canPrompt = this.#mode === "owned" || (controllable && this.#directInput.get(thread.id) === true);
     return {
       id: `codex:${thread.id}`,

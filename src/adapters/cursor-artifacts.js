@@ -437,7 +437,8 @@ function boundMessages(messages, bounded) {
 }
 
 function terminalStatus(record) {
-  if (record?.type !== "turn_ended") return "unknown";
+  if (record && record.type !== "turn_ended") return "working";
+  if (!record) return "unknown";
   if (record.status === "success") return "idle";
   if (record.status === "error") return "error";
   return "unknown";
