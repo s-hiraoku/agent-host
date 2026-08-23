@@ -360,7 +360,7 @@ test("bridge client sends one owned prompt and cancels only its exact active run
   assert.deepEqual(await subject.cancelLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     credential: Buffer.from(API_KEY),
-  }), { agentId: "agent-owned", status: "cancelling" });
+  }), { agentId: "agent-owned", runId: "run-owned-1", status: "cancelling" });
   assert.equal((await subject.getLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     credential: Buffer.from(API_KEY),
@@ -601,8 +601,93 @@ test("bridge client retains an observed exact run for cancellation after stream 
   assert.deepEqual(await subject.cancelLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     credential: Buffer.from(API_KEY),
-  }), { agentId: "agent-owned", status: "cancelling" });
+  }), { agentId: "agent-owned", runId: "run-owned-disconnected", status: "cancelling" });
   assert.deepEqual(cancelled, { runId: "run-owned-disconnected", agentId: "agent-owned" });
+  await subject.destroy();
+});
+
+test("bridge client revalidates and cancels one explicit durable run without process memory", async (t) => {
+  const requests = [];
+  const bridge = await fakeBridge(async (req, body, response) => {
+    requests.push({ url: req.url, body });
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    if (req.url.endsWith("/GetRun")) return json(response, 200, { run: {
+      runId: body.runId, agentId: body.options.agentId, status: "RUN_LIFECYCLE_STATUS_RUNNING",
+    } });
+    if (req.url.endsWith("/CancelRun")) return json(response, 200, {});
+    throw new Error(`unexpected request: ${req.url}`);
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  assert.deepEqual(await subject.cancelLocal({
+    agentId: "agent-owned", runId: "run-owned-durable", cwd: "/workspace",
+    storeDirectory: "/store", credential: Buffer.from(API_KEY),
+  }), { agentId: "agent-owned", runId: "run-owned-durable", status: "cancelling" });
+  assert.deepEqual(requests.slice(2), [
+    {
+      url: "/sdk.v1.SdkAgentService/GetRun",
+      body: {
+        runId: "run-owned-durable",
+        options: {
+          runtime: "RUNTIME_LOCAL", cwd: "/workspace", agentId: "agent-owned", apiKey: API_KEY,
+        },
+      },
+    },
+    {
+      url: "/sdk.v1.SdkAgentService/CancelRun",
+      body: { runId: "run-owned-durable", agentId: "agent-owned" },
+    },
+  ]);
+  await subject.destroy();
+});
+
+test("bridge client classifies exact-run cancel failures without unsafe retries", async (t) => {
+  let mode = "creating";
+  let cancelCalls = 0;
+  const bridge = await fakeBridge(async (req, body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    if (req.url.endsWith("/GetRun")) return json(response, 200, { run: {
+      runId: body.runId,
+      agentId: mode === "mismatch" ? "agent-other" : body.options.agentId,
+      status: mode === "creating" ? "RUN_LIFECYCLE_STATUS_CREATING" : "RUN_LIFECYCLE_STATUS_RUNNING",
+    } });
+    cancelCalls += 1;
+    if (mode === "rejected") return json(response, 422, { code: "invalid_argument" });
+    return json(response, 500, { code: "internal" });
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  const input = {
+    agentId: "agent-owned", runId: "run-owned-durable", cwd: "/workspace",
+    storeDirectory: "/store", credential: Buffer.from(API_KEY),
+  };
+  for (const preflightMode of ["creating", "mismatch"]) {
+    mode = preflightMode;
+    await assert.rejects(subject.cancelLocal({ ...input, credential: Buffer.from(API_KEY) }), (error) => {
+      assert.equal(error.cancelDisposition, "not_sent");
+      return true;
+    });
+  }
+  assert.equal(cancelCalls, 0);
+  mode = "rejected";
+  await assert.rejects(subject.cancelLocal({ ...input, credential: Buffer.from(API_KEY) }), (error) => {
+    assert.equal(error.cancelDisposition, "rejected");
+    return true;
+  });
+  mode = "ambiguous";
+  await assert.rejects(subject.cancelLocal({ ...input, credential: Buffer.from(API_KEY) }), (error) => {
+    assert.equal(error.cancelDisposition, "ambiguous");
+    return true;
+  });
+  assert.equal(cancelCalls, 2);
   await subject.destroy();
 });
 

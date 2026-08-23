@@ -36,9 +36,11 @@ The opt-in `cursor-sdk-bridge` adapter supports only agent-host-owned local agen
 explicit, operator-managed official `sdk.v1` Bridge. It pins and probes the exact Bridge
 version, accepts literal loopback origins only, and uses the durable owned-discovery
 boundary. No Cursor package or binary is shipped. SDK agents are not correlated with
-existing desktop conversations. Prompt is limited to a currently owned local agent;
-interrupt is advertised only for an exact process-local run ID observed from that
-prompt's Bridge stream. Read is limited to the exact terminal run ID durably bound to
+existing desktop conversations. Prompt is limited to a currently owned local agent and,
+after the first run, requires exact terminal-run proof. Interrupt is advertised only for
+the exact durable run ID observed from that prompt's Bridge stream and revalidated as
+running, including after Agent Host restart. A durable run-scoped fence prevents repeated
+cancellation after an accepted or ambiguous result. Read is limited to the exact terminal run ID durably bound to
 that owned agent after an Agent Host prompt; it returns bounded user/assistant text only.
 It does not list, infer, or stream runs and cannot read arbitrary existing Cursor desktop
 sessions. Approval, focus, archive, delete, and cloud mode are not advertised. See

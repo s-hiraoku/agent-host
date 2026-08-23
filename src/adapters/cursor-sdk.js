@@ -20,7 +20,8 @@ const ATTEMPT_ID = /^attempt:[0-9a-f-]{36}$/;
 const LAUNCH_ID = /^launch:[0-9a-f-]{36}$/;
 const RECORD_KEYS = new Set([
   "attemptId", "launchId", "providerAgentId", "agentId", "target", "profile", "sdkVersion",
-  "bridgeNamespace", "storeScope", "targetDigest", "runId", "runPending", "state", "createdAt", "updatedAt",
+  "bridgeNamespace", "storeScope", "targetDigest", "runId", "runPending", "cancelAttemptedRunId",
+  "state", "createdAt", "updatedAt",
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
 const CREDENTIAL_SOURCES = new WeakMap();
@@ -254,7 +255,22 @@ export class CursorSdkAdapter {
         }
         if (!result) return this.#agent(record, provenance);
         assertProviderAgent(result, provenance.providerAgentId);
-        return this.#agent(record, provenance, result);
+        let run;
+        if (provenance.runPending !== true && SAFE_RUN_ID.test(provenance.runId ?? "")
+          && typeof this.#bridge.inspectRunLocal === "function") {
+          try {
+            run = await this.#callBridge("inspectRunLocal", {
+              agentId: provenance.providerAgentId,
+              runId: provenance.runId,
+              cwd: target.cwd,
+              storeDirectory: this.#storeDirectory,
+            }, signal);
+            assertRunIdentity(run, provenance.providerAgentId, provenance.runId);
+          } catch (error) {
+            throwIfAborted(signal);
+          }
+        }
+        return this.#agent(record, provenance, result, run);
       });
     });
   }
@@ -288,13 +304,6 @@ export class CursorSdkAdapter {
         if (!bridgeInvoked || (!accepted && ["not_sent", "rejected"].includes(error?.sendDisposition))) {
           await this.#state.restoreRun(context.provenance.attemptId).catch(() => {});
         }
-        if (accepted) {
-          await this.#callBridge("cancelLocal", {
-            agentId: context.provenance.providerAgentId,
-            cwd: context.target.cwd,
-            storeDirectory: this.#storeDirectory,
-          }).catch(() => {});
-        }
         throw error;
       }
     }));
@@ -303,13 +312,26 @@ export class CursorSdkAdapter {
   async interrupt(agent, { signal } = {}) {
     return this.#run(() => this.#exclusiveAgent(agent?.id, async () => {
       const context = await this.#actionContext(agent, "interrupt", signal);
-      const result = await this.#callBridge("cancelLocal", {
-        agentId: context.provenance.providerAgentId,
-        cwd: context.target.cwd,
-        storeDirectory: this.#storeDirectory,
-      }, signal);
-      assertProviderAgent(result, context.provenance.providerAgentId);
-      return { ok: true, agentId: agent.id, action: "interrupt" };
+      const runId = context.provenance.runId;
+      await this.#state.beginCancel(context.provenance.attemptId, runId);
+      let bridgeInvoked = false;
+      try {
+        await this.#assertBridgeDirectories(context.target);
+        const result = await this.#callBridge("cancelLocal", {
+          agentId: context.provenance.providerAgentId,
+          runId,
+          cwd: context.target.cwd,
+          storeDirectory: this.#storeDirectory,
+        }, signal, () => { bridgeInvoked = true; });
+        assertProviderAgent(result, context.provenance.providerAgentId);
+        if (result?.runId !== runId) throw new Error("Cursor SDK bridge returned a different run identity");
+        return { ok: true, agentId: agent.id, action: "interrupt" };
+      } catch (error) {
+        if (!bridgeInvoked || ["not_sent", "rejected"].includes(error?.cancelDisposition)) {
+          await this.#state.restoreCancel(context.provenance.attemptId, runId).catch(() => {});
+        }
+        throw error;
+      }
     }));
   }
 
@@ -460,10 +482,26 @@ export class CursorSdkAdapter {
     }, signal);
     assertProviderAgent(current, provenance.providerAgentId);
     const status = normalizeStatus(current.status);
+    let run;
+    const hasRun = provenance.runPending !== true && SAFE_RUN_ID.test(provenance.runId ?? "")
+      && typeof this.#bridge.inspectRunLocal === "function";
+    if (hasRun && ["interrupt", "prompt"].includes(capability)) {
+      run = await this.#callBridge("inspectRunLocal", {
+        agentId: provenance.providerAgentId,
+        runId: provenance.runId,
+        cwd: target.cwd,
+        storeDirectory: this.#storeDirectory,
+      }, signal);
+      assertRunIdentity(run, provenance.providerAgentId, provenance.runId);
+    }
     const allowed = capability === "prompt"
       ? ["idle", "error"].includes(status) && provenance.runPending !== true
+        && (!SAFE_RUN_ID.test(provenance.runId ?? "") || run?.status === "terminal")
       : capability === "interrupt"
-        ? status === "working" && current.interruptible === true
+        ? status === "working" && run?.status === "working"
+          && provenance.runPending !== true
+          && provenance.cancelAttemptedRunId === undefined
+          && typeof this.#bridge.cancelLocal === "function"
         : ["idle", "error"].includes(status) && provenance.runPending !== true
           && SAFE_RUN_ID.test(provenance.runId ?? "")
           && typeof this.#bridge.readRunLocal === "function";
@@ -495,6 +533,9 @@ export class CursorSdkAdapter {
       if (operation === "sendLocal" && ["not_sent", "rejected"].includes(error?.sendDisposition)) {
         failure.sendDisposition = error.sendDisposition;
       }
+      if (operation === "cancelLocal" && ["not_sent", "rejected"].includes(error?.cancelDisposition)) {
+        failure.cancelDisposition = error.cancelDisposition;
+      }
       throw failure;
     }
   }
@@ -514,17 +555,20 @@ export class CursorSdkAdapter {
       && record.request?.risk?.localMutation === true && record.request?.risk?.externalBillable === true);
   }
 
-  #agent(record, provenance, result) {
+  #agent(record, provenance, result, run) {
     const now = timestamp(this.#now);
     const status = result ? normalizeStatus(result.status) : "unknown";
     const capabilities = noCapabilities();
     capabilities.prompt = Boolean(result && status !== "working" && status !== "unknown"
       && provenance.runPending !== true
+      && (!SAFE_RUN_ID.test(provenance.runId ?? "") || run?.status === "terminal")
       && typeof this.#bridge.sendLocal === "function");
-    capabilities.interrupt = Boolean(result && status === "working" && result.interruptible === true
+    capabilities.interrupt = Boolean(result && status === "working" && run?.status === "working"
+      && provenance.runPending !== true && provenance.cancelAttemptedRunId === undefined
       && typeof this.#bridge.cancelLocal === "function");
     capabilities.read = Boolean(result && ["idle", "error"].includes(status) && provenance.runPending !== true
-      && SAFE_RUN_ID.test(provenance.runId ?? "") && typeof this.#bridge.readRunLocal === "function");
+      && SAFE_RUN_ID.test(provenance.runId ?? "") && run?.status === "terminal"
+      && typeof this.#bridge.readRunLocal === "function");
     return {
       id: record.agentId,
       provider: "cursor",
@@ -624,6 +668,7 @@ export class CursorSdkProvenanceStore {
     return this.#updateOwned(attemptId, (record) => {
       const updated = { ...record, runId };
       delete updated.runPending;
+      delete updated.cancelAttemptedRunId;
       return updated;
     });
   }
@@ -632,6 +677,27 @@ export class CursorSdkProvenanceStore {
     return this.#updateOwned(attemptId, (record) => {
       const updated = { ...record };
       delete updated.runPending;
+      return updated;
+    });
+  }
+
+  async beginCancel(attemptId, runId) {
+    if (!SAFE_RUN_ID.test(runId ?? "")) throw new Error("invalid Cursor SDK cancel provenance");
+    return this.#updateOwned(attemptId, (record) => {
+      if (record.runPending === true || record.runId !== runId || record.cancelAttemptedRunId !== undefined) {
+        throw new Error("Cursor SDK exact run is not cancellable");
+      }
+      return { ...record, cancelAttemptedRunId: runId };
+    });
+  }
+
+  async restoreCancel(attemptId, runId) {
+    return this.#updateOwned(attemptId, (record) => {
+      if (record.runId !== runId || record.cancelAttemptedRunId !== runId) {
+        throw new Error("Cursor SDK cancel provenance changed");
+      }
+      const updated = { ...record };
+      delete updated.cancelAttemptedRunId;
       return updated;
     });
   }
@@ -875,10 +941,13 @@ function validateRecord(record) {
     || !SAFE_ID.test(record.sdkVersion ?? "") || !SAFE_ID.test(record.bridgeNamespace ?? "")
     || (record.runId !== undefined && !SAFE_RUN_ID.test(record.runId))
     || (record.runPending !== undefined && record.runPending !== true)
+    || (record.cancelAttemptedRunId !== undefined
+      && (!SAFE_RUN_ID.test(record.cancelAttemptedRunId) || record.cancelAttemptedRunId !== record.runId))
     || !/^[A-Za-z0-9_-]{16}$/.test(record.storeScope ?? "")
     || !/^[A-Za-z0-9_-]{43}$/.test(record.targetDigest ?? "")
     || !["intent", "owned"].includes(record.state)
-    || (record.state === "intent" && (record.runId !== undefined || record.runPending !== undefined))
+    || (record.state === "intent" && (record.runId !== undefined || record.runPending !== undefined
+      || record.cancelAttemptedRunId !== undefined))
     || !validTimestamp(record.createdAt) || !validTimestamp(record.updatedAt)
     || Date.parse(record.updatedAt) < Date.parse(record.createdAt)) {
     throw new Error("invalid Cursor SDK provenance record");
@@ -891,6 +960,13 @@ function normalizeStatus(status) {
   if (["idle", "completed", "done", "success"].includes(status)) return "idle";
   if (["error", "failed"].includes(status)) return "error";
   return "unknown";
+}
+
+function assertRunIdentity(result, expectedAgentId, expectedRunId) {
+  if (!result || result.agentId !== expectedAgentId || result.runId !== expectedRunId
+    || !["working", "creating", "terminal"].includes(result.status)) {
+    throw new Error("Cursor SDK bridge returned a different run identity");
+  }
 }
 
 function sanitizeReadResult(result, secret) {

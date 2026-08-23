@@ -29,7 +29,7 @@ const TERMINAL_RUN_STATUSES = new Set([
   "RUN_LIFECYCLE_STATUS_CANCELLED",
   "RUN_LIFECYCLE_STATUS_EXPIRED",
 ]);
-const DEFINITIVE_SEND_REJECTION_STATUSES = new Set([400, 401, 403, 404, 409, 413, 415, 422, 429]);
+const DEFINITIVE_MUTATION_REJECTION_STATUSES = new Set([400, 401, 403, 404, 409, 413, 415, 422, 429]);
 const METHODS = Object.freeze({
   ping: "sdk.v1.SdkBridgeControlService/Ping",
   version: "sdk.v1.SdkBridgeControlService/GetVersion",
@@ -306,17 +306,51 @@ export function createCursorSdkBridgeClient(options = {}) {
       );
       return { agentId, runId, ...parseConversation(response.conversationJson) };
     },
-    async cancelLocal({ agentId, cwd, storeDirectory, credential, signal }) {
+    async inspectRunLocal({ agentId, runId, cwd, storeDirectory, credential, signal }) {
+      assertReady(ready, destroyed);
+      validateOperation(agentId, cwd, storeDirectory, "owned", credential);
+      if (!SAFE_RUN_ID.test(runId ?? "")) throw new TypeError("invalid Cursor SDK Bridge run identity");
+      const apiKey = credential.toString("utf8");
+      const response = await call(METHODS.getRun, {
+        runId,
+        options: { runtime: "RUNTIME_LOCAL", cwd, agentId, apiKey },
+      }, signal, (value) => assertExactRun(value?.run, agentId, runId));
+      return mapRun(response.run, agentId, runId);
+    },
+    async cancelLocal({ agentId, runId, cwd, storeDirectory, credential, signal }) {
       assertReady(ready, destroyed);
       validateOperation(agentId, cwd, storeDirectory, "owned", credential);
       const active = activeRuns.get(agentId);
-      if (!active?.runId || active.cancelRequested) {
+      runId ??= active?.runId;
+      if (runId === undefined) throw bridgeError("cursor_bridge_run_not_interruptible");
+      if (!SAFE_RUN_ID.test(runId)) throw new TypeError("invalid Cursor SDK Bridge run identity");
+      if ((active?.runId && active.runId !== runId) || active?.cancelRequested) {
         throw bridgeError("cursor_bridge_run_not_interruptible");
       }
-      active.cancelRequested = true;
-      notify();
-      await call(METHODS.cancel, { runId: active.runId, agentId }, signal);
-      return { agentId, status: "cancelling" };
+      let cancelAttempted = false;
+      try {
+        const run = active
+          ? { agentId, runId, status: "working" }
+          : await client.inspectRunLocal({ agentId, runId, cwd, storeDirectory, credential, signal });
+        if (run.status !== "working") throw bridgeError("cursor_bridge_run_not_interruptible");
+        if (active) {
+          active.cancelRequested = true;
+          notify();
+        }
+        cancelAttempted = true;
+        await call(METHODS.cancel, { runId, agentId }, signal);
+        return { agentId, runId, status: "cancelling" };
+      } catch (error) {
+        const disposition = !cancelAttempted
+          ? "not_sent"
+          : isDefinitiveMutationRejection(error) ? "rejected" : "ambiguous";
+        if (active && ["not_sent", "rejected"].includes(disposition)) {
+          active.cancelRequested = false;
+          notify();
+        }
+        markDisposition(error, "cancelDisposition", disposition);
+        throw error;
+      }
     },
     onChange(listener) {
       if (typeof listener !== "function") throw new TypeError("listener must be a function");
@@ -533,9 +567,13 @@ function connectError(payload, status) {
   return error;
 }
 
-function isDefinitiveSendRejection(error) {
-  return DEFINITIVE_SEND_REJECTION_STATUSES.has(error?.status)
+function isDefinitiveMutationRejection(error) {
+  return DEFINITIVE_MUTATION_REJECTION_STATUSES.has(error?.status)
     || error?.code === "cursor_bridge_request_too_large";
+}
+
+function isDefinitiveSendRejection(error) {
+  return isDefinitiveMutationRejection(error);
 }
 
 function assertAgentIdentity(agent, expectedId, expectedCwd) {
@@ -545,14 +583,31 @@ function assertAgentIdentity(agent, expectedId, expectedCwd) {
 }
 
 function assertTerminalRun(run, expectedAgentId, expectedRunId) {
-  if (!run || run.agentId !== expectedAgentId || run.runId !== expectedRunId) {
-    throw bridgeError("cursor_bridge_agent_mismatch");
-  }
+  assertExactRun(run, expectedAgentId, expectedRunId);
   if (TERMINAL_RUN_STATUSES.has(run.status)) return;
   if (["RUN_LIFECYCLE_STATUS_CREATING", "RUN_LIFECYCLE_STATUS_RUNNING"].includes(run.status)) {
     throw bridgeError("cursor_bridge_run_not_terminal");
   }
   throw bridgeError("cursor_bridge_invalid_response");
+}
+
+function assertExactRun(run, expectedAgentId, expectedRunId) {
+  if (!run || run.agentId !== expectedAgentId || run.runId !== expectedRunId) {
+    throw bridgeError("cursor_bridge_agent_mismatch");
+  }
+  if (run.status !== "RUN_LIFECYCLE_STATUS_CREATING"
+    && run.status !== "RUN_LIFECYCLE_STATUS_RUNNING"
+    && !TERMINAL_RUN_STATUSES.has(run.status)) {
+    throw bridgeError("cursor_bridge_invalid_response");
+  }
+}
+
+function mapRun(run, expectedAgentId, expectedRunId) {
+  assertExactRun(run, expectedAgentId, expectedRunId);
+  const status = run.status === "RUN_LIFECYCLE_STATUS_RUNNING"
+    ? "working"
+    : run.status === "RUN_LIFECYCLE_STATUS_CREATING" ? "creating" : "terminal";
+  return { agentId: expectedAgentId, runId: expectedRunId, status };
 }
 
 function parseConversation(conversationJson) {
@@ -677,9 +732,13 @@ function redactExactSecret(value, secret) {
 }
 
 function markSendDisposition(error, disposition) {
+  markDisposition(error, "sendDisposition", disposition);
+}
+
+function markDisposition(error, property, disposition) {
   if (!error || (typeof error !== "object" && typeof error !== "function")) return;
   try {
-    Object.defineProperty(error, "sendDisposition", {
+    Object.defineProperty(error, property, {
       value: disposition,
       configurable: true,
     });
