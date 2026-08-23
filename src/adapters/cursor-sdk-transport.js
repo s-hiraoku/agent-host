@@ -246,11 +246,9 @@ export function createCursorSdkBridgeClient(options = {}) {
       if (!active?.runId || active.cancelRequested) {
         throw bridgeError("cursor_bridge_run_not_interruptible");
       }
+      active.cancelRequested = true;
+      notify();
       await call(METHODS.cancel, { runId: active.runId, agentId }, signal);
-      if (activeRuns.get(agentId) === active) {
-        active.cancelRequested = true;
-        notify();
-      }
       return { agentId, status: "cancelling" };
     },
     onChange(listener) {

@@ -298,6 +298,52 @@ test("bridge client retains an observed exact run for cancellation after stream 
   await subject.destroy();
 });
 
+test("bridge client disables repeat cancellation before an ambiguous CancelRun response", async (t) => {
+  let cancellations = 0;
+  const bridge = await fakeBridge(async (req, body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    if (req.url.endsWith("/ResumeAgent")) return json(response, 200, { agentId: body.agentId });
+    if (req.url.endsWith("/Send")) {
+      response.writeHead(200, { "content-type": "application/connect+json" });
+      response.write(connectFrame({ sdkMessage: {
+        message: { agentId: "agent-owned", runId: "run-owned-ambiguous-cancel" },
+      } }));
+      return;
+    }
+    if (req.url.endsWith("/GetAgent")) {
+      return json(response, 200, { agent: {
+        agentId: body.agentId, status: "AGENT_INFO_STATUS_RUNNING", local: { cwd: body.options.cwd },
+      } });
+    }
+    cancellations += 1;
+    response.socket.destroy();
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  await subject.sendLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    text: "Cancel exactly once", credential: Buffer.from(API_KEY),
+  });
+  await assert.rejects(subject.cancelLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  }));
+  assert.equal((await subject.getLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  })).interruptible, false);
+  await assert.rejects(subject.cancelLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  }), (error) => error.code === "cursor_bridge_run_not_interruptible");
+  assert.equal(cancellations, 1);
+  await subject.destroy();
+});
+
 test("bridge client rejects a mismatched stream identity without enabling cancellation", async (t) => {
   const bridge = await fakeBridge(async (req, body, response) => {
     if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
@@ -488,8 +534,8 @@ test("official Cursor SDK Bridge conformance is available as an explicit live op
     });
     assert.equal((await subject.getLocal({ ...config, credential: apiKey })).agentId, config.agentId);
     assert.equal((await subject.resumeLocal({ ...config, credential: apiKey })).agentId, config.agentId);
-    assert.equal((await subject.getLocal({ ...config, credential: apiKey })).agentId, config.agentId);
     assert.equal((await subject.sendLocal({ ...config, text: config.prompt, credential: apiKey })).agentId, config.agentId);
+    assert.equal((await subject.getLocal({ ...config, credential: apiKey })).agentId, config.agentId);
     assert.equal((await subject.cancelLocal({ ...config, credential: apiKey })).agentId, config.agentId);
   } finally {
     apiKeyFile.fill(0);

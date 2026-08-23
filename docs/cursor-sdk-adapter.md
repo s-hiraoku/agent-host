@@ -69,8 +69,8 @@ desktop conversations. Read, archive, delete, cloud mode, managed Bridge lifecyc
 existing Cursor desktop sessions remain out of scope. Transport failures after
 `CreateAgent` are uncertain and are not retried.
 
-An optional live Create/Get/Resume/Get probe can be included in the normal test command
-by setting `AGENT_HOST_CURSOR_BRIDGE_TEST_ENDPOINT`,
+An optional live Create/Get/Resume/Prompt/Get/Cancel probe can be included in the normal
+test command by setting `AGENT_HOST_CURSOR_BRIDGE_TEST_ENDPOINT`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_TOKEN_FILE`, `AGENT_HOST_CURSOR_BRIDGE_TEST_API_KEY_FILE`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_AGENT_ID`, `AGENT_HOST_CURSOR_BRIDGE_TEST_CWD`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_STORE_DIRECTORY`, and
