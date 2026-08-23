@@ -5,6 +5,17 @@ import { claimCursorSdkCredentialSource } from "./cursor-sdk.js";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
+const MAX_CONVERSATION_RESPONSE_BYTES = 1024 * 1024;
+const MAX_CONVERSATION_JSON_BYTES = 768 * 1024;
+const MAX_CONVERSATION_NODES = 20_000;
+const MAX_CONVERSATION_DEPTH = 20;
+const MAX_CONVERSATION_KEYS = 40_000;
+const MAX_CONVERSATION_STRING_BYTES = 256 * 1024;
+const MAX_CONVERSATION_TURNS = 2_000;
+const MAX_CONVERSATION_STEPS = 10_000;
+const MAX_READ_MESSAGES = 120;
+const MAX_READ_MESSAGE_CHARS = 8_192;
+const MAX_READ_TEXT_CHARS = 64 * 1024;
 const MAX_STREAM_FRAME_BYTES = 1024 * 1024;
 const MAX_STREAM_BYTES = 32 * 1024 * 1024;
 const MAX_STREAM_FRAMES = 50_000;
@@ -12,6 +23,12 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const SAFE_VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/;
 const SAFE_AGENT_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9._:-]{1,200}$/;
+const TERMINAL_RUN_STATUSES = new Set([
+  "RUN_LIFECYCLE_STATUS_FINISHED",
+  "RUN_LIFECYCLE_STATUS_ERROR",
+  "RUN_LIFECYCLE_STATUS_CANCELLED",
+  "RUN_LIFECYCLE_STATUS_EXPIRED",
+]);
 const DEFINITIVE_SEND_REJECTION_STATUSES = new Set([400, 401, 403, 404, 409, 413, 415, 422, 429]);
 const METHODS = Object.freeze({
   ping: "sdk.v1.SdkBridgeControlService/Ping",
@@ -20,6 +37,8 @@ const METHODS = Object.freeze({
   resume: "sdk.v1.SdkAgentService/ResumeAgent",
   get: "sdk.v1.SdkAgentService/GetAgent",
   send: "sdk.v1.SdkAgentService/Send",
+  getRun: "sdk.v1.SdkAgentService/GetRun",
+  getRunConversation: "sdk.v1.SdkAgentService/GetRunConversation",
   cancel: "sdk.v1.SdkAgentService/CancelRun",
 });
 
@@ -50,7 +69,8 @@ export function createCursorSdkBridgeClient(options = {}) {
     notify();
   };
 
-  const call = async (method, payload, signal, validateResponse) => {
+  const call = async (method, payload, signal, validateResponse, maximumResponseBytes = MAX_RESPONSE_BYTES,
+    sanitizeResponse) => {
     const body = Buffer.from(JSON.stringify(payload), "utf8");
     if (body.length > MAX_REQUEST_BYTES) throw bridgeError("cursor_bridge_request_too_large");
     try {
@@ -68,12 +88,12 @@ export function createCursorSdkBridgeClient(options = {}) {
           body,
           signal: combinedSignal(signal, timeoutMs),
         });
-        const parsed = await boundedJson(response, MAX_RESPONSE_BYTES);
+        const parsed = await boundedJson(response, maximumResponseBytes);
         if (response.statusCode < 200 || response.statusCode >= 300) {
           throw connectError(parsed, response.statusCode);
         }
         validateResponse?.(parsed);
-        return redact(parsed);
+        return sanitizeResponse ? sanitizeResponse(parsed, tokenText) : redact(parsed);
       }, signal);
     } finally {
       body.fill(0);
@@ -228,7 +248,7 @@ export function createCursorSdkBridgeClient(options = {}) {
                 pending.accepted = true;
                 activeRuns.set(agentId, entry);
                 notify();
-                settleAccepted(resolveAccepted, { agentId, status: "working" });
+                settleAccepted(resolveAccepted, { agentId, runId: identity.runId, status: "working" });
               }
             }
             if (frame.value?.result) terminal = true;
@@ -237,6 +257,9 @@ export function createCursorSdkBridgeClient(options = {}) {
           if (!ended) throw bridgeError("cursor_bridge_stream_failed");
           if (terminal) forgetRun(agentId, entry);
         } catch (error) {
+          if (!settled) markSendDisposition(error, !sendAttempted
+            ? "not_sent"
+            : isDefinitiveSendRejection(error) ? "rejected" : "ambiguous");
           if (!settled && sendAttempted && !isDefinitiveSendRejection(error)) {
             pending.uncertain = true;
             notify();
@@ -255,6 +278,33 @@ export function createCursorSdkBridgeClient(options = {}) {
         }
       })();
       return accepted;
+    },
+    async readRunLocal({ agentId, runId, cwd, storeDirectory, credential, signal }) {
+      assertReady(ready, destroyed);
+      validateOperation(agentId, cwd, storeDirectory, "owned", credential);
+      if (!SAFE_RUN_ID.test(runId ?? "")) throw new TypeError("invalid Cursor SDK Bridge run identity");
+      const apiKey = credential.toString("utf8");
+      const snapshot = await call(METHODS.getRun, {
+        runId,
+        options: { runtime: "RUNTIME_LOCAL", cwd, agentId, apiKey },
+      }, signal, (response) => assertTerminalRun(response?.run, agentId, runId));
+      assertTerminalRun(snapshot.run, agentId, runId);
+      const response = await call(
+        METHODS.getRunConversation,
+        { runId },
+        signal,
+        (value) => {
+          if (typeof value?.conversationJson !== "string") {
+            throw bridgeError("cursor_bridge_invalid_response");
+          }
+        },
+        MAX_CONVERSATION_RESPONSE_BYTES,
+        (value, bearerSecret) => ({
+          ...value,
+          conversationJson: redactExactSecret(value.conversationJson, bearerSecret),
+        }),
+      );
+      return { agentId, runId, ...parseConversation(response.conversationJson) };
     },
     async cancelLocal({ agentId, cwd, storeDirectory, credential, signal }) {
       assertReady(ready, destroyed);
@@ -492,6 +542,148 @@ function assertAgentIdentity(agent, expectedId, expectedCwd) {
   if (!agent || agent.agentId !== expectedId || agent.local?.cwd !== expectedCwd) {
     throw bridgeError("cursor_bridge_agent_mismatch");
   }
+}
+
+function assertTerminalRun(run, expectedAgentId, expectedRunId) {
+  if (!run || run.agentId !== expectedAgentId || run.runId !== expectedRunId) {
+    throw bridgeError("cursor_bridge_agent_mismatch");
+  }
+  if (TERMINAL_RUN_STATUSES.has(run.status)) return;
+  if (["RUN_LIFECYCLE_STATUS_CREATING", "RUN_LIFECYCLE_STATUS_RUNNING"].includes(run.status)) {
+    throw bridgeError("cursor_bridge_run_not_terminal");
+  }
+  throw bridgeError("cursor_bridge_invalid_response");
+}
+
+function parseConversation(conversationJson) {
+  if (Buffer.byteLength(conversationJson, "utf8") > MAX_CONVERSATION_JSON_BYTES) {
+    throw bridgeError("cursor_bridge_response_too_large");
+  }
+  let conversation;
+  try { conversation = JSON.parse(conversationJson); }
+  catch { throw bridgeError("cursor_bridge_invalid_response"); }
+  assertJsonBounds(conversation);
+  if (!Array.isArray(conversation) || conversation.length > MAX_CONVERSATION_TURNS) {
+    throw bridgeError("cursor_bridge_invalid_response");
+  }
+  const messages = [];
+  let omittedBlockCount = 0;
+  let steps = 0;
+  for (const item of conversation) {
+    if (!plainObject(item) || typeof item.type !== "string") {
+      throw bridgeError("cursor_bridge_invalid_response");
+    }
+    if (item.type === "shellConversationTurn") {
+      if (!plainObject(item.turn)) throw bridgeError("cursor_bridge_invalid_response");
+      omittedBlockCount += 1;
+      continue;
+    }
+    if (item.type !== "agentConversationTurn" || !plainObject(item.turn)
+      || !Array.isArray(item.turn.steps)) {
+      throw bridgeError("cursor_bridge_invalid_response");
+    }
+    if (item.turn.userMessage !== undefined) {
+      if (!plainObject(item.turn.userMessage) || typeof item.turn.userMessage.text !== "string") {
+        throw bridgeError("cursor_bridge_invalid_response");
+      }
+      messages.push({ role: "user", text: item.turn.userMessage.text });
+    }
+    for (const step of item.turn.steps) {
+      steps += 1;
+      if (steps > MAX_CONVERSATION_STEPS || !plainObject(step) || typeof step.type !== "string") {
+        throw bridgeError("cursor_bridge_invalid_response");
+      }
+      if (step.type === "assistantMessage") {
+        if (!plainObject(step.message) || typeof step.message.text !== "string") {
+          throw bridgeError("cursor_bridge_invalid_response");
+        }
+        messages.push({ role: "assistant", text: step.message.text });
+      } else {
+        omittedBlockCount += 1;
+      }
+    }
+  }
+  const bounded = boundMessages(messages);
+  return {
+    messages: bounded.messages,
+    messageCount: messages.length,
+    omittedBlockCount,
+    truncated: bounded.truncated,
+  };
+}
+
+function assertJsonBounds(root) {
+  const pending = [{ value: root, depth: 0 }];
+  let nodes = 0;
+  let keys = 0;
+  while (pending.length) {
+    const { value, depth } = pending.pop();
+    nodes += 1;
+    if (nodes > MAX_CONVERSATION_NODES || depth > MAX_CONVERSATION_DEPTH) {
+      throw bridgeError("cursor_bridge_invalid_response");
+    }
+    if (typeof value === "string") {
+      if (Buffer.byteLength(value, "utf8") > MAX_CONVERSATION_STRING_BYTES) {
+        throw bridgeError("cursor_bridge_response_too_large");
+      }
+    } else if (Array.isArray(value)) {
+      for (const item of value) pending.push({ value: item, depth: depth + 1 });
+    } else if (plainObject(value)) {
+      const entries = Object.entries(value);
+      keys += entries.length;
+      if (keys > MAX_CONVERSATION_KEYS) throw bridgeError("cursor_bridge_invalid_response");
+      for (const [key, item] of entries) {
+        if (Buffer.byteLength(key, "utf8") > 256) throw bridgeError("cursor_bridge_invalid_response");
+        pending.push({ value: item, depth: depth + 1 });
+      }
+    } else if (value !== null && typeof value !== "boolean" && typeof value !== "number") {
+      throw bridgeError("cursor_bridge_invalid_response");
+    }
+  }
+}
+
+function boundMessages(messages) {
+  const selected = [];
+  let remaining = MAX_READ_TEXT_CHARS;
+  let truncated = messages.length > MAX_READ_MESSAGES;
+  for (let index = messages.length - 1;
+    index >= 0 && selected.length < MAX_READ_MESSAGES && remaining > 0;
+    index -= 1) {
+    const message = messages[index];
+    let text = message.text;
+    if (text.length > MAX_READ_MESSAGE_CHARS) {
+      text = text.slice(0, MAX_READ_MESSAGE_CHARS);
+      truncated = true;
+    }
+    if (text.length > remaining) {
+      text = text.slice(0, remaining);
+      truncated = true;
+    }
+    remaining -= text.length;
+    selected.unshift({ role: message.role, text });
+  }
+  if (selected.length < messages.length) truncated = true;
+  return { messages: selected, truncated };
+}
+
+function plainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function redactExactSecret(value, secret) {
+  return typeof value === "string" && typeof secret === "string" && secret !== ""
+    ? value.replaceAll(secret, "[REDACTED]")
+    : value;
+}
+
+function markSendDisposition(error, disposition) {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return;
+  try {
+    Object.defineProperty(error, "sendDisposition", {
+      value: disposition,
+      configurable: true,
+    });
+  } catch { /* delivery remains ambiguous when error metadata cannot be attached */ }
 }
 
 function mapAgent(agent, expectedId) {

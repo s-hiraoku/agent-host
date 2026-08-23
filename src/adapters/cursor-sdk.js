@@ -11,12 +11,16 @@ const MAX_RECORDS = 1_000;
 const DISCOVERY_CONCURRENCY = 8;
 const MIN_CREDENTIAL_BYTES = 8;
 const MAX_CREDENTIAL_BYTES = 16_384;
+const MAX_READ_MESSAGES = 120;
+const MAX_READ_MESSAGE_CHARS = 8_192;
+const MAX_READ_TEXT_CHARS = 64 * 1024;
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,100}$/;
+const SAFE_RUN_ID = /^[A-Za-z0-9._:-]{1,200}$/;
 const ATTEMPT_ID = /^attempt:[0-9a-f-]{36}$/;
 const LAUNCH_ID = /^launch:[0-9a-f-]{36}$/;
 const RECORD_KEYS = new Set([
   "attemptId", "launchId", "providerAgentId", "agentId", "target", "profile", "sdkVersion",
-  "bridgeNamespace", "storeScope", "targetDigest", "state", "createdAt", "updatedAt",
+  "bridgeNamespace", "storeScope", "targetDigest", "runId", "runPending", "state", "createdAt", "updatedAt",
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
 const CREDENTIAL_SOURCES = new WeakMap();
@@ -88,6 +92,7 @@ export class CursorSdkAdapter {
   #sdkVersion;
   #now;
   #activeOperations = new Set();
+  #agentActions = new Map();
   #closing;
   #destroying;
   #destroyed = false;
@@ -255,21 +260,48 @@ export class CursorSdkAdapter {
   }
 
   async prompt(agent, text, { signal } = {}) {
-    return this.#run(async () => {
+    return this.#run(() => this.#exclusiveAgent(agent?.id, async () => {
+      if (typeof text !== "string" || text.trim() === "") {
+        throw new TypeError("Cursor SDK prompt must be non-empty");
+      }
       const context = await this.#actionContext(agent, "prompt", signal);
-      const result = await this.#callBridge("sendLocal", {
-        agentId: context.provenance.providerAgentId,
-        cwd: context.target.cwd,
-        storeDirectory: this.#storeDirectory,
-        text,
-      }, signal);
-      assertProviderAgent(result, context.provenance.providerAgentId);
-      return { ok: true, agentId: agent.id, action: "prompt" };
-    });
+      await this.#state.beginRun(context.provenance.attemptId);
+      let bridgeInvoked = false;
+      let accepted = false;
+      try {
+        await this.#assertBridgeDirectories(context.target);
+        const result = await this.#callBridge("sendLocal", {
+          agentId: context.provenance.providerAgentId,
+          cwd: context.target.cwd,
+          storeDirectory: this.#storeDirectory,
+          text,
+        }, signal, () => { bridgeInvoked = true; });
+        accepted = true;
+        assertProviderAgent(result, context.provenance.providerAgentId);
+        if (!SAFE_RUN_ID.test(result?.runId ?? "")) {
+          throw new Error("Cursor SDK bridge did not return an exact run identity");
+        }
+        await this.#assertBridgeDirectories(context.target);
+        await this.#state.commitRun(context.provenance.attemptId, result.runId);
+        return { ok: true, agentId: agent.id, action: "prompt" };
+      } catch (error) {
+        if (!bridgeInvoked || (!accepted && ["not_sent", "rejected"].includes(error?.sendDisposition))) {
+          await this.#state.restoreRun(context.provenance.attemptId).catch(() => {});
+        }
+        if (accepted) {
+          await this.#callBridge("cancelLocal", {
+            agentId: context.provenance.providerAgentId,
+            cwd: context.target.cwd,
+            storeDirectory: this.#storeDirectory,
+          }).catch(() => {});
+        }
+        throw error;
+      }
+    }));
   }
 
   async interrupt(agent, { signal } = {}) {
-    return this.#run(async () => {
+    return this.#run(() => this.#exclusiveAgent(agent?.id, async () => {
       const context = await this.#actionContext(agent, "interrupt", signal);
       const result = await this.#callBridge("cancelLocal", {
         agentId: context.provenance.providerAgentId,
@@ -278,7 +310,35 @@ export class CursorSdkAdapter {
       }, signal);
       assertProviderAgent(result, context.provenance.providerAgentId);
       return { ok: true, agentId: agent.id, action: "interrupt" };
-    });
+    }));
+  }
+
+  async read(agent, { signal } = {}) {
+    return this.#run(() => this.#exclusiveAgent(agent?.id, async () => {
+      const context = await this.#actionContext(agent, "read", signal);
+      const result = await this.#callBridge("readRunLocal", {
+        agentId: context.provenance.providerAgentId,
+        runId: context.provenance.runId,
+        cwd: context.target.cwd,
+        storeDirectory: this.#storeDirectory,
+      }, signal);
+      assertProviderAgent(result, context.provenance.providerAgentId);
+      if (result?.runId !== context.provenance.runId) {
+        throw new Error("Cursor SDK bridge returned a different run identity");
+      }
+      await this.#assertBridgeDirectories(context.target);
+      return {
+        ok: true,
+        agentId: agent.id,
+        action: "read",
+        data: {
+          messages: result.messages,
+          messageCount: result.messageCount,
+          omittedBlockCount: result.omittedBlockCount,
+          truncated: result.truncated,
+        },
+      };
+    }));
   }
 
   markStale(agent) {
@@ -359,6 +419,14 @@ export class CursorSdkAdapter {
     finally { this.#activeOperations.delete(active); }
   }
 
+  async #exclusiveAgent(agentId, operation) {
+    const previous = this.#agentActions.get(agentId) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(operation);
+    this.#agentActions.set(agentId, current);
+    try { return await current; }
+    finally { if (this.#agentActions.get(agentId) === current) this.#agentActions.delete(agentId); }
+  }
+
   async #assertBridgeDirectories(target) {
     await this.#state.assertCurrent();
     await assertDirectoryIdentity(target.cwd, target.identity, "target");
@@ -393,19 +461,29 @@ export class CursorSdkAdapter {
     assertProviderAgent(current, provenance.providerAgentId);
     const status = normalizeStatus(current.status);
     const allowed = capability === "prompt"
-      ? ["idle", "error"].includes(status)
-      : status === "working" && current.interruptible === true;
+      ? ["idle", "error"].includes(status) && provenance.runPending !== true
+      : capability === "interrupt"
+        ? status === "working" && current.interruptible === true
+        : ["idle", "error"].includes(status) && provenance.runPending !== true
+          && SAFE_RUN_ID.test(provenance.runId ?? "")
+          && typeof this.#bridge.readRunLocal === "function";
     if (!allowed) throw new Error("Cursor SDK action requires a current Bridge capability");
     await this.#assertBridgeDirectories(target);
     return { provenance, target };
   }
 
-  async #callBridge(operation, input, signal) {
+  async #callBridge(operation, input, signal, onInvoke) {
     try {
       return await this.#credentialSource.use(
         async (credential) => {
           const redact = createRedactor({ secrets: [credential.toString("utf8")] });
-          return redact(await this.#bridge[operation]({ ...input, credential, signal }));
+          onInvoke?.();
+          const result = await this.#bridge[operation]({ ...input, credential, signal });
+          if (operation === "readRunLocal") {
+            const secret = credential.toString("utf8");
+            return sanitizeReadResult(result, secret);
+          }
+          return redact(result);
         },
         signal,
       );
@@ -414,6 +492,9 @@ export class CursorSdkAdapter {
       throwIfAborted(signal);
       const failure = new Error(`Cursor SDK bridge ${operation} failed`);
       failure.code = "cursor_bridge_failed";
+      if (operation === "sendLocal" && ["not_sent", "rejected"].includes(error?.sendDisposition)) {
+        failure.sendDisposition = error.sendDisposition;
+      }
       throw failure;
     }
   }
@@ -438,9 +519,12 @@ export class CursorSdkAdapter {
     const status = result ? normalizeStatus(result.status) : "unknown";
     const capabilities = noCapabilities();
     capabilities.prompt = Boolean(result && status !== "working" && status !== "unknown"
+      && provenance.runPending !== true
       && typeof this.#bridge.sendLocal === "function");
     capabilities.interrupt = Boolean(result && status === "working" && result.interruptible === true
       && typeof this.#bridge.cancelLocal === "function");
+    capabilities.read = Boolean(result && ["idle", "error"].includes(status) && provenance.runPending !== true
+      && SAFE_RUN_ID.test(provenance.runId ?? "") && typeof this.#bridge.readRunLocal === "function");
     return {
       id: record.agentId,
       provider: "cursor",
@@ -531,6 +615,27 @@ export class CursorSdkProvenanceStore {
     });
   }
 
+  async beginRun(attemptId) {
+    return this.#updateOwned(attemptId, (record) => ({ ...record, runPending: true }));
+  }
+
+  async commitRun(attemptId, runId) {
+    if (!SAFE_RUN_ID.test(runId ?? "")) throw new Error("invalid Cursor SDK run provenance");
+    return this.#updateOwned(attemptId, (record) => {
+      const updated = { ...record, runId };
+      delete updated.runPending;
+      return updated;
+    });
+  }
+
+  async restoreRun(attemptId) {
+    return this.#updateOwned(attemptId, (record) => {
+      const updated = { ...record };
+      delete updated.runPending;
+      return updated;
+    });
+  }
+
   async get(attemptId) {
     return this.#exclusive(async () => {
       await this.#open();
@@ -608,6 +713,25 @@ export class CursorSdkProvenanceStore {
     await this.#assertOpen();
     await this.#privateState.writeFileAtomic(this.#file, `${JSON.stringify(state)}\n`);
     await this.#assertOpen();
+  }
+  async #updateOwned(attemptId, update) {
+    return this.#exclusive(async () => {
+      await this.#open();
+      const state = await this.#load();
+      const index = state.records.findIndex((record) => record.attemptId === attemptId);
+      if (index < 0 || state.records[index].state !== "owned") {
+        throw new Error("Cursor SDK owned provenance is missing");
+      }
+      const updatedAt = timestamp(this.#now);
+      state.records[index] = validateRecord({
+        ...update(state.records[index]),
+        updatedAt: Date.parse(updatedAt) < Date.parse(state.records[index].updatedAt)
+          ? state.records[index].updatedAt
+          : updatedAt,
+      });
+      await this.#save(state);
+      return structuredClone(state.records[index]);
+    });
   }
   async #open() {
     if (this.#disposed) throw new Error("Cursor SDK provenance store is disposed");
@@ -749,9 +873,12 @@ function validateRecord(record) {
     || !SAFE_ID.test(record.providerAgentId ?? "") || !SAFE_ID.test(record.agentId ?? "")
     || !SAFE_ID.test(record.target ?? "") || !SAFE_ID.test(record.profile ?? "")
     || !SAFE_ID.test(record.sdkVersion ?? "") || !SAFE_ID.test(record.bridgeNamespace ?? "")
+    || (record.runId !== undefined && !SAFE_RUN_ID.test(record.runId))
+    || (record.runPending !== undefined && record.runPending !== true)
     || !/^[A-Za-z0-9_-]{16}$/.test(record.storeScope ?? "")
     || !/^[A-Za-z0-9_-]{43}$/.test(record.targetDigest ?? "")
     || !["intent", "owned"].includes(record.state)
+    || (record.state === "intent" && (record.runId !== undefined || record.runPending !== undefined))
     || !validTimestamp(record.createdAt) || !validTimestamp(record.updatedAt)
     || Date.parse(record.updatedAt) < Date.parse(record.createdAt)) {
     throw new Error("invalid Cursor SDK provenance record");
@@ -764,6 +891,43 @@ function normalizeStatus(status) {
   if (["idle", "completed", "done", "success"].includes(status)) return "idle";
   if (["error", "failed"].includes(status)) return "error";
   return "unknown";
+}
+
+function sanitizeReadResult(result, secret) {
+  if (!result || !Array.isArray(result.messages)
+    || !Number.isInteger(result.messageCount) || result.messageCount < 0
+    || !Number.isInteger(result.omittedBlockCount) || result.omittedBlockCount < 0
+    || typeof result.truncated !== "boolean") {
+    throw new Error("invalid Cursor SDK read result");
+  }
+  const messages = result.messages.map((message) => {
+    if (!message || !["user", "assistant"].includes(message.role) || typeof message.text !== "string") {
+      throw new Error("invalid Cursor SDK read message");
+    }
+    return { role: message.role, text: message.text.replaceAll(secret, "[REDACTED]") };
+  });
+  const selected = [];
+  let remaining = MAX_READ_TEXT_CHARS;
+  let truncated = result.truncated || messages.length > MAX_READ_MESSAGES
+    || result.messageCount > messages.length;
+  for (let index = messages.length - 1;
+    index >= 0 && selected.length < MAX_READ_MESSAGES && remaining > 0;
+    index -= 1) {
+    const message = messages[index];
+    let text = message.text;
+    if (text.length > MAX_READ_MESSAGE_CHARS) {
+      text = text.slice(0, MAX_READ_MESSAGE_CHARS);
+      truncated = true;
+    }
+    if (text.length > remaining) {
+      text = text.slice(0, remaining);
+      truncated = true;
+    }
+    remaining -= text.length;
+    selected.unshift({ role: message.role, text });
+  }
+  if (selected.length < messages.length) truncated = true;
+  return { ...result, messages: selected, truncated };
 }
 
 function assertProviderAgent(result, expected) {

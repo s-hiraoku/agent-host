@@ -52,38 +52,61 @@ durable launch ledger and private provenance. A not-found lookup may `ResumeAgen
 one exact ID from the configured store. An owned idle or error agent may accept one
 prompt through the Bridge `Send` stream after the same ownership and directory checks.
 The prompt succeeds only after the stream proves the exact agent and run IDs. Agent Host
-retains that run ID in memory and advertises interrupt only while the Bridge reports the
-agent working; `CancelRun` always names both exact IDs. A concurrent prompt is rejected,
-and uncertain Send or Cancel delivery is never retried.
+atomically binds that run ID to the existing private owned-agent provenance before
+reporting success. It also retains the active run in memory and advertises interrupt only
+while the Bridge reports the agent working; `CancelRun` always names both exact IDs. A
+concurrent prompt is rejected, and uncertain Send or Cancel delivery is never retried.
+Starting another prompt first marks the durable binding pending and suppresses read.
+Validation, cancellation, or a definitive rejection before delivery restores the prior
+readable run; ambiguous delivery stays pending and unreadable. Exact acceptance
+atomically replaces the prior run. If recording the new exact run fails, prompt fails,
+the pending fence remains, and Agent Host requests best-effort cancellation.
 
 Dropping a Send stream does not cancel the upstream run. If the exact run ID was already
 observed, Agent Host retains it so the run can still be cancelled; otherwise the prompt
 is uncertain and interrupt remains disabled. Close, destroy, restart, a non-working
 Bridge status, or a successful cancellation removes or disables that process-local
-capability. Run IDs, stream messages, and prompt text are not published or persisted.
-Connect frames, frame count, and total stream bytes are bounded and malformed or
-conflicting identities fail closed.
+interrupt capability. The exact latest successfully recorded run ID is private durable
+provenance; it is not published in agent metadata or logs. Stream messages and prompt
+text are not persisted. Connect frames, frame count, and total stream bytes are bounded
+and malformed or conflicting identities fail closed.
 
-The adapter never calls `ListAgents`, adopts arbitrary Bridge agents, or correlates
-desktop conversations. Read, archive, delete, cloud mode, managed Bridge lifecycle, and
+Read is advertised only when that durable exact-run binding exists and the owned agent is
+not working. Each read repeats the ownership, configured-workspace, dedicated-store, and
+remote-agent checks, then calls `GetRun` with the bound run ID and requires the returned
+run and agent IDs to match and the run to be terminal. Only then does it call
+`GetRunConversation`. The official conversation JSON is parsed through an allowlist for
+`agentConversationTurn.userMessage.text` and `assistantMessage.message.text`; shell
+turns, thinking, tool calls, and unknown non-text steps are omitted. Unknown turn shapes
+and malformed known text shapes fail closed. Response bytes, JSON depth/keys/nodes,
+turns, steps, message count, per-message text, and total returned text are bounded. A
+bounded suffix is returned in conversation order with `truncated: true`; raw conversation
+documents and text are never logged or persisted by Agent Host. A run that is still
+creating or working cannot be read.
+
+The adapter never calls `ListAgents`, `ListRuns`, `ListAgentMessages`, or `ObserveRun`,
+adopts arbitrary Bridge agents, guesses a latest run, or correlates desktop
+conversations. Live reads, archive, delete, cloud mode, managed Bridge lifecycle, and
 existing Cursor desktop sessions remain out of scope. Transport failures after
 `CreateAgent` are uncertain and are not retried.
 
-An optional live Create/Get/Resume/Prompt/Get/Cancel probe can be included in the normal
+An optional live Create/Get/Resume/Prompt/Get/Cancel/terminal-read probe can be included
+in the normal
 test command by setting `AGENT_HOST_CURSOR_BRIDGE_TEST_ENDPOINT`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_TOKEN_FILE`, `AGENT_HOST_CURSOR_BRIDGE_TEST_API_KEY_FILE`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_AGENT_ID`, `AGENT_HOST_CURSOR_BRIDGE_TEST_CWD`,
-`AGENT_HOST_CURSOR_BRIDGE_TEST_STORE_DIRECTORY`, and
+`AGENT_HOST_CURSOR_BRIDGE_TEST_STORE_DIRECTORY`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_PROFILE`, and
 `AGENT_HOST_CURSOR_BRIDGE_TEST_PROMPT`; the version defaults to `1.0.28` and can be
 overridden with `AGENT_HOST_CURSOR_BRIDGE_TEST_VERSION`. The probe creates, gets,
-resumes, prompts, and cancels the configured owned agent. Both secrets remain in
+resumes, prompts, cancels, waits for a terminal Bridge status, and reads the exact
+configured run. Both secrets remain in
 owner-only files. The operator must use a dedicated store and agent ID because this
 explicit conformance test creates local durable state. Without every required value the
 case is skipped.
 
 The boundary accepts only an explicitly injected bridge namespace with an exact
-`sdkVersion` and operations for creating, inspecting, prompting, and cancelling one
+`sdkVersion` and operations for creating, inspecting, prompting, cancelling, and reading one
 deterministic local agent ID in a dedicated store. The integration owner is
 responsible for supplying a separately reviewed bridge and credentials; the adapter does
 not perform interactive login or read Cursor's default credentials or stores.
@@ -149,12 +172,15 @@ When directly composed with `AgentRegistry`, the adapter:
 - discovers no ordinary or pre-existing Cursor agents;
 - advertises prompt only for a current owned idle or error agent and interrupt only for
   an exact active run observed by this host process;
-- leaves read, approval, focus, archive, delete, and cloud operations absent. Read remains
-  gated on durable exact-run provenance rather than agent ID alone.
+- advertises read only for the exact terminal run durably recorded from a successful
+  Agent Host prompt;
+- leaves approval, focus, archive, delete, live-read, and cloud operations absent.
 
 The private provenance file contains opaque target/profile identifiers, exact SDK
-version, the bridge namespace, a hash-derived store scope, canonical-target digest, launch and attempt IDs,
-and derived agent IDs. It does not contain workspace or store paths, prompts, messages,
+version, the bridge namespace, a hash-derived store scope, canonical-target digest,
+launch and attempt IDs, derived agent IDs, at most one exact prompted run ID, and an
+optional pending-delivery fence. It does not contain workspace or store paths, prompts,
+messages,
 credentials, or provider responses.
 
 ## Anchored private-state backend
