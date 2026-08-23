@@ -372,6 +372,47 @@ test("bridge client retains an observed exact run for cancellation after stream 
   await subject.destroy();
 });
 
+test("bridge client releases an accepted send fence after status proves completion", async (t) => {
+  let sends = 0;
+  let status = "AGENT_INFO_STATUS_RUNNING";
+  const bridge = await fakeBridge(async (req, body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    if (req.url.endsWith("/ResumeAgent")) return json(response, 200, { agentId: body.agentId });
+    if (req.url.endsWith("/GetAgent")) {
+      return json(response, 200, { agent: {
+        agentId: body.agentId, status, local: { cwd: body.options.cwd },
+      } });
+    }
+    sends += 1;
+    if (sends > 1) return json(response, 500, { code: "internal" });
+    response.writeHead(200, { "content-type": "application/connect+json" });
+    response.write(connectFrame({ sdkMessage: {
+      message: { agentId: body.agentId, runId: "run-owned-completed" },
+    } }));
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  const input = {
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    text: "First accepted prompt", credential: Buffer.from(API_KEY),
+  };
+  assert.deepEqual(await subject.sendLocal(input), { agentId: "agent-owned", status: "working" });
+  status = "AGENT_INFO_STATUS_FINISHED";
+  assert.equal((await subject.getLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  })).status, "done");
+  await assert.rejects(subject.sendLocal({
+    ...input, text: "Allowed after completion", credential: Buffer.from(API_KEY),
+  }), (error) => error.code === "cursor_bridge_rpc_failed");
+  assert.equal(sends, 2);
+  await subject.destroy();
+});
+
 test("bridge client disables repeat cancellation before an ambiguous CancelRun response", async (t) => {
   let cancellations = 0;
   const bridge = await fakeBridge(async (req, body, response) => {

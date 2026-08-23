@@ -148,8 +148,9 @@ export function createCursorSdkBridgeClient(options = {}) {
       const active = activeRuns.get(agentId);
       if (mapped.status !== "working" && active) forgetRun(agentId, active);
       const pending = pendingSends.get(agentId);
-      if (["done", "error"].includes(mapped.status) && pending?.uncertain) {
+      if (["done", "error"].includes(mapped.status) && (pending?.uncertain || pending?.accepted)) {
         pendingSends.delete(agentId);
+        pending.controller.abort();
         notify();
       }
       return {
@@ -167,9 +168,9 @@ export function createCursorSdkBridgeClient(options = {}) {
       if (activeRuns.has(agentId) || pendingSends.has(agentId)) {
         throw bridgeError("cursor_bridge_agent_busy");
       }
-      const pending = { uncertain: false };
-      pendingSends.set(agentId, pending);
       const controller = new AbortController();
+      const pending = { uncertain: false, accepted: false, controller };
+      pendingSends.set(agentId, pending);
       streamControllers.add(controller);
       let settled = false;
       let detachAbort = () => {};
@@ -223,6 +224,7 @@ export function createCursorSdkBridgeClient(options = {}) {
               }
               if (!entry.runId) {
                 entry.runId = identity.runId;
+                pending.accepted = true;
                 activeRuns.set(agentId, entry);
                 notify();
                 settleAccepted(resolveAccepted, { agentId, status: "working" });
