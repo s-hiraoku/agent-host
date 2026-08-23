@@ -23,14 +23,15 @@ const CREDENTIAL_SOURCES = new WeakMap();
 const INTERNAL_CREDENTIAL_ERRORS = new WeakSet();
 
 export function createCursorSdkCredentialSource(secretOrCallback) {
-  if (typeof secretOrCallback !== "string" && typeof secretOrCallback !== "function") {
+  if (typeof secretOrCallback !== "string" && !Buffer.isBuffer(secretOrCallback)
+    && typeof secretOrCallback !== "function") {
     throw new TypeError("Cursor SDK credential source requires an explicit secret or secret callback");
   }
   let retained;
   try {
-    retained = typeof secretOrCallback === "string"
-      ? credentialBytes(secretOrCallback)
-      : undefined;
+    if (typeof secretOrCallback === "string") retained = credentialBytes(secretOrCallback);
+    else if (Buffer.isBuffer(secretOrCallback)) retained = credentialBytes(Buffer.from(secretOrCallback));
+    else retained = undefined;
   } catch (error) {
     if (isInternalCredentialError(error)) throw publicCredentialError(error);
     throw error;
@@ -138,15 +139,22 @@ export class CursorSdkAdapter {
     const generation = this.#lifecycleGeneration;
     await this.#closing;
     if (this.#destroyed) throw new Error("Cursor SDK adapter is destroyed");
-    await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
-    for (const target of this.#targets.values()) {
-      if (pathsOverlap(target.cwd, this.#storeDirectory)) {
-        throw new Error("Cursor SDK private state must be outside configured workspaces");
+    try {
+      await this.#bridge.open?.();
+      await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
+      for (const target of this.#targets.values()) {
+        if (pathsOverlap(target.cwd, this.#storeDirectory)) {
+          throw new Error("Cursor SDK private state must be outside configured workspaces");
+        }
       }
+      await this.#state.open();
+    } catch (error) {
+      await this.#bridge.close?.().catch(() => {});
+      throw error;
     }
-    await this.#state.open();
     if (generation !== this.#lifecycleGeneration) {
       await this.#state.close();
+      await this.#bridge.close?.();
       throw new Error("Cursor SDK adapter opening was interrupted by close");
     }
     this.#ready = true;
@@ -252,7 +260,9 @@ export class CursorSdkAdapter {
     this.#ready = false;
     const closing = (async () => {
       await Promise.allSettled([...this.#activeOperations]);
-      await this.#state.close();
+      const results = await Promise.allSettled([this.#state.close(), this.#bridge.close?.()]);
+      const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+      throwDisposalErrors(errors);
     })();
     this.#closing = closing;
     try { await closing; }
@@ -277,6 +287,10 @@ export class CursorSdkAdapter {
       catch (error) { errors.push(error); }
       try { this.#credentialSource.destroy(); }
       catch (error) { errors.push(error); }
+      try {
+        if (typeof this.#bridge.destroy === "function") await this.#bridge.destroy();
+        else await this.#bridge.close?.();
+      } catch (error) { errors.push(error); }
       throwDisposalErrors(errors);
     })();
     return this.#destroying;
@@ -579,16 +593,20 @@ function validateBridge(bridge) {
 }
 
 function validateCredentialSource(source) {
+  return claimCursorSdkCredentialSource(source);
+}
+
+export function claimCursorSdkCredentialSource(source) {
   const implementation = CREDENTIAL_SOURCES.get(source);
   if (!implementation) {
-    throw new TypeError("Cursor SDK adapter requires an explicitly injected credential source");
+    throw new TypeError("Cursor SDK requires an explicitly injected credential source");
   }
   return implementation.claim();
 }
 
 function credentialBytes(value) {
-  if (typeof value !== "string") throw invalidCredential();
-  const bytes = Buffer.from(value, "utf8");
+  if (typeof value !== "string" && !Buffer.isBuffer(value)) throw invalidCredential();
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
   if (bytes.length < MIN_CREDENTIAL_BYTES || bytes.length > MAX_CREDENTIAL_BYTES) {
     bytes.fill(0);
     throw invalidCredential();

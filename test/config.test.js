@@ -87,6 +87,53 @@ test("configuration rejects unknown keys and invalid boundaries", async (t) => {
   }
 });
 
+test("Cursor SDK Bridge configuration is explicit, loopback-only, and resolves private paths", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-cursor-bridge-config-"));
+  t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));
+  const configFile = join(home, "config.json");
+  const bridge = {
+    endpoint: "http://127.0.0.1:40555",
+    sdkVersion: "1.0.28",
+    bearerTokenFile: "bridge.token",
+    apiKeyFile: "cursor.key",
+    helperPath: "bin/anchored-private-state",
+    storeDirectory: "cursor-store",
+    provenanceFile: "state/cursor-provenance.json",
+    targets: [{ id: "main", cwd: "workspace", profiles: ["cursor-model"] }],
+  };
+  await writeFile(configFile, JSON.stringify({
+    schemaVersion: 1, enabledAdapters: ["cursor-sdk-bridge"], cursorSdkBridge: bridge,
+  }));
+  const { configuration } = await loadConfiguration({ cli: { configFile }, env: {}, homeDirectory: home });
+  assert.deepEqual(configuration.enabledAdapters, ["cursor-sdk-bridge"]);
+  assert.equal(configuration.cursorSdkBridge.endpoint, bridge.endpoint);
+  assert.equal(configuration.cursorSdkBridge.bearerTokenFile, join(home, "bridge.token"));
+  assert.equal(configuration.cursorSdkBridge.apiKeyFile, join(home, "cursor.key"));
+  assert.equal(configuration.cursorSdkBridge.targets[0].cwd, join(home, "workspace"));
+  assert.deepEqual(serializableConfiguration(configuration).cursorSdkBridge, configuration.cursorSdkBridge);
+
+  await writeFile(configFile, JSON.stringify({ schemaVersion: 1, enabledAdapters: ["cursor-sdk-bridge"] }));
+  await assert.rejects(
+    loadConfiguration({ cli: { configFile }, env: {}, homeDirectory: home }),
+    /cursorSdkBridge is required/,
+  );
+  for (const endpoint of ["http://localhost:40555", "https://127.0.0.1:40555", "http://127.0.0.1:40555/"]) {
+    await writeFile(configFile, JSON.stringify({
+      schemaVersion: 1, enabledAdapters: ["cursor-sdk-bridge"], cursorSdkBridge: { ...bridge, endpoint },
+    }));
+    await assert.rejects(loadConfiguration({ cli: { configFile }, env: {}, homeDirectory: home }), /literal loopback/);
+  }
+  await writeFile(configFile, JSON.stringify({
+    schemaVersion: 1,
+    enabledAdapters: ["cursor-sdk-bridge"],
+    cursorSdkBridge: { ...bridge, apiKeyFile: bridge.bearerTokenFile },
+  }));
+  await assert.rejects(
+    loadConfiguration({ cli: { configFile }, env: {}, homeDirectory: home }),
+    /token and API key files must be separate/,
+  );
+});
+
 test("command-line parsing preserves positional action payloads and repeated origins", () => {
   assert.deepEqual(parseCommandLine([
     "action", "codex:1", "prompt", "--allowed-origin", "http://localhost:3000", "--", '{"text":"--fix"}',

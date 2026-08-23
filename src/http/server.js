@@ -326,14 +326,19 @@ export function createAgentServer(registry, options) {
     get apiToken() { return security.apiToken; },
     get generatedToken() { return security.generatedToken; },
     async start() {
-      await launchCoordinator.start();
       try {
+        await registry.open?.();
+        await launchCoordinator.start();
         await new Promise((resolve, reject) => {
           server.once("error", reject);
           server.listen(options.port, options.host, resolve);
         });
       } catch (error) {
-        await launchCoordinator.stop();
+        stopping = true;
+        await Promise.allSettled([
+          Promise.resolve().then(() => launchCoordinator.stop()),
+          Promise.resolve().then(() => registry.close?.()),
+        ]);
         throw error;
       }
       started = true;

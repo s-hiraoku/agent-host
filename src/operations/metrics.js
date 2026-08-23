@@ -18,10 +18,10 @@ const LABELS = {
   launch_latency_ms: ["provider", "outcome"],
 };
 const LABEL_VALUES = {
-  adapter: new Set(["codex", "herdr", "process", "demo", "other"]),
+  adapter: new Set(["codex", "cursor-sdk", "herdr", "process", "demo", "other"]),
   transport: new Set(["dashboard_sse", "codex_rpc", "other"]),
   actionKind: new Set(["prompt", "send-keys", "approve", "reject", "interrupt", "focus", "read", "other"]),
-  provider: new Set(["demo", "other"]),
+  provider: new Set(["cursor", "demo", "other"]),
   outcome: new Set(["success", "failure", "timeout", "other"]),
   code: new Set(["queue_full", "shutting_down", "other"]),
 };

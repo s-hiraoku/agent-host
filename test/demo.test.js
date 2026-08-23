@@ -27,6 +27,10 @@ test("demo mode is opt-in and replaces live adapters", () => {
     cursorUserDataDirectory: "/synthetic/Cursor",
     cursorProjectsDirectory: "/synthetic/.cursor/projects",
   }).map((adapter) => adapter.id), ["cursor-desktop"]);
+  assert.deepEqual(createRuntimeAdapters({
+    enabledAdapters: ["cursor-sdk-bridge"],
+    cursorSdkBridge: { endpoint: "http://127.0.0.1:40555" },
+  }).map((adapter) => adapter.id), ["cursor-sdk"]);
   assert.throws(
     () => createRuntimeAdapters({ codexTransport: "websocket" }),
     /AGENT_HOST_CODEX_TRANSPORT must be owned or control/,

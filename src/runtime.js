@@ -1,5 +1,6 @@
 import { CodexAdapter } from "./adapters/codex.js";
 import { CursorDesktopAdapter } from "./adapters/cursor-desktop.js";
+import { CursorSdkBridgeRuntimeAdapter } from "./adapters/cursor-sdk-runtime.js";
 import { DemoAdapter, DemoLaunchAdapter } from "./adapters/demo.js";
 import { HerdrAdapter } from "./adapters/herdr.js";
 import { ProcessAdapter } from "./adapters/process.js";
@@ -11,6 +12,7 @@ export function createRuntimeAdapters({
   codexSocket,
   cursorUserDataDirectory,
   cursorProjectsDirectory,
+  cursorSdkBridge,
   enabledAdapters = ["codex", "herdr", "process"],
 } = {}) {
   if (demoMode) return [new DemoAdapter(), new DemoLaunchAdapter()];
@@ -30,6 +32,7 @@ export function createRuntimeAdapters({
       userDataDirectory: cursorUserDataDirectory,
       projectsDirectory: cursorProjectsDirectory,
     })],
+    ["cursor-sdk-bridge", () => new CursorSdkBridgeRuntimeAdapter(cursorSdkBridge)],
   ]);
   return enabledAdapters.map((name) => factories.get(name)?.()).filter(Boolean);
 }
