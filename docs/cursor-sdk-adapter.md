@@ -47,27 +47,44 @@ Example schema-1 configuration (relative paths resolve from the config directory
 }
 ```
 
-The first slice exposes create/reconcile/discover only for IDs derived from Agent Host's
+The adapter exposes create/reconcile/discover only for IDs derived from Agent Host's
 durable launch ledger and private provenance. A not-found lookup may `ResumeAgent` that
-one exact ID from the configured store. It never calls `ListAgents`, adopts arbitrary
-Bridge agents, or correlates desktop conversations. Prompt, read, interrupt, archive,
-delete, cloud mode, managed Bridge lifecycle, and existing Cursor desktop sessions remain
-out of scope. Transport failures after `CreateAgent` are uncertain and are not retried.
+one exact ID from the configured store. An owned idle or error agent may accept one
+prompt through the Bridge `Send` stream after the same ownership and directory checks.
+The prompt succeeds only after the stream proves the exact agent and run IDs. Agent Host
+retains that run ID in memory and advertises interrupt only while the Bridge reports the
+agent working; `CancelRun` always names both exact IDs. A concurrent prompt is rejected,
+and uncertain Send or Cancel delivery is never retried.
+
+Dropping a Send stream does not cancel the upstream run. If the exact run ID was already
+observed, Agent Host retains it so the run can still be cancelled; otherwise the prompt
+is uncertain and interrupt remains disabled. Close, destroy, restart, a non-working
+Bridge status, or a successful cancellation removes or disables that process-local
+capability. Run IDs, stream messages, and prompt text are not published or persisted.
+Connect frames, frame count, and total stream bytes are bounded and malformed or
+conflicting identities fail closed.
+
+The adapter never calls `ListAgents`, adopts arbitrary Bridge agents, or correlates
+desktop conversations. Read, archive, delete, cloud mode, managed Bridge lifecycle, and
+existing Cursor desktop sessions remain out of scope. Transport failures after
+`CreateAgent` are uncertain and are not retried.
 
 An optional live Create/Get/Resume/Get probe can be included in the normal test command
 by setting `AGENT_HOST_CURSOR_BRIDGE_TEST_ENDPOINT`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_TOKEN_FILE`, `AGENT_HOST_CURSOR_BRIDGE_TEST_API_KEY_FILE`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_AGENT_ID`, `AGENT_HOST_CURSOR_BRIDGE_TEST_CWD`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_STORE_DIRECTORY`, and
-`AGENT_HOST_CURSOR_BRIDGE_TEST_PROFILE`; the version defaults to `1.0.28` and can be
-overridden with `AGENT_HOST_CURSOR_BRIDGE_TEST_VERSION`. Both secrets remain in
+`AGENT_HOST_CURSOR_BRIDGE_TEST_PROFILE`, and
+`AGENT_HOST_CURSOR_BRIDGE_TEST_PROMPT`; the version defaults to `1.0.28` and can be
+overridden with `AGENT_HOST_CURSOR_BRIDGE_TEST_VERSION`. The probe creates, gets,
+resumes, prompts, and cancels the configured owned agent. Both secrets remain in
 owner-only files. The operator must use a dedicated store and agent ID because this
 explicit conformance test creates local durable state. Without every required value the
 case is skipped.
 
 The boundary accepts only an explicitly injected bridge namespace with an exact
-`sdkVersion` and two operations: create a deterministic local agent ID and inspect that
-exact ID in a dedicated store. The integration owner is
+`sdkVersion` and operations for creating, inspecting, prompting, and cancelling one
+deterministic local agent ID in a dedicated store. The integration owner is
 responsible for supplying a separately reviewed bridge and credentials; the adapter does
 not perform interactive login or read Cursor's default credentials or stores.
 
@@ -130,8 +147,10 @@ When directly composed with `AgentRegistry`, the adapter:
 - requires an opaque, explicit credential source for every create or reconciliation
   bridge call and never exposes that source through launch capabilities;
 - discovers no ordinary or pre-existing Cursor agents;
-- leaves read, prompt, interrupt, approval, focus, archive, delete, and cloud operations
-  absent. Read remains gated on durable exact-run provenance rather than agent ID alone.
+- advertises prompt only for a current owned idle or error agent and interrupt only for
+  an exact active run observed by this host process;
+- leaves read, approval, focus, archive, delete, and cloud operations absent. Read remains
+  gated on durable exact-run provenance rather than agent ID alone.
 
 The private provenance file contains opaque target/profile identifiers, exact SDK
 version, the bridge namespace, a hash-derived store scope, canonical-target digest, launch and attempt IDs,

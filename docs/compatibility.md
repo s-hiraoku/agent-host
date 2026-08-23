@@ -32,5 +32,8 @@ The opt-in `cursor-sdk-bridge` adapter supports only agent-host-owned local agen
 explicit, operator-managed official `sdk.v1` Bridge. It pins and probes the exact Bridge
 version, accepts literal loopback origins only, and uses the durable owned-discovery
 boundary. No Cursor package or binary is shipped. SDK agents are not correlated with
-existing desktop conversations; cloud mode and semantic actions are not advertised. See
+existing desktop conversations. Prompt is limited to a currently owned local agent;
+interrupt is advertised only for an exact process-local run ID observed from that
+prompt's Bridge stream. Read, approval, focus, archive, delete, and cloud mode are not
+advertised. See
 `docs/cursor-sdk-adapter.md` and `docs/spikes/cursor-sdk.md`.
