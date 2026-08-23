@@ -14,6 +14,8 @@ export class CursorSdkBridgeRuntimeAdapter {
   #opening;
   #destroying;
   #destroyed = false;
+  #listeners = new Set();
+  #unsubscribe;
 
   constructor(configuration) {
     if (!configuration || typeof configuration !== "object") {
@@ -67,6 +69,12 @@ export class CursorSdkBridgeRuntimeAdapter {
         throw new Error("Cursor SDK Bridge runtime is destroyed");
       }
       this.#adapter = adapter;
+      this.#unsubscribe = adapter.onChange?.((event) => {
+        for (const listener of this.#listeners) {
+          try { listener(event); }
+          catch { /* registry listeners are isolated from the runtime transport */ }
+        }
+      });
     } catch (error) {
       if (adapter) await adapter.destroy().catch(() => {});
       else {
@@ -83,6 +91,13 @@ export class CursorSdkBridgeRuntimeAdapter {
   reconcileLaunch(record, options) { return this.#required().reconcileLaunch(record, options); }
   discoverOwned(records, options) { return this.#required().discoverOwned(records, options); }
   markStale(agent) { return this.#required().markStale(agent); }
+  prompt(agent, text, options) { return this.#required().prompt(agent, text, options); }
+  interrupt(agent, options) { return this.#required().interrupt(agent, options); }
+  onChange(listener) {
+    if (typeof listener !== "function") throw new TypeError("listener must be a function");
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
 
   async close() {
     if (this.#destroyed) return;
@@ -96,7 +111,10 @@ export class CursorSdkBridgeRuntimeAdapter {
     this.#destroyed = true;
     this.#destroying = (async () => {
       await this.#opening?.catch(() => {});
+      this.#unsubscribe?.();
+      this.#unsubscribe = undefined;
       await this.#adapter?.destroy();
+      this.#listeners.clear();
     })();
     return this.#destroying;
   }

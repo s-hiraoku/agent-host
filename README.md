@@ -408,8 +408,9 @@ otherwise `unknown`; file activity or a running Cursor process never implies `wo
 Cursor SDK-created agents are a separate integration surface and identity namespace from
 these desktop records. The dependency-free adapter is available only through the explicit
 `cursor-sdk-bridge` runtime and an operator-managed official loopback Bridge; defaults do
-not register it. Its bounded attach-only contract and launch/ownership gate are documented in
-[`docs/spikes/cursor-sdk.md`](docs/spikes/cursor-sdk.md).
+not register it. Its bounded owned-agent contract, prompt delivery and exact-run
+interrupt behavior, and launch/ownership gate are documented in
+[`docs/cursor-sdk-adapter.md`](docs/cursor-sdk-adapter.md).
 
 If duplicate transcript streams are identical or exact prefixes, the longest complete
 record sequence is used. A divergent or corrupt stream disables `read` for that session.

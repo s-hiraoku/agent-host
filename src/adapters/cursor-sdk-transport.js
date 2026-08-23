@@ -5,15 +5,22 @@ import { claimCursorSdkCredentialSource } from "./cursor-sdk.js";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
+const MAX_STREAM_FRAME_BYTES = 1024 * 1024;
+const MAX_STREAM_BYTES = 32 * 1024 * 1024;
+const MAX_STREAM_FRAMES = 50_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const SAFE_VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/;
 const SAFE_AGENT_ID = /^[A-Za-z0-9._:-]{1,100}$/;
+const SAFE_RUN_ID = /^[A-Za-z0-9._:-]{1,200}$/;
+const DEFINITIVE_SEND_REJECTION_STATUSES = new Set([400, 401, 403, 404, 409, 413, 415, 422, 429]);
 const METHODS = Object.freeze({
   ping: "sdk.v1.SdkBridgeControlService/Ping",
   version: "sdk.v1.SdkBridgeControlService/GetVersion",
   create: "sdk.v1.SdkAgentService/CreateAgent",
   resume: "sdk.v1.SdkAgentService/ResumeAgent",
   get: "sdk.v1.SdkAgentService/GetAgent",
+  send: "sdk.v1.SdkAgentService/Send",
+  cancel: "sdk.v1.SdkAgentService/CancelRun",
 });
 
 export function createCursorSdkBridgeClient(options = {}) {
@@ -25,6 +32,23 @@ export function createCursorSdkBridgeClient(options = {}) {
   let ready = false;
   let destroyed = false;
   let opening;
+  const activeRuns = new Map();
+  const pendingSends = new Map();
+  const streamControllers = new Set();
+  const listeners = new Set();
+
+  const notify = () => {
+    for (const listener of listeners) queueMicrotask(() => {
+      try { listener({ type: "changed" }); }
+      catch { /* listener failures must not terminate stream bookkeeping */ }
+    });
+  };
+
+  const forgetRun = (agentId, entry) => {
+    if (activeRuns.get(agentId) !== entry) return;
+    activeRuns.delete(agentId);
+    notify();
+  };
 
   const call = async (method, payload, signal, validateResponse) => {
     const body = Buffer.from(JSON.stringify(payload), "utf8");
@@ -121,21 +145,193 @@ export function createCursorSdkBridgeClient(options = {}) {
         result = await call(METHODS.get, { agentId, options: { cwd, apiKey } }, signal,
           (response) => assertAgentIdentity(response?.agent, agentId, cwd));
       }
-      return mapAgent(result?.agent, agentId);
+      const mapped = mapAgent(result?.agent, agentId);
+      const active = activeRuns.get(agentId);
+      if (mapped.status !== "working" && active) forgetRun(agentId, active);
+      const pending = pendingSends.get(agentId);
+      if (["done", "error"].includes(mapped.status) && (pending?.uncertain || pending?.accepted)) {
+        pendingSends.delete(agentId);
+        pending.controller.abort();
+        notify();
+      }
+      return {
+        ...mapped,
+        interruptible: mapped.status === "working" && Boolean(active && !active.cancelRequested),
+      };
     },
     resumeLocal,
+    async sendLocal({ agentId, cwd, storeDirectory, text, credential, signal }) {
+      assertReady(ready, destroyed);
+      validateOperation(agentId, cwd, storeDirectory, "owned", credential);
+      if (typeof text !== "string" || text.trim() === "") {
+        throw new TypeError("Cursor SDK Bridge prompt must be non-empty");
+      }
+      if (activeRuns.has(agentId) || pendingSends.has(agentId)) {
+        throw bridgeError("cursor_bridge_agent_busy");
+      }
+      const controller = new AbortController();
+      const pending = { uncertain: false, accepted: false, controller };
+      pendingSends.set(agentId, pending);
+      streamControllers.add(controller);
+      let settled = false;
+      let detachAbort = () => {};
+      let timer;
+      let resolveAccepted;
+      let rejectAccepted;
+      const accepted = new Promise((resolve, reject) => {
+        resolveAccepted = resolve;
+        rejectAccepted = reject;
+      });
+      const settleAccepted = (operation, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        detachAbort();
+        operation(value);
+      };
+      if (signal?.aborted) controller.abort(signal.reason);
+      else if (signal) {
+        const abort = () => controller.abort(signal.reason);
+        signal.addEventListener("abort", abort, { once: true });
+        detachAbort = () => signal.removeEventListener("abort", abort);
+      }
+      timer = setTimeout(() => controller.abort(bridgeError("cursor_bridge_timeout")), timeoutMs);
+      timer.unref?.();
+      const entry = { agentId, runId: undefined, cancelRequested: false, controller };
+      let sendAttempted = false;
+      void (async () => {
+        try {
+          await resumeLocal({ agentId, cwd, storeDirectory, credential, signal: controller.signal });
+          sendAttempted = true;
+          const response = await openStream(METHODS.send, {
+            agentId,
+            message: { text },
+          }, controller.signal);
+          let terminal = false;
+          let ended = false;
+          for await (const frame of connectJsonFrames(response)) {
+            if (frame.end) {
+              ended = true;
+              if (frame.value?.error) throw bridgeError("cursor_bridge_stream_failed");
+              continue;
+            }
+            const identity = streamIdentity(frame.value);
+            if (identity) {
+              if (identity.agentId !== agentId || !SAFE_RUN_ID.test(identity.runId)) {
+                throw bridgeError("cursor_bridge_agent_mismatch");
+              }
+              if (entry.runId && entry.runId !== identity.runId) {
+                throw bridgeError("cursor_bridge_agent_mismatch");
+              }
+              if (!entry.runId) {
+                entry.runId = identity.runId;
+                pending.accepted = true;
+                activeRuns.set(agentId, entry);
+                notify();
+                settleAccepted(resolveAccepted, { agentId, status: "working" });
+              }
+            }
+            if (frame.value?.result) terminal = true;
+          }
+          if (!settled) throw bridgeError("cursor_bridge_prompt_uncertain");
+          if (!ended) throw bridgeError("cursor_bridge_stream_failed");
+          if (terminal) forgetRun(agentId, entry);
+        } catch (error) {
+          if (!settled && sendAttempted && !isDefinitiveSendRejection(error)) {
+            pending.uncertain = true;
+            notify();
+          }
+          if (!settled) settleAccepted(rejectAccepted, error);
+          else if (["cursor_bridge_agent_mismatch", "cursor_bridge_invalid_response"].includes(error?.code)) {
+            forgetRun(agentId, entry);
+          }
+        } finally {
+          clearTimeout(timer);
+          detachAbort();
+          if (!pending.uncertain && pendingSends.get(agentId) === pending) {
+            pendingSends.delete(agentId);
+          }
+          streamControllers.delete(controller);
+        }
+      })();
+      return accepted;
+    },
+    async cancelLocal({ agentId, cwd, storeDirectory, credential, signal }) {
+      assertReady(ready, destroyed);
+      validateOperation(agentId, cwd, storeDirectory, "owned", credential);
+      const active = activeRuns.get(agentId);
+      if (!active?.runId || active.cancelRequested) {
+        throw bridgeError("cursor_bridge_run_not_interruptible");
+      }
+      active.cancelRequested = true;
+      notify();
+      await call(METHODS.cancel, { runId: active.runId, agentId }, signal);
+      return { agentId, status: "cancelling" };
+    },
+    onChange(listener) {
+      if (typeof listener !== "function") throw new TypeError("listener must be a function");
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
     async close() {
       await opening?.catch(() => {});
       ready = false;
+      for (const controller of streamControllers) controller.abort();
+      pendingSends.clear();
+      if (activeRuns.size) {
+        activeRuns.clear();
+        notify();
+      }
     },
     async destroy() {
       if (destroyed) return;
       destroyed = true;
       ready = false;
       await opening?.catch(() => {});
+      for (const controller of streamControllers) controller.abort();
+      pendingSends.clear();
+      activeRuns.clear();
+      listeners.clear();
       bearerToken.destroy();
     },
   };
+
+  async function openStream(method, payload, signal) {
+    const encoded = Buffer.from(JSON.stringify(payload), "utf8");
+    if (encoded.length > MAX_REQUEST_BYTES) {
+      encoded.fill(0);
+      throw bridgeError("cursor_bridge_request_too_large");
+    }
+    const body = Buffer.allocUnsafe(encoded.length + 5);
+    body[0] = 0;
+    body.writeUInt32BE(encoded.length, 1);
+    encoded.copy(body, 5);
+    encoded.fill(0);
+    try {
+      return await bearerToken.use(async (token) => {
+        const tokenText = token.toString("utf8");
+        const response = await directRequest(new URL(method, endpoint), {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${tokenText}`,
+            "connect-protocol-version": "1",
+            "content-type": "application/connect+json",
+          },
+          body,
+          signal,
+        });
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw connectError(await boundedJson(response, MAX_RESPONSE_BYTES), response.statusCode);
+        }
+        if (!header(response, "content-type")?.toLowerCase().startsWith("application/connect+json")) {
+          throw bridgeError("cursor_bridge_invalid_response");
+        }
+        return response;
+      }, signal);
+    } finally {
+      body.fill(0);
+    }
+  }
   return Object.freeze(client);
 }
 
@@ -202,6 +398,64 @@ async function boundedJson(response, maximumBytes) {
   return parsed;
 }
 
+async function* connectJsonFrames(response) {
+  let pending = Buffer.alloc(0);
+  let total = 0;
+  let frames = 0;
+  let ended = false;
+  try {
+    for await (const chunk of response) {
+      total += chunk.length;
+      if (total > MAX_STREAM_BYTES) throw bridgeError("cursor_bridge_stream_too_large");
+      const combined = Buffer.concat([pending, chunk]);
+      pending.fill(0);
+      pending = combined;
+      while (pending.length >= 5) {
+        if (ended) throw bridgeError("cursor_bridge_invalid_response");
+        const flags = pending[0];
+        const length = pending.readUInt32BE(1);
+        if ((flags & ~0x02) !== 0 || length > MAX_STREAM_FRAME_BYTES) {
+          throw bridgeError("cursor_bridge_invalid_response");
+        }
+        if (pending.length < 5 + length) break;
+        frames += 1;
+        if (frames > MAX_STREAM_FRAMES) throw bridgeError("cursor_bridge_stream_too_large");
+        const payload = Buffer.from(pending.subarray(5, 5 + length));
+        const rest = Buffer.from(pending.subarray(5 + length));
+        pending.fill(0);
+        pending = rest;
+        let value;
+        try { value = payload.length ? JSON.parse(payload.toString("utf8")) : {}; }
+        catch { throw bridgeError("cursor_bridge_invalid_response"); }
+        finally { payload.fill(0); }
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          throw bridgeError("cursor_bridge_invalid_response");
+        }
+        ended = Boolean(flags & 0x02);
+        yield { end: ended, value };
+      }
+    }
+    if (pending.length) throw bridgeError("cursor_bridge_invalid_response");
+  } finally {
+    pending.fill(0);
+  }
+}
+
+function streamIdentity(message) {
+  const source = message?.result ?? message?.done ?? message?.sdkMessage?.message;
+  if (!source || typeof source !== "object" || Array.isArray(source)) return undefined;
+  const agentId = exactAlias(source, "agentId", "agent_id");
+  const runId = exactAlias(source, "runId", "run_id");
+  return typeof agentId === "string" && typeof runId === "string" ? { agentId, runId } : undefined;
+}
+
+function exactAlias(value, camel, snake) {
+  if (value[camel] !== undefined && value[snake] !== undefined && value[camel] !== value[snake]) {
+    throw bridgeError("cursor_bridge_invalid_response");
+  }
+  return value[camel] ?? value[snake];
+}
+
 function directRequest(url, { method, headers, body, signal }) {
   return new Promise((resolve, reject) => {
     const request = httpRequest(url, {
@@ -227,6 +481,11 @@ function connectError(payload, status) {
   const error = bridgeError(code);
   error.status = Number.isInteger(status) ? status : undefined;
   return error;
+}
+
+function isDefinitiveSendRejection(error) {
+  return DEFINITIVE_SEND_REJECTION_STATUSES.has(error?.status)
+    || error?.code === "cursor_bridge_request_too_large";
 }
 
 function assertAgentIdentity(agent, expectedId, expectedCwd) {

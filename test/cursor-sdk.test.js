@@ -119,6 +119,72 @@ test("Cursor SDK supplies credentials transiently and redacts bridge results", a
   assert.equal(JSON.stringify(owned).includes(secret), false);
 });
 
+test("Cursor SDK exposes prompt and exact-run interrupt only for a current owned agent", async (t) => {
+  const prompt = "private prompt that must not be persisted";
+  let status = "idle";
+  let interruptible = false;
+  let sent = 0;
+  let cancelled = 0;
+  let observedCredential;
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId, credential }) {
+      observedCredential = credential;
+      return { agentId, status, interruptible, name: "Owned action agent" };
+    },
+    async sendLocal({ agentId, text, credential }) {
+      observedCredential = credential;
+      assert.equal(text, prompt);
+      sent += 1;
+      status = "working";
+      interruptible = true;
+      return { agentId, status };
+    },
+    async cancelLocal({ agentId, credential }) {
+      observedCredential = credential;
+      cancelled += 1;
+      interruptible = false;
+      return { agentId, status: "cancelling" };
+    },
+  });
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  const record = ledgerRecord(owned);
+  const idle = (await fixture.adapter.discoverOwned([record]))[0];
+  assert.equal(idle.capabilities.prompt, true);
+  assert.equal(idle.capabilities.interrupt, false);
+  status = "working";
+  await assert.rejects(fixture.adapter.prompt(idle, prompt), /current Bridge capability/);
+  assert.equal(sent, 0);
+  status = "idle";
+  assert.deepEqual(await fixture.adapter.prompt(idle, prompt), {
+    ok: true, agentId: owned.agentId, action: "prompt",
+  });
+  assert.equal(sent, 1);
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+  const working = (await fixture.adapter.discoverOwned([record]))[0];
+  assert.equal(working.capabilities.prompt, false);
+  assert.equal(working.capabilities.interrupt, true);
+  status = "done";
+  await assert.rejects(fixture.adapter.interrupt(working), /current Bridge capability/);
+  assert.equal(cancelled, 0);
+  status = "working";
+  assert.deepEqual(await fixture.adapter.interrupt(working), {
+    ok: true, agentId: owned.agentId, action: "interrupt",
+  });
+  assert.equal(cancelled, 1);
+  assert.equal(observedCredential.every((byte) => byte === 0), true);
+  const cancelling = (await fixture.adapter.discoverOwned([record]))[0];
+  assert.equal(cancelling.capabilities.prompt, false);
+  assert.equal(cancelling.capabilities.interrupt, false);
+  assert.equal((await readFile(fixture.provenanceFile, "utf8")).includes(prompt), false);
+  await assert.rejects(
+    fixture.adapter.prompt({ ...idle, id: "cursor-sdk:spoofed", capabilities: { ...idle.capabilities, prompt: true } }, prompt),
+    /ownership could not be proven/,
+  );
+});
+
 test("Cursor SDK redacts accepted multibyte credentials shorter than eight characters", async (t) => {
   const secret = "\u79d8\u5bc6\u9375";
   assert.ok(Buffer.byteLength(secret, "utf8") >= 8);
