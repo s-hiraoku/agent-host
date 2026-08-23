@@ -47,6 +47,13 @@ test("runtime preflights both credential files without repairing unsafe modes", 
   }
 });
 
+test("configured Cursor SDK runtime exposes the read dispatch boundary", async () => {
+  const subject = new CursorSdkBridgeRuntimeAdapter({});
+  assert.equal(typeof subject.read, "function");
+  assert.throws(() => subject.read({ id: "cursor-sdk:not-open" }), /must be opened before use/);
+  await subject.destroy();
+});
+
 test("bridge client probes sdk.v1 and performs only explicit owned-agent calls", async (t) => {
   const requests = [];
   const bridge = await fakeBridge(async (req, body, response) => {
@@ -148,6 +155,159 @@ test("bridge client validates the full workspace path before redacting the respo
   await subject.destroy();
 });
 
+test("bridge client reads only bounded user and assistant text from one exact terminal run", async (t) => {
+  const requests = [];
+  const conversation = [
+    {
+      type: "agentConversationTurn",
+      turn: {
+        userMessage: { text: "Fix the failing test" },
+        steps: [
+          { type: "thinkingMessage", message: { text: "private reasoning" } },
+          { type: "toolCall", message: { command: "cat secret.txt", result: "private tool result" } },
+          { type: "assistantMessage", message: { text: "The test is fixed." } },
+          { type: "futureNonTextStep", message: { payload: "opaque" } },
+        ],
+      },
+    },
+    { type: "shellConversationTurn", turn: { shellCommand: { command: "private shell" } } },
+  ];
+  const bridge = await fakeBridge(async (req, body, response) => {
+    requests.push({ url: req.url, body });
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    if (req.url.endsWith("/GetRun")) return json(response, 200, { run: {
+      runId: body.runId, agentId: body.options.agentId, status: "RUN_LIFECYCLE_STATUS_FINISHED",
+    } });
+    if (req.url.endsWith("/GetRunConversation")) {
+      return json(response, 200, { conversationJson: JSON.stringify(conversation) });
+    }
+    throw new Error(`unexpected request: ${req.url}`);
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  assert.deepEqual(await subject.readRunLocal({
+    agentId: "agent-owned", runId: "run-owned-terminal", cwd: "/workspace",
+    storeDirectory: "/store", credential: Buffer.from(API_KEY),
+  }), {
+    agentId: "agent-owned",
+    runId: "run-owned-terminal",
+    messages: [
+      { role: "user", text: "Fix the failing test" },
+      { role: "assistant", text: "The test is fixed." },
+    ],
+    messageCount: 2,
+    omittedBlockCount: 4,
+    truncated: false,
+  });
+  assert.deepEqual(requests.slice(2).map(({ url, body }) => ({ url, body })), [
+    {
+      url: "/sdk.v1.SdkAgentService/GetRun",
+      body: {
+        runId: "run-owned-terminal",
+        options: {
+          runtime: "RUNTIME_LOCAL", cwd: "/workspace", agentId: "agent-owned", apiKey: API_KEY,
+        },
+      },
+    },
+    {
+      url: "/sdk.v1.SdkAgentService/GetRunConversation",
+      body: { runId: "run-owned-terminal" },
+    },
+  ]);
+  await subject.destroy();
+});
+
+test("bridge client rejects non-terminal, mismatched, and malformed exact-run reads", async (t) => {
+  let run = {
+    runId: "run-owned", agentId: "agent-owned", status: "RUN_LIFECYCLE_STATUS_RUNNING",
+  };
+  let conversationJson = "[]";
+  let conversationCalls = 0;
+  const bridge = await fakeBridge(async (req, _body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    if (req.url.endsWith("/GetRun")) return json(response, 200, { run });
+    conversationCalls += 1;
+    return json(response, 200, { conversationJson });
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  const input = {
+    agentId: "agent-owned", runId: "run-owned", cwd: "/workspace",
+    storeDirectory: "/store", credential: Buffer.from(API_KEY),
+  };
+  await assert.rejects(subject.readRunLocal(input), (error) => error.code === "cursor_bridge_run_not_terminal");
+  assert.equal(conversationCalls, 0);
+  run = { ...run, agentId: "agent-other", status: "RUN_LIFECYCLE_STATUS_FINISHED" };
+  await assert.rejects(subject.readRunLocal({ ...input, credential: Buffer.from(API_KEY) }),
+    (error) => error.code === "cursor_bridge_agent_mismatch");
+  assert.equal(conversationCalls, 0);
+  run = { ...run, agentId: "agent-owned" };
+  for (const malformed of [
+    "not json",
+    JSON.stringify({ messages: [] }),
+    JSON.stringify([{ type: "unknownConversationTurn", turn: {} }]),
+    JSON.stringify([{ type: "agentConversationTurn", turn: { steps: [
+      { type: "assistantMessage", message: { text: 123 } },
+    ] } }]),
+    JSON.stringify([{ type: "agentConversationTurn", turn: { steps: [{
+      type: "futureNonTextStep",
+      message: Array.from({ length: 25 }).reduce((value) => ({ nested: value }), "opaque"),
+    }] } }]),
+  ]) {
+    conversationJson = malformed;
+    await assert.rejects(subject.readRunLocal({ ...input, credential: Buffer.from(API_KEY) }),
+      (error) => error.code === "cursor_bridge_invalid_response");
+  }
+  conversationJson = "x".repeat(1_100_000);
+  await assert.rejects(subject.readRunLocal({ ...input, credential: Buffer.from(API_KEY) }),
+    (error) => error.code === "cursor_bridge_response_too_large");
+  await subject.destroy();
+});
+
+test("bridge client bounds exact-run messages to the newest contiguous text", async (t) => {
+  const conversation = Array.from({ length: 70 }, (_, index) => ({
+    type: "agentConversationTurn",
+    turn: {
+      userMessage: { text: `user-${index}` },
+      steps: [{
+        type: "assistantMessage",
+        message: { text: index === 69 ? "x".repeat(9_000) : `assistant-${index}` },
+      }],
+    },
+  }));
+  const bridge = await fakeBridge(async (req, body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    if (req.url.endsWith("/GetRun")) return json(response, 200, { run: {
+      runId: body.runId, agentId: body.options.agentId, status: "RUN_LIFECYCLE_STATUS_CANCELLED",
+    } });
+    return json(response, 200, { conversationJson: JSON.stringify(conversation) });
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  const result = await subject.readRunLocal({
+    agentId: "agent-owned", runId: "run-owned", cwd: "/workspace",
+    storeDirectory: "/store", credential: Buffer.from(API_KEY),
+  });
+  assert.equal(result.messageCount, 140);
+  assert.equal(result.messages.length, 120);
+  assert.deepEqual(result.messages[0], { role: "user", text: "user-10" });
+  assert.deepEqual(result.messages.at(-1), { role: "assistant", text: "x".repeat(8_192) });
+  assert.equal(result.truncated, true);
+  await subject.destroy();
+});
+
 test("bridge client sends one owned prompt and cancels only its exact active run", async (t) => {
   const requests = [];
   let sendResponse;
@@ -189,7 +349,7 @@ test("bridge client sends one owned prompt and cancels only its exact active run
   assert.deepEqual(await subject.sendLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     text: "Fix the failing test", credential: Buffer.from(API_KEY),
-  }), { agentId: "agent-owned", status: "working" });
+  }), { agentId: "agent-owned", runId: "run-owned-1", status: "working" });
   assert.equal((await subject.getLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     credential: Buffer.from(API_KEY),
@@ -307,6 +467,38 @@ test("bridge client retains the send fence after an ambiguous server failure", a
   await subject.destroy();
 });
 
+test("bridge client classifies pre-send and definitive prompt rejection", async (t) => {
+  let mode = "resume-failure";
+  let sends = 0;
+  const bridge = await fakeBridge(async (req, body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    if (req.url.endsWith("/ResumeAgent")) {
+      if (mode === "resume-failure") return json(response, 401, { code: "unauthenticated" });
+      return json(response, 200, { agentId: body.agentId });
+    }
+    sends += 1;
+    return json(response, 422, { code: "invalid_argument" });
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  const input = {
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    text: "classify rejection", credential: Buffer.from(API_KEY),
+  };
+  await assert.rejects(subject.sendLocal(input),
+    (error) => error.code === "cursor_bridge_unauthenticated" && error.sendDisposition === "not_sent");
+  assert.equal(sends, 0);
+  mode = "send-rejection";
+  await assert.rejects(subject.sendLocal({ ...input, credential: Buffer.from(API_KEY) }),
+    (error) => error.code === "cursor_bridge_rpc_failed" && error.sendDisposition === "rejected");
+  assert.equal(sends, 1);
+  await subject.destroy();
+});
+
 for (const statusCode of [408, 499]) {
   test(`bridge client retains the send fence after ambiguous HTTP ${statusCode}`, async (t) => {
     let sends = 0;
@@ -375,7 +567,7 @@ test("bridge client serializes prompt acceptance before an exact run is known", 
   sendResponse.write(connectFrame({ sdkMessage: {
     message: { agentId: "agent-owned", runId: "run-owned-pending" },
   } }));
-  assert.deepEqual(await first, { agentId: "agent-owned", status: "working" });
+  assert.deepEqual(await first, { agentId: "agent-owned", runId: "run-owned-pending", status: "working" });
   await subject.destroy();
 });
 
@@ -402,7 +594,7 @@ test("bridge client retains an observed exact run for cancellation after stream 
   assert.deepEqual(await subject.sendLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     text: "Keep the exact run", credential: Buffer.from(API_KEY),
-  }), { agentId: "agent-owned", status: "working" });
+  }), { agentId: "agent-owned", runId: "run-owned-disconnected", status: "working" });
   assert.deepEqual(await subject.cancelLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     credential: Buffer.from(API_KEY),
@@ -439,7 +631,9 @@ test("bridge client releases an accepted send fence after status proves completi
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     text: "First accepted prompt", credential: Buffer.from(API_KEY),
   };
-  assert.deepEqual(await subject.sendLocal(input), { agentId: "agent-owned", status: "working" });
+  assert.deepEqual(await subject.sendLocal(input), {
+    agentId: "agent-owned", runId: "run-owned-completed", status: "working",
+  });
   status = "AGENT_INFO_STATUS_FINISHED";
   assert.equal((await subject.getLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
@@ -552,7 +746,7 @@ test("bridge client revokes cancellation when an accepted stream later conflicts
   assert.deepEqual(await subject.sendLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     text: "Revoke on conflict", credential: Buffer.from(API_KEY),
-  }), { agentId: "agent-owned", status: "working" });
+  }), { agentId: "agent-owned", runId: "run-owned-first", status: "working" });
   sendResponse.end(connectFrame({ sdkMessage: {
     message: { agentId: "agent-owned", runId: "run-owned-conflict" },
   } }));
@@ -688,9 +882,15 @@ test("official Cursor SDK Bridge conformance is available as an explicit live op
     });
     assert.equal((await subject.getLocal({ ...config, credential: apiKey })).agentId, config.agentId);
     assert.equal((await subject.resumeLocal({ ...config, credential: apiKey })).agentId, config.agentId);
-    assert.equal((await subject.sendLocal({ ...config, text: config.prompt, credential: apiKey })).agentId, config.agentId);
+    const sent = await subject.sendLocal({ ...config, text: config.prompt, credential: apiKey });
+    assert.equal(sent.agentId, config.agentId);
+    assert.match(sent.runId, /^[A-Za-z0-9._:-]{1,200}$/);
     assert.equal((await subject.getLocal({ ...config, credential: apiKey })).agentId, config.agentId);
     assert.equal((await subject.cancelLocal({ ...config, credential: apiKey })).agentId, config.agentId);
+    const read = await waitForTerminalRead(subject, { ...config, runId: sent.runId, credential: apiKey });
+    assert.equal(read.agentId, config.agentId);
+    assert.equal(read.runId, sent.runId);
+    assert.equal(read.messages.every((message) => ["user", "assistant"].includes(message.role)), true);
   } finally {
     apiKeyFile.fill(0);
     await subject.destroy();
@@ -770,4 +970,17 @@ function trimBuffer(bytes) {
   while (start < end && [0x09, 0x0a, 0x0d, 0x20].includes(bytes[start])) start += 1;
   while (end > start && [0x09, 0x0a, 0x0d, 0x20].includes(bytes[end - 1])) end -= 1;
   return bytes.subarray(start, end);
+}
+
+async function waitForTerminalRead(subject, input) {
+  let lastError;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try { return await subject.readRunLocal(input); }
+    catch (error) {
+      if (error?.code !== "cursor_bridge_run_not_terminal") throw error;
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError;
 }

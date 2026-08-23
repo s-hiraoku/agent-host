@@ -93,6 +93,7 @@ export class CursorSdkBridgeRuntimeAdapter {
   markStale(agent) { return this.#required().markStale(agent); }
   prompt(agent, text, options) { return this.#required().prompt(agent, text, options); }
   interrupt(agent, options) { return this.#required().interrupt(agent, options); }
+  read(agent, options) { return this.#required().read(agent, options); }
   onChange(listener) {
     if (typeof listener !== "function") throw new TypeError("listener must be a function");
     this.#listeners.add(listener);
