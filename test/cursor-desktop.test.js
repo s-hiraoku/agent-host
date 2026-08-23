@@ -102,6 +102,19 @@ test("Cursor desktop adapter is observation-only with stable IDs and conservativ
   assert.equal(archived.status, "error");
 });
 
+test("Cursor desktop adapter reports a valid unfinished transcript as working", async (t) => {
+  const roots = await setup(t);
+  await installTranscript(
+    roots.projectsDirectory,
+    "Volumes-Synthetic-example-repository",
+    RECENT,
+    "prefix.jsonl",
+  );
+  const adapter = new CursorDesktopAdapter({ ...roots, now: () => NOW });
+  const [agent] = await adapter.discover();
+  assert.equal(agent.status, "working");
+});
+
 test("Cursor read returns bounded text only and rechecks conflicts after discovery", async (t) => {
   const roots = await setup(t);
   const adapter = new CursorDesktopAdapter({ ...roots, now: () => NOW });
