@@ -481,7 +481,8 @@ function connectError(payload, status) {
 }
 
 function isDefinitiveSendRejection(error) {
-  return Number.isInteger(error?.status) || error?.code === "cursor_bridge_request_too_large";
+  return (Number.isInteger(error?.status) && error.status >= 400 && error.status < 500)
+    || error?.code === "cursor_bridge_request_too_large";
 }
 
 function assertAgentIdentity(agent, expectedId, expectedCwd) {

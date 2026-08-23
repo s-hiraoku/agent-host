@@ -256,7 +256,7 @@ export class CursorSdkAdapter {
 
   async prompt(agent, text, { signal } = {}) {
     return this.#run(async () => {
-      const context = await this.#actionContext(agent, "prompt");
+      const context = await this.#actionContext(agent, "prompt", signal);
       const result = await this.#callBridge("sendLocal", {
         agentId: context.provenance.providerAgentId,
         cwd: context.target.cwd,
@@ -270,7 +270,7 @@ export class CursorSdkAdapter {
 
   async interrupt(agent, { signal } = {}) {
     return this.#run(async () => {
-      const context = await this.#actionContext(agent, "interrupt");
+      const context = await this.#actionContext(agent, "interrupt", signal);
       const result = await this.#callBridge("cancelLocal", {
         agentId: context.provenance.providerAgentId,
         cwd: context.target.cwd,
@@ -365,7 +365,7 @@ export class CursorSdkAdapter {
     await assertDirectoryIdentity(this.#storeDirectory, this.#storeIdentity, "store");
   }
 
-  async #actionContext(agent, capability) {
+  async #actionContext(agent, capability, signal) {
     if (!agent || agent.provider !== "cursor" || agent.source !== this.id
       || agent.capabilities?.[capability] !== true
       || agent.metadata?.cursorSdk?.ownedLaunch !== true
@@ -384,6 +384,18 @@ export class CursorSdkAdapter {
       || provenance.targetDigest !== digest(target.cwd)) {
       throw new Error("Cursor SDK action ownership could not be proven");
     }
+    await this.#assertBridgeDirectories(target);
+    const current = await this.#callBridge("getLocal", {
+      agentId: provenance.providerAgentId,
+      cwd: target.cwd,
+      storeDirectory: this.#storeDirectory,
+    }, signal);
+    assertProviderAgent(current, provenance.providerAgentId);
+    const status = normalizeStatus(current.status);
+    const allowed = capability === "prompt"
+      ? ["idle", "error"].includes(status)
+      : status === "working" && current.interruptible === true;
+    if (!allowed) throw new Error("Cursor SDK action requires a current Bridge capability");
     await this.#assertBridgeDirectories(target);
     return { provenance, target };
   }

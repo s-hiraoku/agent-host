@@ -154,6 +154,10 @@ test("Cursor SDK exposes prompt and exact-run interrupt only for a current owned
   const idle = (await fixture.adapter.discoverOwned([record]))[0];
   assert.equal(idle.capabilities.prompt, true);
   assert.equal(idle.capabilities.interrupt, false);
+  status = "working";
+  await assert.rejects(fixture.adapter.prompt(idle, prompt), /current Bridge capability/);
+  assert.equal(sent, 0);
+  status = "idle";
   assert.deepEqual(await fixture.adapter.prompt(idle, prompt), {
     ok: true, agentId: owned.agentId, action: "prompt",
   });
@@ -162,6 +166,10 @@ test("Cursor SDK exposes prompt and exact-run interrupt only for a current owned
   const working = (await fixture.adapter.discoverOwned([record]))[0];
   assert.equal(working.capabilities.prompt, false);
   assert.equal(working.capabilities.interrupt, true);
+  status = "done";
+  await assert.rejects(fixture.adapter.interrupt(working), /current Bridge capability/);
+  assert.equal(cancelled, 0);
+  status = "working";
   assert.deepEqual(await fixture.adapter.interrupt(working), {
     ok: true, agentId: owned.agentId, action: "interrupt",
   });
