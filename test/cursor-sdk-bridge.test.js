@@ -266,6 +266,9 @@ test("bridge client rejects non-terminal, mismatched, and malformed exact-run re
     await assert.rejects(subject.readRunLocal({ ...input, credential: Buffer.from(API_KEY) }),
       (error) => error.code === "cursor_bridge_invalid_response");
   }
+  conversationJson = JSON.stringify(["y".repeat(800_000)]);
+  await assert.rejects(subject.readRunLocal({ ...input, credential: Buffer.from(API_KEY) }),
+    (error) => error.code === "cursor_bridge_response_too_large");
   conversationJson = "x".repeat(1_100_000);
   await assert.rejects(subject.readRunLocal({ ...input, credential: Buffer.from(API_KEY) }),
     (error) => error.code === "cursor_bridge_response_too_large");

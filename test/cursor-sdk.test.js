@@ -448,7 +448,7 @@ test("Cursor SDK restores the prior run when credential acquisition fails before
   const prompting = fixture.adapter.prompt(restored, "cancel credential acquisition", {
     signal: controller.signal,
   });
-  while (!releaseCredential) await new Promise((resolve) => setImmediate(resolve));
+  await waitFor(() => Boolean(releaseCredential));
   controller.abort();
   releaseCredential(secret);
   await assert.rejects(prompting, (error) => error.code === "cursor_operation_cancelled");
