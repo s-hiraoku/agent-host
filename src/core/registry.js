@@ -258,7 +258,9 @@ export class AgentRegistry {
         }
         this.#opened = true;
       } catch (error) {
-        await Promise.allSettled(opened.map((adapter) => adapter.close?.()));
+        await Promise.allSettled(opened.map((adapter) => (
+          Promise.resolve().then(() => adapter.close?.())
+        )));
         throw error;
       }
     })();
@@ -725,7 +727,9 @@ export class AgentRegistry {
     for (const controller of this.#historyControllers) controller.abort();
     await this.#opening?.catch(() => {});
     await Promise.allSettled([...this.#adapters.values()].map((adapter) => (
-      typeof adapter.destroy === "function" ? adapter.destroy() : adapter.close?.()
+      Promise.resolve().then(() => (
+        typeof adapter.destroy === "function" ? adapter.destroy() : adapter.close?.()
+      ))
     )));
     await Promise.allSettled([this.#refreshPromise, this.#historyPromise].filter(Boolean));
     this.#adapterFlights.clear();

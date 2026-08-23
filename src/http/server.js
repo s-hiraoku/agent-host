@@ -334,8 +334,11 @@ export function createAgentServer(registry, options) {
           server.listen(options.port, options.host, resolve);
         });
       } catch (error) {
-        await launchCoordinator.stop();
-        await registry.close?.();
+        stopping = true;
+        await Promise.allSettled([
+          Promise.resolve().then(() => launchCoordinator.stop()),
+          Promise.resolve().then(() => registry.close?.()),
+        ]);
         throw error;
       }
       started = true;

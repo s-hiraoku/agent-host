@@ -254,7 +254,7 @@ test("official Cursor SDK Bridge conformance is available as an explicit live op
     endpoint: config.endpoint,
     sdkVersion: process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_VERSION ?? "1.0.28",
     bearerTokenSource: createCursorSdkCredentialSource(
-      () => readStrictPrivateFileBufferBounded(config.tokenFile, 16_385),
+      async () => trimBuffer(await readStrictPrivateFileBufferBounded(config.tokenFile, 16_385)),
     ),
   });
   const apiKeyFile = await readStrictPrivateFileBufferBounded(config.apiKeyFile, 16_385);
