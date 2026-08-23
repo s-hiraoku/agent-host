@@ -36,7 +36,6 @@ export function createCursorSdkBridgeClient(options = {}) {
         const redact = createRedactor({ secrets: [tokenText] });
         const response = await directRequest(new URL(method, endpoint), {
           method: "POST",
-          redirect: "error",
           headers: {
             authorization,
             "connect-protocol-version": "1",

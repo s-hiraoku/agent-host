@@ -29,9 +29,9 @@ export function createCursorSdkCredentialSource(secretOrCallback) {
   }
   let retained;
   try {
-    retained = typeof secretOrCallback === "string" || Buffer.isBuffer(secretOrCallback)
-      ? credentialBytes(secretOrCallback)
-      : undefined;
+    if (typeof secretOrCallback === "string") retained = credentialBytes(secretOrCallback);
+    else if (Buffer.isBuffer(secretOrCallback)) retained = credentialBytes(Buffer.from(secretOrCallback));
+    else retained = undefined;
   } catch (error) {
     if (isInternalCredentialError(error)) throw publicCredentialError(error);
     throw error;

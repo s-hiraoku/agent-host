@@ -86,7 +86,7 @@ export class CursorSdkBridgeRuntimeAdapter {
 
   async close() {
     if (this.#destroyed) return;
-    await this.#opening;
+    await this.#opening?.catch(() => {});
     await this.#adapter?.close();
   }
 
