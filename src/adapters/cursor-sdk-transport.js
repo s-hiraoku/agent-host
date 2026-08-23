@@ -12,6 +12,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const SAFE_VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/;
 const SAFE_AGENT_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9._:-]{1,200}$/;
+const DEFINITIVE_SEND_REJECTION_STATUSES = new Set([400, 401, 403, 404, 409, 413, 415, 422, 429]);
 const METHODS = Object.freeze({
   ping: "sdk.v1.SdkBridgeControlService/Ping",
   version: "sdk.v1.SdkBridgeControlService/GetVersion",
@@ -483,7 +484,7 @@ function connectError(payload, status) {
 }
 
 function isDefinitiveSendRejection(error) {
-  return (Number.isInteger(error?.status) && error.status >= 400 && error.status < 500)
+  return DEFINITIVE_SEND_REJECTION_STATUSES.has(error?.status)
     || error?.code === "cursor_bridge_request_too_large";
 }
 

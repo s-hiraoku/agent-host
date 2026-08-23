@@ -307,6 +307,45 @@ test("bridge client retains the send fence after an ambiguous server failure", a
   await subject.destroy();
 });
 
+for (const statusCode of [408, 499]) {
+  test(`bridge client retains the send fence after ambiguous HTTP ${statusCode}`, async (t) => {
+    let sends = 0;
+    const bridge = await fakeBridge(async (req, body, response) => {
+      if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+      if (req.url.endsWith("/GetVersion")) {
+        return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+      }
+      if (req.url.endsWith("/ResumeAgent")) return json(response, 200, { agentId: body.agentId });
+      if (req.url.endsWith("/GetAgent")) {
+        return json(response, 200, { agent: {
+          agentId: body.agentId, status: "AGENT_INFO_STATUS_FINISHED", local: { cwd: body.options.cwd },
+        } });
+      }
+      sends += 1;
+      return json(response, statusCode, { code: "timeout", message: "delivery unknown" });
+    });
+    t.after(() => bridge.close());
+    const subject = client(bridge.endpoint);
+    await subject.open();
+    const input = {
+      agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+      text: `Do not duplicate an HTTP ${statusCode} delivery`, credential: Buffer.from(API_KEY),
+    };
+    await assert.rejects(subject.sendLocal(input), (error) => error.code === "cursor_bridge_rpc_failed");
+    await assert.rejects(subject.sendLocal({ ...input, credential: Buffer.from(API_KEY) }),
+      (error) => error.code === "cursor_bridge_agent_busy");
+    assert.equal(sends, 1);
+    assert.equal((await subject.getLocal({
+      agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+      credential: Buffer.from(API_KEY),
+    })).status, "done");
+    await assert.rejects(subject.sendLocal({ ...input, credential: Buffer.from(API_KEY) }),
+      (error) => error.code === "cursor_bridge_rpc_failed");
+    assert.equal(sends, 2);
+    await subject.destroy();
+  });
+}
+
 test("bridge client serializes prompt acceptance before an exact run is known", async (t) => {
   let releaseSend;
   const sendStarted = new Promise((resolve) => { releaseSend = resolve; });
