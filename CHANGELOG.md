@@ -12,7 +12,9 @@ This project follows [Semantic Versioning](https://semver.org/). Breaking wire c
   exact local-mutation/external-billing confirmations, restart reconciliation, and
   ledger-backed owned discovery proven by the deterministic demo provider.
 - Add an opt-in, read-only `cursor-desktop` adapter for bounded discovery and safe text reads from local Cursor desktop artifacts.
-- Add fail-closed duplicate, partial, corrupt, symlink, ownership, size, and scan-limit handling; no Cursor mutation capability is advertised.
+- Add fail-closed duplicate, partial, corrupt, symlink, ownership, size, and scan-limit handling; Cursor prompt, key, interrupt, and approval capabilities stay disabled.
+- Advertise macOS app-level `focus` for `cursor-desktop` records only when `Cursor.app` is present. The action activates the application and does not open a specific session.
+- Advertise macOS app-level `focus` for running `Claude.app` and `ChatGPT.app` main processes only. Claude Code CLI, Codex CLI, App Server threads, and helper processes stay detection-only.
 - Add optional low-confidence `workspaceCandidate` metadata to API v1 summaries and details.
 
 ## 0.3.0 - 2026-08-12

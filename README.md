@@ -34,7 +34,7 @@ Clients only consume a stable agent model and invoke capabilities exposed by the
 - Track Codex thread status notifications and interrupt turns owned by this host.
 - Surface real Codex command/file approval requests and answer them semantically with `accept` / `decline`.
 - Optionally subscribe to live threads already loaded on a shared Codex App Server Unix control socket.
-- Optionally discover persisted Cursor desktop sessions and read bounded user/assistant text without exposing mutation capabilities.
+- Optionally discover persisted Cursor desktop sessions, read bounded user/assistant text, and on macOS bring `Cursor.app` to the front. Session-level prompt, interrupt, approval, and exact-chat focus remain unavailable.
 - Normalize status to `unknown | idle | working | blocked | done | error`.
 - Advertise per-agent capabilities instead of pretending every backend supports every action.
 - Control Herdr agents with prompt, key input, interrupt, focus, and read operations.
@@ -397,8 +397,11 @@ sessions; `historical` and `raw` views load at most 1,000 sessions on demand. `r
 means the unfiltered normalized agent view—it never returns raw JSONL, tool inputs,
 tool results, commands, or files.
 
-Cursor records advertise only `read`. They never advertise `prompt`, `sendKeys`,
-`approve`, `reject`, `interrupt`, or `focus`. Status is `idle` only when the selected
+Cursor records advertise `read`, and on macOS they may also advertise `focus` when
+`Cursor.app` is present in `/Applications` or `~/Applications`. That `focus` action
+brings the Cursor application to the front. It does not open a specific chat,
+Composer session, or transcript. Records never advertise `prompt`, `sendKeys`,
+`approve`, `reject`, or `interrupt`. Status is `idle` only when the selected
 complete stream ends in `turn_ended/success`, `error` only for `turn_ended/error`, and
 otherwise `unknown`; file activity or a running Cursor process never implies `working`.
 
@@ -623,7 +626,8 @@ The host separates **detection** from **control**.
 | Codex app-server (host-owned) | yes | rich for host-owned activity | yes | n/a | yes |
 | Codex app-server (shared control socket) | opt-in | rich for loaded threads | yes* | n/a | yes* |
 | Claude Code hooks | planned | rich | planned* | planned* | planned |
-| Desktop app adapters | planned | app-specific | app-specific | app-specific | app-specific |
+| Cursor desktop observer | opt-in | idle/error/unknown from artifacts | no | no | no |
+| Other desktop app adapters | planned | app-specific | app-specific | app-specific | app-specific |
 
 `*` Shared Codex actions require a successfully subscribed loaded thread. Threads that
 are only persisted remain visible but expose no actions; a parent-owned child thread
@@ -745,9 +749,11 @@ This keeps client integrations provider-agnostic.
 
 The process adapter treats direct agent executables as high-confidence and loose
 command-line matches as raw-only. Process records never advertise interrupt by
-default. A process record is suppressed from normal views only when a richer
-same-provider adapter reports the exact same PID; matching working directories alone
-never merges agents.
+default. On macOS, the main `Claude.app` and `ChatGPT.app` binaries may advertise
+app-level `focus` when that application is present. Helper processes, Claude Code
+CLI, Codex CLI, and `codex app-server` do not. A process record is suppressed from
+normal views only when a richer same-provider adapter reports the exact same PID;
+matching working directories alone never merges agents.
 
 ## Next adapters
 
@@ -757,7 +763,13 @@ Use hooks for reliable session identity and lifecycle signals. Pair those signal
 
 ### Desktop apps
 
-Use native/local protocols where available. Accessibility automation should be a last-resort adapter and should advertise weaker capabilities because UI automation is fragile.
+Use native/local protocols where available. App-level `focus` is application
+activation, not exact-session focus. The opt-in Cursor observer can bring
+`Cursor.app` to the front. The process adapter can bring `Claude.app` or
+`ChatGPT.app` to the front only for those applications' main GUI processes.
+Codex App Server threads and Claude Code CLI processes do not advertise `focus`.
+Accessibility automation should be a last-resort adapter and should advertise
+weaker capabilities because UI automation is fragile.
 
 ## Security
 

@@ -48,7 +48,17 @@ async function setup(t) {
   t.after(() => database.close());
   await installTranscript(projectsDirectory, "Volumes-Synthetic-example-repository", RECENT, "complete-success.jsonl");
   await installTranscript(projectsDirectory, "Volumes-Synthetic-archived", ARCHIVED, "divergent.jsonl");
-  return { root, userDataDirectory, projectsDirectory };
+  return {
+    root,
+    userDataDirectory,
+    projectsDirectory,
+    appFocus: {
+      available: async () => false,
+      activate: async () => {
+        throw new Error("focus should not run unless a test enables it");
+      },
+    },
+  };
 }
 
 async function installTranscript(projectsDirectory, project, session, fixture) {
@@ -156,6 +166,68 @@ test("Cursor discovery and read fail closed when duplicate scanning is truncated
     action: "read",
     message: "Cursor transcript artifacts conflict",
   });
+});
+
+test("Cursor desktop focus is app-level only and stays off until the application is present", async (t) => {
+  const roots = await setup(t);
+  const activations = [];
+  const adapter = new CursorDesktopAdapter({
+    ...roots,
+    now: () => NOW,
+    appFocus: {
+      available: async (app) => app.appName === "Cursor",
+      activate: async (app) => {
+        activations.push(app.appName);
+        return { ok: true };
+      },
+    },
+  });
+  const agent = (await adapter.discover())[0];
+  assert.equal(agent.capabilities.focus, true);
+  assert.equal(agent.capabilities.prompt, false);
+  assert.equal(agent.capabilities.interrupt, false);
+  assert.deepEqual(await adapter.focus(agent), { ok: true, agentId: agent.id, action: "focus" });
+  assert.deepEqual(activations, ["Cursor"]);
+
+  const missing = new CursorDesktopAdapter({
+    ...roots,
+    now: () => NOW,
+    appFocus: {
+      available: async () => false,
+      activate: async () => ({ ok: false, code: "desktop_focus_unavailable" }),
+    },
+  });
+  const hidden = (await missing.discover())[0];
+  assert.equal(hidden.capabilities.focus, false);
+  assert.deepEqual(await missing.focus(hidden), {
+    ok: false,
+    code: "capability_not_available",
+    agentId: hidden.id,
+    action: "focus",
+    message: "capability focus is not available",
+  });
+});
+
+test("Cursor desktop focus failures stay path-free and do not imply session targeting", async (t) => {
+  const roots = await setup(t);
+  const adapter = new CursorDesktopAdapter({
+    ...roots,
+    now: () => NOW,
+    appFocus: {
+      available: async () => true,
+      activate: async () => ({ ok: false, code: "desktop_focus_failed" }),
+    },
+  });
+  const agent = (await adapter.discover())[0];
+  const result = await adapter.focus(agent);
+  assert.deepEqual(result, {
+    ok: false,
+    code: "desktop_focus_failed",
+    agentId: agent.id,
+    action: "focus",
+    message: "Cursor application could not be brought to the front",
+  });
+  assert.equal(JSON.stringify(result).includes(roots.root), false);
 });
 
 test("Cursor stale records disable read and all mutation capabilities", async (t) => {
