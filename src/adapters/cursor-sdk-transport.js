@@ -32,7 +32,7 @@ export function createCursorSdkBridgeClient(options = {}) {
   let destroyed = false;
   let opening;
   const activeRuns = new Map();
-  const pendingSends = new Set();
+  const pendingSends = new Map();
   const streamControllers = new Set();
   const listeners = new Set();
 
@@ -147,6 +147,11 @@ export function createCursorSdkBridgeClient(options = {}) {
       const mapped = mapAgent(result?.agent, agentId);
       const active = activeRuns.get(agentId);
       if (mapped.status !== "working" && active) forgetRun(agentId, active);
+      const pending = pendingSends.get(agentId);
+      if (["done", "error"].includes(mapped.status) && pending?.uncertain) {
+        pendingSends.delete(agentId);
+        notify();
+      }
       return {
         ...mapped,
         interruptible: mapped.status === "working" && Boolean(active && !active.cancelRequested),
@@ -162,7 +167,8 @@ export function createCursorSdkBridgeClient(options = {}) {
       if (activeRuns.has(agentId) || pendingSends.has(agentId)) {
         throw bridgeError("cursor_bridge_agent_busy");
       }
-      pendingSends.add(agentId);
+      const pending = { uncertain: false };
+      pendingSends.set(agentId, pending);
       const controller = new AbortController();
       streamControllers.add(controller);
       let settled = false;
@@ -190,9 +196,11 @@ export function createCursorSdkBridgeClient(options = {}) {
       timer = setTimeout(() => controller.abort(bridgeError("cursor_bridge_timeout")), timeoutMs);
       timer.unref?.();
       const entry = { agentId, runId: undefined, cancelRequested: false, controller };
+      let sendAttempted = false;
       void (async () => {
         try {
           await resumeLocal({ agentId, cwd, storeDirectory, credential, signal: controller.signal });
+          sendAttempted = true;
           const response = await openStream(METHODS.send, {
             agentId,
             message: { text },
@@ -226,6 +234,10 @@ export function createCursorSdkBridgeClient(options = {}) {
           if (!ended) throw bridgeError("cursor_bridge_stream_failed");
           if (terminal) forgetRun(agentId, entry);
         } catch (error) {
+          if (!settled && sendAttempted && !isDefinitiveSendRejection(error)) {
+            pending.uncertain = true;
+            notify();
+          }
           if (!settled) settleAccepted(rejectAccepted, error);
           else if (["cursor_bridge_agent_mismatch", "cursor_bridge_invalid_response"].includes(error?.code)) {
             forgetRun(agentId, entry);
@@ -233,7 +245,9 @@ export function createCursorSdkBridgeClient(options = {}) {
         } finally {
           clearTimeout(timer);
           detachAbort();
-          pendingSends.delete(agentId);
+          if (!pending.uncertain && pendingSends.get(agentId) === pending) {
+            pendingSends.delete(agentId);
+          }
           streamControllers.delete(controller);
         }
       })();
@@ -464,6 +478,10 @@ function connectError(payload, status) {
   const error = bridgeError(code);
   error.status = Number.isInteger(status) ? status : undefined;
   return error;
+}
+
+function isDefinitiveSendRejection(error) {
+  return Number.isInteger(error?.status) || error?.code === "cursor_bridge_request_too_large";
 }
 
 function assertAgentIdentity(agent, expectedId, expectedCwd) {

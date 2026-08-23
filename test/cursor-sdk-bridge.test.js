@@ -206,17 +206,23 @@ test("bridge client sends one owned prompt and cancels only its exact active run
   await subject.destroy();
 });
 
-test("bridge client fails an uncertain prompt without retrying or inventing a run id", async (t) => {
+test("bridge client fences uncertain prompt delivery until status proves the agent non-working", async (t) => {
   let sends = 0;
+  let status = "AGENT_INFO_STATUS_RUNNING";
   const bridge = await fakeBridge(async (req, body, response) => {
     if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
     if (req.url.endsWith("/GetVersion")) {
       return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
     }
     if (req.url.endsWith("/ResumeAgent")) return json(response, 200, { agentId: body.agentId });
+    if (req.url.endsWith("/GetAgent")) {
+      return json(response, 200, { agent: {
+        agentId: body.agentId, status, local: { cwd: body.options.cwd },
+      } });
+    }
     sends += 1;
     response.writeHead(200, { "content-type": "application/connect+json" });
-    response.end(connectFrame({}, 0x02));
+    response.write(connectFrame({ sdkMessage: { type: "assistant" } }), () => response.destroy());
   });
   t.after(() => bridge.close());
   const subject = client(bridge.endpoint);
@@ -224,8 +230,39 @@ test("bridge client fails an uncertain prompt without retrying or inventing a ru
   await assert.rejects(subject.sendLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     text: "Do not retry this", credential: Buffer.from(API_KEY),
-  }), (error) => error.code === "cursor_bridge_prompt_uncertain");
+  }));
   assert.equal(sends, 1);
+  await assert.rejects(subject.sendLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    text: "Do not duplicate this", credential: Buffer.from(API_KEY),
+  }), (error) => error.code === "cursor_bridge_agent_busy");
+  assert.equal((await subject.getLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  })).status, "working");
+  await assert.rejects(subject.sendLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    text: "Still do not duplicate this", credential: Buffer.from(API_KEY),
+  }), (error) => error.code === "cursor_bridge_agent_busy");
+  status = "AGENT_INFO_STATUS_UNSPECIFIED";
+  assert.equal((await subject.getLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  })).status, "unknown");
+  await assert.rejects(subject.sendLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    text: "Unknown status is not proof", credential: Buffer.from(API_KEY),
+  }), (error) => error.code === "cursor_bridge_agent_busy");
+  status = "AGENT_INFO_STATUS_FINISHED";
+  assert.equal((await subject.getLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  })).status, "done");
+  await assert.rejects(subject.sendLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    text: "Status now permits a new prompt", credential: Buffer.from(API_KEY),
+  }));
+  assert.equal(sends, 2);
   await assert.rejects(subject.cancelLocal({
     agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
     credential: Buffer.from(API_KEY),
