@@ -120,19 +120,24 @@ export function createCursorSdkBridgeClient(options = {}) {
     sdkVersion,
     async open({ signal } = {}) {
       if (destroyed) throw new Error("Cursor SDK Bridge client is destroyed");
-      if (ready) return;
+      if (ready) return { protocolVersion: "sdk.v1", bridgeVersion: sdkVersion };
       if (opening) return opening;
       opening = (async () => {
-        const ping = await call(METHODS.ping, {}, signal);
+        let ping;
+        try { ping = await call(METHODS.ping, {}, signal); }
+        catch (error) { throw diagnosticPhase(error, "ping"); }
         if (ping?.message !== "pong") throw bridgeError("cursor_bridge_probe_failed");
-        const info = await call(METHODS.version, {}, signal);
+        let info;
+        try { info = await call(METHODS.version, {}, signal); }
+        catch (error) { throw diagnosticPhase(error, "version"); }
         if (info?.protocolVersion !== "sdk.v1" || info?.bridgeVersion !== sdkVersion
           || !Array.isArray(info.capabilities)) {
-          throw bridgeError("cursor_bridge_version_mismatch");
+          throw diagnosticPhase(bridgeError("cursor_bridge_version_mismatch"), "version");
         }
         ready = true;
+        return { protocolVersion: "sdk.v1", bridgeVersion: sdkVersion };
       })();
-      try { await opening; }
+      try { return await opening; }
       finally { opening = undefined; }
     },
     async createLocal({ agentId, attemptId, cwd, storeDirectory, profile, credential, signal }) {
@@ -419,6 +424,14 @@ export function createCursorSdkBridgeClient(options = {}) {
   return Object.freeze(client);
 }
 
+export function createCursorSdkBridgeDiagnosticClient(options = {}) {
+  const bridge = createCursorSdkBridgeClient(options);
+  return Object.freeze({
+    inspect: ({ signal } = {}) => bridge.open({ signal }),
+    destroy: () => bridge.destroy(),
+  });
+}
+
 function loopbackEndpoint(value) {
   let url;
   try { url = new URL(value); }
@@ -432,7 +445,7 @@ function loopbackEndpoint(value) {
 }
 
 function version(value) {
-  if (typeof value !== "string" || !SAFE_VERSION.test(value)) {
+  if (typeof value !== "string" || value.length > 64 || !SAFE_VERSION.test(value)) {
     throw new TypeError("Cursor SDK Bridge version must be explicit semver");
   }
   return value;
@@ -773,5 +786,10 @@ function assertReady(ready, destroyed) {
 function bridgeError(code) {
   const error = new Error("Cursor SDK Bridge request failed");
   error.code = code;
+  return error;
+}
+
+function diagnosticPhase(error, phase) {
+  if (error && typeof error === "object") error.diagnosticPhase = phase;
   return error;
 }

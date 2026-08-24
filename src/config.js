@@ -98,6 +98,7 @@ export function parseCommandLine(argv = []) {
       case "--log-file": options.logFile = valueFor(); break;
       case "--dashboard-url": options.dashboardUrl = valueFor(); break;
       case "--dashboard-dir": options.dashboardDirectory = valueFor(); break;
+      case "--report": options.reportFile = valueFor(); break;
       case "--allowed-origin": {
         options.allowedOrigins ??= [];
         options.allowedOrigins.push(valueFor());
@@ -160,6 +161,7 @@ export async function loadConfiguration({
   const merged = { ...defaults, ...fileConfig, ...environment, ...withoutUndefined(cli) };
   delete merged.configFile;
   delete merged.json;
+  delete merged.reportFile;
   merged.tokenFile = resolvePathBySource("tokenFile", { cli, environment, fileConfig, defaults, baseDirectory });
   merged.lockFile = resolvePathBySource("lockFile", { cli, environment, fileConfig, defaults, baseDirectory });
   merged.logFile = resolvePathBySource("logFile", { cli, environment, fileConfig, defaults, baseDirectory });
@@ -291,6 +293,7 @@ function resolveCursorSdkBridge(value, baseDirectory) {
     throw new ConfigurationError("cursorSdkBridge.endpoint must be a literal loopback HTTP origin");
   }
   if (typeof value.sdkVersion !== "string"
+    || value.sdkVersion.length > 64
     || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(value.sdkVersion)) {
     throw new ConfigurationError("cursorSdkBridge.sdkVersion must be explicit semver");
   }

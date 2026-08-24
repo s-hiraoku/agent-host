@@ -25,6 +25,27 @@ trimmed, and zero-filled after the call. JavaScript and HTTP necessarily materia
 short-lived strings; neither value is added to configuration diagnostics, logs,
 provenance, or agent metadata.
 
+## Protocol-read-only doctor
+
+An explicit Bridge configuration can be checked without constructing the runtime adapter:
+
+```bash
+node src/cli.js cursor-sdk doctor --json
+node src/cli.js cursor-sdk doctor --report ./cursor-sdk-doctor.json
+```
+
+The doctor uses the production credential-file validation, then a restricted transport
+that exposes only authenticated `Ping` and `GetVersion`. It does not open anchored private
+state, discover an agent, or call create, resume, get, send, run, conversation, or cancel
+RPCs. The bounded schema-v1 report contains only allowlisted status and reason values;
+endpoint details, paths, credentials, agent/run IDs, and raw Bridge errors are omitted.
+The optional report is atomically written mode `0600` into an existing owned directory.
+
+Success is evidence only for the `sdk.v1` control protocol and exact configured Bridge
+version. It is not lifecycle-conformance evidence. The Bridge can record access or auth
+audit logs, so the doctor is protocol-read-only with respect to Cursor agent/run state,
+not necessarily side-effect-free at the server implementation level.
+
 Example schema-1 configuration (relative paths resolve from the config directory):
 
 ```json
@@ -99,9 +120,8 @@ conversations. Live reads, archive, delete, cloud mode, managed Bridge lifecycle
 existing Cursor desktop sessions remain out of scope. Transport failures after
 `CreateAgent` are uncertain and are not retried.
 
-An optional live Create/Get/Resume/Prompt/Get/Cancel/terminal-read probe can be included
-in the normal
-test command by setting `AGENT_HOST_CURSOR_BRIDGE_TEST_ENDPOINT`,
+The destructive Create/Get/Resume/Prompt/Get/Cancel/terminal-read probe remains an
+explicit developer operation. Set `AGENT_HOST_CURSOR_BRIDGE_TEST_ENDPOINT`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_TOKEN_FILE`, `AGENT_HOST_CURSOR_BRIDGE_TEST_API_KEY_FILE`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_AGENT_ID`, `AGENT_HOST_CURSOR_BRIDGE_TEST_CWD`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_STORE_DIRECTORY`,
@@ -109,10 +129,21 @@ test command by setting `AGENT_HOST_CURSOR_BRIDGE_TEST_ENDPOINT`,
 `AGENT_HOST_CURSOR_BRIDGE_TEST_PROMPT`; the version defaults to `1.0.28` and can be
 overridden with `AGENT_HOST_CURSOR_BRIDGE_TEST_VERSION`. The probe creates, gets,
 resumes, prompts, cancels, waits for a terminal Bridge status, and reads the exact
-configured run. Both secrets remain in
-owner-only files. The operator must use a dedicated store and agent ID because this
-explicit conformance test creates local durable state. Without every required value the
-case is skipped.
+configured run. Run it only through the confirmation-gated wrapper:
+
+```bash
+npm run conformance:cursor-sdk:live -- \
+  --confirm-dedicated-bridge-state-will-be-mutated \
+  --report ./cursor-sdk-live-conformance.json
+```
+
+Both secrets remain in owner-only files. The operator must use a dedicated store and
+agent ID because the test creates durable local agent/run state and does not claim to
+clean it up. The wrapper refuses to read credentials or contact the Bridge unless the
+exact confirmation flag, every explicit setting, and an existing report directory are
+present. Ordinary `npm test` and CI still skip the live case, and a skip is “not run”,
+not a successful compatibility result. The separate sanitized lifecycle report is the
+evidence for create/prompt/cancel/read compatibility.
 
 The boundary accepts only an explicitly injected bridge namespace with an exact
 `sdkVersion` and operations for creating, inspecting, prompting, cancelling, and reading one
