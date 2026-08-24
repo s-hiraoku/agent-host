@@ -61,4 +61,7 @@ function assertOwnedReal(stat, type) {
   const correctType = type === "directory" ? stat.isDirectory() : stat.isFile();
   if (!correctType || stat.isSymbolicLink()) throw new Error(`report destination must use a real ${type}`);
   if (process.getuid && stat.uid !== process.getuid()) throw new Error("report destination must be owned by the current user");
+  if (type === "directory" && (stat.mode & 0o022) !== 0) {
+    throw new Error("report destination directory must not be writable by group or other users");
+  }
 }

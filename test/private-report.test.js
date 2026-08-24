@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -43,4 +43,11 @@ test("private report destination rejects a protected path reached through a dire
 test("private report serialization enforces a final UTF-8 byte limit", () => {
   assert.throws(() => serializePrivateReport({ value: "x".repeat(5_000) }), /size limit/);
   assert.doesNotThrow(() => serializePrivateReport({ schemaVersion: 1, overall: "pass" }));
+});
+
+test("private report destination rejects a directory writable outside the owner", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-private-report-writable-"));
+  t.after(() => rm(directory, { recursive: true }));
+  await chmod(directory, 0o770);
+  await assert.rejects(validatePrivateReportDestination(join(directory, "report.json")), /group or other/);
 });
