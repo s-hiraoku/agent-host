@@ -51,28 +51,37 @@ The adapter exposes create/reconcile/discover only for IDs derived from Agent Ho
 durable launch ledger and private provenance. A not-found lookup may `ResumeAgent` that
 one exact ID from the configured store. An owned idle or error agent may accept one
 prompt through the Bridge `Send` stream after the same ownership and directory checks.
+When a prior exact run exists, prompt additionally requires exact terminal `GetRun`
+proof; agent-level idle/error state alone is insufficient.
 The prompt succeeds only after the stream proves the exact agent and run IDs. Agent Host
 atomically binds that run ID to the existing private owned-agent provenance before
-reporting success. It also retains the active run in memory and advertises interrupt only
-while the Bridge reports the agent working; `CancelRun` always names both exact IDs. A
-concurrent prompt is rejected, and uncertain Send or Cancel delivery is never retried.
+reporting success. Interrupt revalidates that same durable run with exact `GetRun`
+identity and requires `RUNNING` before `CancelRun`; `CancelRun` always names both exact
+IDs. This remains available after Agent Host restarts. A concurrent prompt is rejected,
+and uncertain Send or Cancel delivery is never retried.
 Starting another prompt first marks the durable binding pending and suppresses read.
 Validation, cancellation, or a definitive rejection before delivery restores the prior
 readable run; ambiguous delivery stays pending and unreadable. Exact acceptance
-atomically replaces the prior run. If recording the new exact run fails, prompt fails,
-the pending fence remains, and Agent Host requests best-effort cancellation.
+atomically replaces the prior run. If recording or confirming the new exact run fails,
+prompt fails and Agent Host does not issue an unfenced compensating cancellation. The
+durable result may remain pending or may already contain the exact accepted run.
 
 Dropping a Send stream does not cancel the upstream run. If the exact run ID was already
 observed, Agent Host retains it so the run can still be cancelled; otherwise the prompt
-is uncertain and interrupt remains disabled. Close, destroy, restart, a non-working
-Bridge status, or a successful cancellation removes or disables that process-local
-interrupt capability. The exact latest successfully recorded run ID is private durable
-provenance; it is not published in agent metadata or logs. Stream messages and prompt
-text are not persisted. Connect frames, frame count, and total stream bytes are bounded
-and malformed or conflicting identities fail closed.
+is uncertain and interrupt remains disabled. Before cancellation, Agent Host atomically
+records a run-scoped cancel-attempt fence. An accepted or ambiguous `CancelRun` keeps
+that fence across restart, so the mutation is never repeated. A failure proved to occur
+before invocation, or a definitive rejection, may restore the capability. A terminal
+`GetRun` result keeps exact-run read available and permits a later prompt; only committing
+the new exact run clears the old cancel fence. The exact latest successfully recorded run
+ID and its optional cancel fence are private durable provenance; neither is published in
+agent metadata or logs. Stream messages and prompt text are not persisted. Connect
+frames, frame count, and total stream bytes are bounded and malformed or conflicting
+identities fail closed.
 
-Read is advertised only when that durable exact-run binding exists and the owned agent is
-not working. Each read repeats the ownership, configured-workspace, dedicated-store, and
+Read is advertised only when that durable exact-run binding exists, the owned agent is
+not working, and exact `GetRun` proves the bound run terminal. Each read repeats the
+ownership, configured-workspace, dedicated-store, and
 remote-agent checks, then calls `GetRun` with the bound run ID and requires the returned
 run and agent IDs to match and the run to be terminal. Only then does it call
 `GetRunConversation`. The official conversation JSON is parsed through an allowlist for
@@ -170,16 +179,19 @@ When directly composed with `AgentRegistry`, the adapter:
 - requires an opaque, explicit credential source for every create or reconciliation
   bridge call and never exposes that source through launch capabilities;
 - discovers no ordinary or pre-existing Cursor agents;
-- advertises prompt only for a current owned idle or error agent and interrupt only for
-  an exact active run observed by this host process;
+- advertises prompt only for a current owned idle or error agent with no prior run or an
+  exact prior run proved terminal;
+- advertises interrupt only for its exact durable prompted run after exact `GetRun`
+  proves that run is still working;
 - advertises read only for the exact terminal run durably recorded from a successful
   Agent Host prompt;
 - leaves approval, focus, archive, delete, live-read, and cloud operations absent.
 
 The private provenance file contains opaque target/profile identifiers, exact SDK
 version, the bridge namespace, a hash-derived store scope, canonical-target digest,
-launch and attempt IDs, derived agent IDs, at most one exact prompted run ID, and an
-optional pending-delivery fence. It does not contain workspace or store paths, prompts,
+launch and attempt IDs, derived agent IDs, at most one exact prompted run ID, an optional
+pending-delivery fence, and an optional cancel-attempt fence equal to that run ID. It does
+not contain workspace or store paths, prompts,
 messages,
 credentials, or provider responses.
 
@@ -227,6 +239,10 @@ bytes and payloads at most 1,000,000 bytes. There is no second mutation process 
 pathname check and a write. The helper opens the canonical state path component by
 component with no-follow semantics and compares the protected parent entry with its held
 directory identity immediately before mutation.
+
+The provenance contract is intentionally single-writer. The anchored writer lease must
+remain held for the adapter session; multiple Agent Host processes must not coordinate
+cancel fences through last-writer-wins file access.
 
 Unexpected helper exit permanently poisons that private-state object. An in-flight write
 is ambiguous and is never retried. A later newly opened object may acquire the kernel

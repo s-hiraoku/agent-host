@@ -139,11 +139,14 @@ test("Cursor SDK exposes prompt and exact-run interrupt only for a current owned
       interruptible = true;
       return { agentId, runId: "run-owned-1", status };
     },
-    async cancelLocal({ agentId, credential }) {
+    async inspectRunLocal({ agentId, runId }) {
+      return { agentId, runId, status: status === "working" ? "working" : "terminal" };
+    },
+    async cancelLocal({ agentId, runId, credential }) {
       observedCredential = credential;
       cancelled += 1;
       interruptible = false;
-      return { agentId, status: "cancelling" };
+      return { agentId, runId, status: "cancelling" };
     },
   });
   const owned = await fixture.adapter.launch(
@@ -195,6 +198,9 @@ test("Cursor SDK persists an exact prompted run and reads it after restart only 
       status = "working";
       return { agentId, runId: "run-owned-readable", status };
     },
+    async inspectRunLocal({ agentId, runId }) {
+      return { agentId, runId, status: status === "working" ? "working" : "terminal" };
+    },
     async cancelLocal({ agentId }) { return { agentId, status: "cancelling" }; },
     async readRunLocal({ agentId, runId }) {
       return {
@@ -245,11 +251,275 @@ test("Cursor SDK persists an exact prompted run and reads it after restart only 
   });
 });
 
+test("Cursor SDK advertises read only after exact terminal-run proof", async (t) => {
+  let agentStatus = "idle";
+  let inspection = "working";
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status: agentStatus }; },
+    async sendLocal({ agentId }) { return { agentId, runId: "run-read-proof", status: "working" }; },
+    async inspectRunLocal({ agentId, runId }) {
+      if (inspection === "failure") throw new Error("synthetic GetRun failure");
+      return {
+        agentId: inspection === "mismatch" ? "agent-other" : agentId,
+        runId,
+        status: inspection,
+      };
+    },
+    async readRunLocal({ agentId, runId }) {
+      return { agentId, runId, messages: [], messageCount: 0, omittedBlockCount: 0, truncated: false };
+    },
+  });
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  const ledger = ledgerRecord(owned);
+  await fixture.adapter.prompt((await fixture.adapter.discoverOwned([ledger]))[0], "start");
+  agentStatus = "idle";
+  for (const unproven of ["working", "creating", "mismatch", "failure"]) {
+    inspection = unproven;
+    const agent = (await fixture.adapter.discoverOwned([ledger]))[0];
+    assert.equal(agent.capabilities.read, false, unproven);
+    assert.equal(agent.capabilities.prompt, false, unproven);
+  }
+  inspection = "terminal";
+  const terminal = (await fixture.adapter.discoverOwned([ledger]))[0];
+  assert.equal(terminal.capabilities.read, true);
+  assert.equal(terminal.capabilities.prompt, true);
+});
+
+test("Cursor SDK interrupts its exact durable run after restart and fences repeat cancellation", async (t) => {
+  let agentStatus = "idle";
+  let runStatus = "terminal";
+  let sendMode = "success";
+  let sends = 0;
+  const cancellations = [];
+  const inspections = [];
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status: agentStatus }; },
+    async inspectRunLocal({ agentId, runId }) {
+      inspections.push(runId);
+      return { agentId, runId, status: runStatus };
+    },
+    async sendLocal({ agentId }) {
+      if (sendMode === "rejected") {
+        const error = new Error("definitive replacement rejection");
+        error.sendDisposition = "rejected";
+        throw error;
+      }
+      sends += 1;
+      agentStatus = "working";
+      runStatus = "working";
+      return { agentId, runId: `run-durable-${sends}`, status: "working" };
+    },
+    async cancelLocal({ agentId, runId }) {
+      cancellations.push(runId);
+      return { agentId, runId, status: "cancelling" };
+    },
+    async readRunLocal({ agentId, runId }) {
+      return { agentId, runId, messages: [], messageCount: 0, omittedBlockCount: 0, truncated: false };
+    },
+  });
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  const ledger = ledgerRecord(owned);
+  const idle = (await fixture.adapter.discoverOwned([ledger]))[0];
+  await fixture.adapter.prompt(idle, "start durable run");
+
+  await fixture.adapter.close();
+  await fixture.adapter.open();
+  const restarted = (await fixture.adapter.discoverOwned([ledger]))[0];
+  assert.equal(restarted.capabilities.interrupt, true);
+  const concurrent = await Promise.allSettled([
+    fixture.adapter.interrupt(restarted),
+    fixture.adapter.interrupt(restarted),
+  ]);
+  assert.deepEqual(concurrent[0], { status: "fulfilled", value: {
+    ok: true, agentId: owned.agentId, action: "interrupt",
+  } });
+  assert.equal(concurrent[1].status, "rejected");
+  assert.match(concurrent[1].reason.message, /current Bridge capability/);
+  assert.deepEqual(cancellations, ["run-durable-1"]);
+  let provenance = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
+  assert.equal(provenance.runId, "run-durable-1");
+  assert.equal(provenance.cancelAttemptedRunId, "run-durable-1");
+
+  await fixture.adapter.close();
+  await fixture.adapter.open();
+  const fenced = (await fixture.adapter.discoverOwned([ledger]))[0];
+  assert.equal(fenced.capabilities.interrupt, false);
+  assert.equal(fenced.capabilities.prompt, false);
+  await assert.rejects(fixture.adapter.interrupt(restarted), /current Bridge capability/);
+  assert.deepEqual(cancellations, ["run-durable-1"]);
+
+  agentStatus = "done";
+  runStatus = "terminal";
+  const terminal = (await fixture.adapter.discoverOwned([ledger]))[0];
+  assert.equal(terminal.capabilities.read, true);
+  assert.equal(terminal.capabilities.prompt, true);
+  assert.deepEqual(await fixture.adapter.read(terminal), {
+    ok: true,
+    agentId: owned.agentId,
+    action: "read",
+    data: { messages: [], messageCount: 0, omittedBlockCount: 0, truncated: false },
+  });
+  sendMode = "rejected";
+  await assert.rejects(fixture.adapter.prompt(terminal, "rejected replacement"), /bridge sendLocal failed/);
+  provenance = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
+  assert.equal(provenance.cancelAttemptedRunId, "run-durable-1");
+  sendMode = "success";
+  await fixture.adapter.prompt(terminal, "start replacement run");
+  provenance = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
+  assert.equal(provenance.runId, "run-durable-2");
+  assert.equal(provenance.cancelAttemptedRunId, undefined);
+  assert.ok(inspections.every((runId) => runId === "run-durable-1"));
+});
+
+test("Cursor SDK restores only definitive cancel failures and retains ambiguous fences", async (t) => {
+  let cancellation = "rejected";
+  let cancelCalls = 0;
+  let agentStatus = "idle";
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status: agentStatus }; },
+    async inspectRunLocal({ agentId, runId }) { return { agentId, runId, status: "working" }; },
+    async sendLocal({ agentId }) {
+      agentStatus = "working";
+      return { agentId, runId: "run-cancel-failure", status: "working" };
+    },
+    async cancelLocal({ agentId, runId }) {
+      cancelCalls += 1;
+      if (cancellation !== "success") {
+        const error = new Error(cancellation);
+        if (cancellation === "rejected") error.cancelDisposition = "rejected";
+        throw error;
+      }
+      return { agentId, runId, status: "cancelling" };
+    },
+  });
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  const ledger = ledgerRecord(owned);
+  const initial = (await fixture.adapter.discoverOwned([ledger]))[0];
+  await fixture.adapter.prompt(initial, "start");
+  let working = (await fixture.adapter.discoverOwned([ledger]))[0];
+
+  await assert.rejects(fixture.adapter.interrupt(working), /bridge cancelLocal failed/);
+  let provenance = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
+  assert.equal(provenance.cancelAttemptedRunId, undefined);
+  working = (await fixture.adapter.discoverOwned([ledger]))[0];
+  assert.equal(working.capabilities.interrupt, true);
+
+  cancellation = "ambiguous";
+  await assert.rejects(fixture.adapter.interrupt(working), /bridge cancelLocal failed/);
+  provenance = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
+  assert.equal(provenance.cancelAttemptedRunId, "run-cancel-failure");
+  await fixture.adapter.close();
+  await fixture.adapter.open();
+  working = (await fixture.adapter.discoverOwned([ledger]))[0];
+  assert.equal(working.capabilities.interrupt, false);
+  assert.equal(cancelCalls, 2);
+});
+
+test("Cursor SDK persists the cancel fence before invoking the Bridge", async (t) => {
+  let writes = 0;
+  let cancelCalls = 0;
+  let agentStatus = "idle";
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status: agentStatus }; },
+    async inspectRunLocal({ agentId, runId }) { return { agentId, runId, status: "working" }; },
+    async sendLocal({ agentId }) {
+      agentStatus = "working";
+      return { agentId, runId: "run-before-cancel-write", status: "working" };
+    },
+    async cancelLocal({ agentId, runId }) {
+      cancelCalls += 1;
+      return { agentId, runId, status: "cancelling" };
+    },
+  }, {
+    privateStateFactory(directory) {
+      const state = fixtureFileSystem(directory);
+      const write = state.writeFileAtomic.bind(state);
+      return {
+        ...state,
+        async writeFileAtomic(name, contents) {
+          writes += 1;
+          if (writes === 5) throw new Error("synthetic cancel-fence write failure");
+          return write(name, contents);
+        },
+      };
+    },
+  });
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  const ledger = ledgerRecord(owned);
+  await fixture.adapter.prompt((await fixture.adapter.discoverOwned([ledger]))[0], "start");
+  const working = (await fixture.adapter.discoverOwned([ledger]))[0];
+  await assert.rejects(fixture.adapter.interrupt(working), /synthetic cancel-fence write failure/);
+  assert.equal(cancelCalls, 0);
+  const provenance = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
+  assert.equal(provenance.runId, "run-before-cancel-write");
+  assert.equal(provenance.cancelAttemptedRunId, undefined);
+});
+
+test("Cursor SDK remains fenced when restoring a definitive cancel failure cannot persist", async (t) => {
+  let writes = 0;
+  let agentStatus = "idle";
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status: agentStatus }; },
+    async inspectRunLocal({ agentId, runId }) { return { agentId, runId, status: "working" }; },
+    async sendLocal({ agentId }) {
+      agentStatus = "working";
+      return { agentId, runId: "run-restore-failure", status: "working" };
+    },
+    async cancelLocal() {
+      const error = new Error("definitive rejection");
+      error.cancelDisposition = "rejected";
+      throw error;
+    },
+  }, {
+    privateStateFactory(directory) {
+      const state = fixtureFileSystem(directory);
+      const write = state.writeFileAtomic.bind(state);
+      return {
+        ...state,
+        async writeFileAtomic(name, contents) {
+          writes += 1;
+          if (writes === 6) throw new Error("synthetic cancel-fence restore failure");
+          return write(name, contents);
+        },
+      };
+    },
+  });
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  const ledger = ledgerRecord(owned);
+  await fixture.adapter.prompt((await fixture.adapter.discoverOwned([ledger]))[0], "start");
+  const working = (await fixture.adapter.discoverOwned([ledger]))[0];
+  await assert.rejects(fixture.adapter.interrupt(working), /bridge cancelLocal failed/);
+  let provenance = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
+  assert.equal(provenance.cancelAttemptedRunId, "run-restore-failure");
+  await fixture.adapter.close();
+  await fixture.adapter.open();
+  const restarted = (await fixture.adapter.discoverOwned([ledger]))[0];
+  assert.equal(restarted.capabilities.interrupt, false);
+  provenance = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
+  assert.equal(provenance.cancelAttemptedRunId, "run-restore-failure");
+});
+
 test("Cursor SDK serializes prompts so a losing prompt cannot erase exact-run provenance", async (t) => {
   let status = "idle";
   let sends = 0;
   const fixture = await makeFixture(t, {
     async getLocal({ agentId }) { return { agentId, status, interruptible: false }; },
+    async inspectRunLocal({ agentId, runId }) { return { agentId, runId, status: "terminal" }; },
     async sendLocal({ agentId }) {
       sends += 1;
       status = "working";
@@ -272,7 +542,7 @@ test("Cursor SDK serializes prompts so a losing prompt cannot erase exact-run pr
   );
 });
 
-test("Cursor SDK fails a prompt closed and cancels when exact-run persistence fails", async (t) => {
+test("Cursor SDK fails a prompt closed without an unfenced cancel when exact-run persistence fails", async (t) => {
   let writes = 0;
   let cancellations = 0;
   const fixture = await makeFixture(t, {
@@ -307,10 +577,67 @@ test("Cursor SDK fails a prompt closed and cancels when exact-run persistence fa
     fixture.adapter.prompt(idle, "must not report success"),
     /synthetic exact-run write failure/,
   );
-  assert.equal(cancellations, 1);
+  assert.equal(cancellations, 0);
   const provenance = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
   assert.equal(provenance.runId, undefined);
   assert.equal(provenance.runPending, true);
+});
+
+test("Cursor SDK never compensates with an unfenced cancel after an ambiguous run commit", async (t) => {
+  let committedRun = false;
+  let failPostCommit = true;
+  let cancellations = 0;
+  let status = "idle";
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status }; },
+    async inspectRunLocal({ agentId, runId }) { return { agentId, runId, status: "working" }; },
+    async sendLocal({ agentId }) {
+      status = "working";
+      return { agentId, runId: "run-commit-ambiguous", status };
+    },
+    async cancelLocal({ agentId, runId }) {
+      cancellations += 1;
+      return { agentId, runId, status: "cancelling" };
+    },
+  }, {
+    privateStateFactory(directory) {
+      const state = fixtureFileSystem(directory);
+      const write = state.writeFileAtomic.bind(state);
+      const assertCurrent = state.assertCurrent.bind(state);
+      return {
+        ...state,
+        async writeFileAtomic(name, contents) {
+          await write(name, contents);
+          committedRun = contents.includes("run-commit-ambiguous");
+        },
+        async assertCurrent() {
+          if (committedRun && failPostCommit) {
+            failPostCommit = false;
+            throw new Error("synthetic post-commit acknowledgement failure");
+          }
+          return assertCurrent();
+        },
+      };
+    },
+  });
+  const owned = await fixture.adapter.launch(
+    resolvedRequest(),
+    { attemptId: ATTEMPT_ID, launchId: LAUNCH_ID },
+  );
+  const ledger = ledgerRecord(owned);
+  await assert.rejects(
+    fixture.adapter.prompt((await fixture.adapter.discoverOwned([ledger]))[0], "start"),
+    /synthetic post-commit acknowledgement failure/,
+  );
+  assert.equal(cancellations, 0);
+  const provenance = JSON.parse(await readFile(fixture.provenanceFile, "utf8")).records[0];
+  assert.equal(provenance.runId, "run-commit-ambiguous");
+  assert.equal(provenance.runPending, undefined);
+  assert.equal(provenance.cancelAttemptedRunId, undefined);
+  await fixture.adapter.close();
+  await fixture.adapter.open();
+  const restarted = (await fixture.adapter.discoverOwned([ledger]))[0];
+  assert.equal(restarted.capabilities.interrupt, true);
 });
 
 test("Cursor SDK retains the prior readable run on pre-delivery failures and fences ambiguity", async (t) => {
@@ -319,6 +646,7 @@ test("Cursor SDK retains the prior readable run on pre-delivery failures and fen
   let run = 0;
   const fixture = await makeFixture(t, {
     async getLocal({ agentId }) { return { agentId, status, interruptible: false }; },
+    async inspectRunLocal({ agentId, runId }) { return { agentId, runId, status: "terminal" }; },
     async sendLocal({ agentId }) {
       if (delivery === "definite") {
         const error = new Error("not sent");
@@ -397,6 +725,7 @@ test("Cursor SDK restores the prior run when credential acquisition fails before
   let status = "idle";
   const fixture = await makeFixture(t, {
     async getLocal({ agentId }) { return { agentId, status, interruptible: false }; },
+    async inspectRunLocal({ agentId, runId }) { return { agentId, runId, status: "terminal" }; },
     async sendLocal({ agentId }) {
       bridgeSends += 1;
       status = "working";
@@ -463,6 +792,9 @@ test("Cursor SDK reapplies text bounds after expanding credential redaction", as
   let status = "idle";
   const fixture = await makeFixture(t, {
     async getLocal({ agentId }) { return { agentId, status, interruptible: false }; },
+    async inspectRunLocal({ agentId, runId }) {
+      return { agentId, runId, status: status === "working" ? "working" : "terminal" };
+    },
     async sendLocal({ agentId }) {
       status = "working";
       return { agentId, runId: "run-redaction-bounds", status };
