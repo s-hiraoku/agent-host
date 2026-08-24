@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -99,4 +99,29 @@ test("live conformance validates schema, credentials, and protected report paths
   assert.deepEqual(unavailable, { exitCode: 2, reason: "credential_unavailable" });
   assert.equal(runs, 0);
   assert.equal(preflights, 0);
+});
+
+test("live conformance rejects a dedicated store aliased to the workspace before child execution", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-cursor-live-store-alias-"));
+  t.after(() => rm(directory, { recursive: true }));
+  const workspace = join(directory, "workspace");
+  const storeAlias = join(directory, "store-alias");
+  await mkdir(workspace);
+  await symlink(workspace, storeAlias);
+  let runs = 0;
+  let preflights = 0;
+  const result = await runCursorSdkLiveConformance([
+    CURSOR_LIVE_CONFIRMATION, "--report", join(directory, "report.json"),
+  ], {
+    env: {
+      ...COMPLETE_ENV,
+      AGENT_HOST_CURSOR_BRIDGE_TEST_CWD: workspace,
+      AGENT_HOST_CURSOR_BRIDGE_TEST_STORE_DIRECTORY: storeAlias,
+    },
+    preflightCredential: async () => { preflights += 1; },
+    run: async () => { runs += 1; return 0; },
+  });
+  assert.deepEqual(result, { exitCode: 2, reason: "configuration_invalid" });
+  assert.equal(preflights, 0);
+  assert.equal(runs, 0);
 });

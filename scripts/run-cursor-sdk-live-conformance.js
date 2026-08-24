@@ -1,9 +1,13 @@
 import { spawn } from "node:child_process";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writePrivateFileAtomic } from "../src/secure-state.js";
 import { publicReleaseInfo } from "../src/release-info.js";
-import { serializePrivateReport, validatePrivateReportDestination } from "../src/private-report.js";
+import {
+  canonicalizePrivatePath,
+  serializePrivateReport,
+  validatePrivateReportDestination,
+} from "../src/private-report.js";
 import { preflightCursorSdkCredentialFile } from "../src/adapters/cursor-sdk-credentials.js";
 
 export const CURSOR_LIVE_CONFIRMATION = "--confirm-dedicated-bridge-state-will-be-mutated";
@@ -28,7 +32,7 @@ export async function runCursorSdkLiveConformance(argv, dependencies = {}) {
     return { exitCode: 2, reason: "configuration_incomplete" };
   }
   const bridgeVersion = env.AGENT_HOST_CURSOR_BRIDGE_TEST_VERSION ?? "1.0.28";
-  if (!validLiveConfiguration(env, bridgeVersion)) {
+  if (!validLiveConfiguration(env, bridgeVersion) || await protectedStoreOverlap(env)) {
     return { exitCode: 2, reason: "configuration_invalid" };
   }
   let reportFile;
@@ -108,6 +112,28 @@ function validLiveConfiguration(env, bridgeVersion) {
     && paths.every((path) => isAbsolute(path))
     && resolve(paths[0]) !== resolve(paths[1])
     && Buffer.byteLength(env.AGENT_HOST_CURSOR_BRIDGE_TEST_PROMPT, "utf8") <= 32 * 1024;
+}
+
+async function protectedStoreOverlap(env) {
+  try {
+    const store = await canonicalizePrivatePath(env.AGENT_HOST_CURSOR_BRIDGE_TEST_STORE_DIRECTORY);
+    const protectedPaths = await Promise.all([
+      env.AGENT_HOST_CURSOR_BRIDGE_TEST_CWD,
+      env.AGENT_HOST_CURSOR_BRIDGE_TEST_TOKEN_FILE,
+      env.AGENT_HOST_CURSOR_BRIDGE_TEST_API_KEY_FILE,
+      env.AGENT_HOST_CONFIG,
+    ].filter(Boolean).map(canonicalizePrivatePath));
+    return protectedPaths.some((path) => overlaps(store, path));
+  } catch { return true; }
+}
+
+function overlaps(left, right) {
+  return inside(left, right) || inside(right, left);
+}
+
+function inside(directory, path) {
+  const child = relative(directory, path);
+  return child === "" || (child !== ".." && !child.startsWith(`..${sep}`));
 }
 
 function parseArguments(argv) {

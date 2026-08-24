@@ -13,8 +13,8 @@ export async function validatePrivateReportDestination(path, {
   const parent = await inspect(parentPath);
   assertOwnedReal(parent, "directory");
   const canonicalDestination = join(await realpath(parentPath), basename(destination));
-  const canonicalExactPaths = await Promise.all(exactPaths.filter(Boolean).map(canonicalPath));
-  const canonicalDirectoryPaths = await Promise.all(directoryPaths.filter(Boolean).map(canonicalPath));
+  const canonicalExactPaths = await Promise.all(exactPaths.filter(Boolean).map(canonicalizePrivatePath));
+  const canonicalDirectoryPaths = await Promise.all(directoryPaths.filter(Boolean).map(canonicalizePrivatePath));
   if (canonicalExactPaths.includes(canonicalDestination)
     || canonicalDirectoryPaths.some((entry) => inside(entry, canonicalDestination))) {
     throw new Error("report destination overlaps protected state");
@@ -29,7 +29,7 @@ export async function validatePrivateReportDestination(path, {
   return destination;
 }
 
-async function canonicalPath(path) {
+export async function canonicalizePrivatePath(path) {
   let cursor = resolve(path);
   const suffix = [];
   while (true) {
