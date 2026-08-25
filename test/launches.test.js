@@ -742,6 +742,13 @@ test("authenticated launch retirement route requires JSON confirmation and an id
     assert.equal((await fetch(endpoint, {
       method: "POST", headers: { "content-type": "application/json" }, body: "{}",
     })).status, 401);
+    const malformedResponse = await fetch(`http://127.0.0.1:${address.port}/v1/launches/%ZZ/retire`, {
+      method: "POST",
+      headers: { ...AUTH, "content-type": "application/json", "idempotency-key": "malformed-retire-key" },
+      body: JSON.stringify({ confirmDeleteOwnedAgentAndState: true }),
+    });
+    assert.equal(malformedResponse.status, 400);
+    assert.equal((await malformedResponse.json()).error.code, "invalid_launch_id");
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { ...AUTH, "content-type": "application/json", "idempotency-key": "retire-route-key" },

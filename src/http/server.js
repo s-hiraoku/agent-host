@@ -42,6 +42,11 @@ function decodeSegment(value) {
   catch { throw new ContractError("invalid_agent_id", "agent id is not valid percent-encoded text"); }
 }
 
+function decodeLaunchSegment(value) {
+  try { return decodeURIComponent(value); }
+  catch { throw new ContractError("invalid_launch_id", "launch id is not valid percent-encoded text"); }
+}
+
 function send(res, status, body) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
@@ -123,7 +128,9 @@ export function createAgentServer(registry, options) {
       if (req.method === "POST" && (actionMatch || retirementMatch)) {
         audit = {
           requestId: randomUUID(),
-          agentId: decodeSegment((actionMatch ?? retirementMatch)[1]),
+          agentId: actionMatch
+            ? decodeSegment(actionMatch[1])
+            : decodeLaunchSegment(retirementMatch[1]),
           action: actionMatch?.[2] ?? "retire-launch",
         };
         registry.events.emit({
@@ -182,9 +189,7 @@ export function createAgentServer(registry, options) {
         return sendPrivate(res, 202, { apiVersion: API_VERSION, ...result });
       }
       if (req.method === "GET" && launchMatch) {
-        let launchId;
-        try { launchId = decodeURIComponent(launchMatch[1]); }
-        catch { throw new ContractError("invalid_launch_id", "launch id is not valid percent-encoded text"); }
+        const launchId = decodeLaunchSegment(launchMatch[1]);
         const launch = launchCoordinator.get(launchId);
         return launch
           ? sendPrivate(res, 200, { apiVersion: API_VERSION, launch })
@@ -193,9 +198,7 @@ export function createAgentServer(registry, options) {
       if (req.method === "POST" && retirementMatch) {
         if (stopping) throw new ContractError("shutting_down", "agent-host is shutting down", 503);
         security.requireJson(req);
-        let launchId;
-        try { launchId = decodeURIComponent(retirementMatch[1]); }
-        catch { throw new ContractError("invalid_launch_id", "launch id is not valid percent-encoded text"); }
+        const launchId = decodeLaunchSegment(retirementMatch[1]);
         const result = await launchCoordinator.retire(
           launchId,
           await jsonBody(req),
