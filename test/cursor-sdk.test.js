@@ -168,6 +168,46 @@ test("Cursor SDK accepts not-found only after a durably attempted delete", async
   assert.equal(state.records[0].deleteAttempted, undefined);
 });
 
+test("Cursor SDK does not retain a delete attempt when credentials fail before invocation", async (t) => {
+  let credentialCalls = 0;
+  let status = "idle";
+  let deletes = 0;
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status }; },
+    async deleteLocal({ agentId }) {
+      deletes += 1;
+      return { agentId, deleted: true };
+    },
+  }, {
+    credentialSource: createCursorSdkCredentialSource(() => {
+      credentialCalls += 1;
+      if (credentialCalls === 3) throw new Error("credential unavailable before delete");
+      return "cursor-fixture-secret";
+    }),
+  });
+  const owned = await fixture.adapter.launch(resolvedRequest(), {
+    attemptId: ATTEMPT_ID, launchId: LAUNCH_ID,
+  });
+  const retirementKeyHash = "r".repeat(43);
+  const retiring = { ...ledgerRecord(owned), state: "retiring", retirementKeyHash };
+  await assert.rejects(
+    fixture.adapter.retireLaunch(retiring),
+    (error) => error.code === "cursor_credential_unavailable",
+  );
+  let state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].state, "retiring");
+  assert.equal(state.records[0].deleteAttempted, undefined);
+  assert.equal(deletes, 0);
+
+  status = "working";
+  assert.deepEqual(await fixture.adapter.retireLaunch(retiring), {
+    status: "blocked", code: "cursor_agent_not_terminal",
+  });
+  state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].state, "owned");
+  assert.equal(deletes, 0);
+});
+
 test("Cursor SDK credential sources are explicit, bounded, and opaque to serialization", async () => {
   for (const value of [undefined, null, {}, [], "", "short", "x".repeat(16_385)]) {
     assert.throws(

@@ -275,7 +275,6 @@ export class CursorSdkAdapter {
         if (provenance.state === "owned") {
           await this.#state.beginRetirement(record.attemptId, record.retirementKeyHash);
         }
-        await this.#state.markDeleteAttempted(record.attemptId, record.retirementKeyHash);
       }
       const retiring = await this.#state.get(record.attemptId);
       const target = this.#targets.get(retiring.target);
@@ -287,7 +286,9 @@ export class CursorSdkAdapter {
           cwd: target.cwd,
           storeDirectory: this.#storeDirectory,
           allowNotFound: replayingDelete,
-        }, signal);
+        }, signal, replayingDelete ? undefined : () => (
+          this.#state.markDeleteAttempted(record.attemptId, record.retirementKeyHash)
+        ));
       } catch (error) {
         if (!replayingDelete && error?.deleteDisposition === "rejected") {
           await this.#state.cancelRetirement(record.attemptId, record.retirementKeyHash);
@@ -609,7 +610,7 @@ export class CursorSdkAdapter {
       return await this.#credentialSource.use(
         async (credential) => {
           const redact = createRedactor({ secrets: [credential.toString("utf8")] });
-          onInvoke?.();
+          await onInvoke?.();
           const result = await this.#bridge[operation]({ ...input, credential, signal });
           if (operation === "readRunLocal") {
             const secret = credential.toString("utf8");
