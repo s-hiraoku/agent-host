@@ -190,17 +190,7 @@ export class LaunchLedger {
       this.#assertOpen();
       const current = this.#records.get(id);
       if (!current || current.state !== "retiring") throw new Error("launch retirement is not fenced");
-      const entry = {
-        launchId: current.id,
-        attemptId: current.attemptId,
-        provider: current.request.provider,
-        keyHash: current.retirementKeyHash,
-        creationKeyHash: current.keyHash,
-        signature: current.signature,
-        request: structuredClone(current.request),
-        requestedAt: current.requestedAt,
-        retiredAt: now,
-      };
+      const entry = retirementEntry(current, now);
       if (!validRetirement(entry)) throw new Error("invalid launch retirement tombstone");
       const previousRetirements = new Map(this.#retirements);
       const previousCleanups = new Map(this.#retirementCleanups);
@@ -302,13 +292,16 @@ export class LaunchLedger {
   #assertOpen() { if (!this.#opened) throw new Error("launch ledger is not open"); }
 
   async #persist() {
-    const content = `${JSON.stringify({
-      schemaVersion: LEDGER_SCHEMA_VERSION,
-      records: [...this.#records.values()],
-      retirements: [...this.#retirements.values()],
-      retirementCleanups: [...this.#retirementCleanups.values()],
-    })}\n`;
+    const content = ledgerContent(this.#records, this.#retirements, this.#retirementCleanups);
     if (Buffer.byteLength(content) > MAX_LEDGER_BYTES) throw new Error("launch ledger exceeds its size limit");
+    const projected = projectRetirementCompletions(
+      this.#records, this.#retirements, this.#retirementCleanups,
+    );
+    if (Buffer.byteLength(ledgerContent(
+      projected.records, projected.retirements, projected.retirementCleanups,
+    )) > MAX_LEDGER_BYTES) {
+      throw new Error("launch ledger cannot reserve retirement completion capacity");
+    }
     await writePrivateFileAtomic(this.#path, content);
   }
 
@@ -317,6 +310,46 @@ export class LaunchLedger {
     this.#tail = next.catch(() => {});
     return next;
   }
+}
+
+function ledgerContent(records, retirements, retirementCleanups) {
+  return `${JSON.stringify({
+    schemaVersion: LEDGER_SCHEMA_VERSION,
+    records: [...records.values()],
+    retirements: [...retirements.values()],
+    retirementCleanups: [...retirementCleanups.values()],
+  })}\n`;
+}
+
+function projectRetirementCompletions(recordsSource, retirementsSource, cleanupsSource) {
+  const records = new Map(recordsSource);
+  const retirements = new Map(retirementsSource);
+  const retirementCleanups = new Map(cleanupsSource);
+  for (const record of recordsSource.values()) {
+    if (record.state !== "retiring") continue;
+    const entry = retirementEntry(record, record.updatedAt);
+    records.delete(record.id);
+    retirements.set(record.id, entry);
+    retirementCleanups.set(record.id, retirementCleanup(entry));
+    while (retirements.size > MAX_RETIREMENTS) {
+      retirements.delete(retirements.keys().next().value);
+    }
+  }
+  return { records, retirements, retirementCleanups };
+}
+
+function retirementEntry(record, now) {
+  return {
+    launchId: record.id,
+    attemptId: record.attemptId,
+    provider: record.request.provider,
+    keyHash: record.retirementKeyHash,
+    creationKeyHash: record.keyHash,
+    signature: record.signature,
+    request: structuredClone(record.request),
+    requestedAt: record.requestedAt,
+    retiredAt: laterTimestamp(record.updatedAt, now),
+  };
 }
 
 function validRetirement(entry) {

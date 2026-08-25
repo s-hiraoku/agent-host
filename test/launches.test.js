@@ -145,16 +145,77 @@ test("ledger reservation replays a creation key retired after the caller prechec
   const keyHash = "c".repeat(43);
   const signature = "s".repeat(43);
   const request = resolvedRequest();
-  const reserved = await ledger.reserve({ keyHash, signature, request });
+  const reserved = await ledger.reserve({
+    keyHash, signature, request, now: "2026-08-25T00:00:00.000Z",
+  });
   await ledger.transition(reserved.record.id, ["requested"], {
     state: "owned", providerAgentId: "provider-agent", agentId: "demo:agent",
-  });
-  await ledger.beginRetirement(reserved.record.id, "r".repeat(43));
-  const retired = await ledger.completeRetirement(reserved.record.id);
+  }, "2026-08-25T00:01:00.000Z");
+  await ledger.beginRetirement(
+    reserved.record.id, "r".repeat(43), "2026-08-25T00:02:00.000Z",
+  );
+  const retired = await ledger.completeRetirement(
+    reserved.record.id, "2026-08-24T23:59:00.000Z",
+  );
+  assert.equal(retired.retiredAt, "2026-08-25T00:02:00.000Z");
   const replay = await ledger.reserve({ keyHash, signature, request });
   assert.equal(replay.created, false);
   assert.deepEqual(replay.retirement, retired);
   assert.equal(ledger.list().length, 0);
+  await ledger.close();
+});
+
+test("retirement fencing reserves ledger capacity before provider deletion", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-capacity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const timestamp = "2026-08-25T00:00:00.000Z";
+  const request = () => ({
+    provider: "p", target: "t", profile: "p", mode: "m", capabilityVersion: "v",
+    risk: { localMutation: true, externalBillable: false },
+  });
+  const identity = (index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+  const hash = (prefix, index) => `${prefix}${index.toString(36).padStart(42, "0")}`;
+  const owned = {
+    id: `launch:${identity(0)}`, attemptId: `attempt:${identity(0)}`,
+    keyHash: hash("k", 0), signature: hash("s", 0), request: request(), state: "owned",
+    requestedAt: timestamp, updatedAt: timestamp, providerAgentId: "provider", agentId: "agent",
+  };
+  const records = [owned];
+  for (let index = 1; index < 1_000; index += 1) {
+    records.push({
+      id: `launch:${identity(index)}`, attemptId: `attempt:${identity(index)}`,
+      keyHash: hash("k", index), signature: hash("s", index), request: request(), state: "failed",
+      requestedAt: timestamp, updatedAt: timestamp, error: { code: "e", retryable: false },
+    });
+  }
+  const document = { schemaVersion: 2, records, retirements: [], retirementCleanups: [] };
+  const targetBytes = 1_000_000 - 200;
+  let padding = targetBytes - Buffer.byteLength(`${JSON.stringify(document)}\n`);
+  for (const record of records.slice(1)) {
+    for (const [object, field] of [
+      [record.request, "provider"], [record.request, "target"], [record.request, "profile"],
+      [record.request, "mode"], [record.request, "capabilityVersion"], [record.error, "code"],
+    ]) {
+      const added = Math.min(99, padding);
+      object[field] += "x".repeat(added);
+      padding -= added;
+      if (padding === 0) break;
+    }
+    if (padding === 0) break;
+  }
+  assert.equal(padding, 0);
+  const content = `${JSON.stringify(document)}\n`;
+  assert.equal(Buffer.byteLength(content), targetBytes);
+  await writeFile(ledgerFile, content, { mode: 0o600 });
+
+  const ledger = new LaunchLedger(ledgerFile);
+  await ledger.open();
+  await assert.rejects(
+    ledger.beginRetirement(owned.id, "r".repeat(43)),
+    /cannot reserve retirement completion capacity/,
+  );
+  assert.equal(ledger.get(owned.id).state, "owned");
   await ledger.close();
 });
 
