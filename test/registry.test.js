@@ -713,6 +713,51 @@ test("owned-launch deactivation stays hidden across stale and failed discovery",
   await registry.close();
 });
 
+test("owned-launch rollback rejects discovery started before reactivation", async () => {
+  const staleGate = deferred();
+  let calls = 0;
+  const adapter = {
+    id: "owned-provider",
+    launchCapabilities() {
+      return {
+        provider: "owned-provider", capabilityVersion: "fixture-v1",
+        targets: [{ id: "workspace", profiles: ["default"], modes: [{
+          id: "local", enabled: true, localMutation: true, externalBillable: false,
+        }] }],
+      };
+    },
+    async discover() { return []; },
+    async discoverOwned(records) {
+      calls += 1;
+      if (calls === 3) await staleGate.promise;
+      if (calls === 4) throw new Error("rollback follow-up failed");
+      return records.map((record) => ({
+        id: record.agentId, provider: "owned-provider", source: "owned-provider",
+        name: "owned agent", status: "idle", capabilities: {},
+      }));
+    },
+  };
+  const record = {
+    id: "launch:owned", agentId: "owned-provider:agent", state: "owned",
+    request: { provider: "owned-provider" },
+  };
+  const registry = new AgentRegistry([adapter]);
+  registry.activateOwnedLaunch(record);
+  await registry.refresh({ force: true });
+  const cached = registry.deactivateOwnedLaunch(record.id);
+  await registry.refreshAfterOwnedLaunchChange();
+  const stale = registry.refresh({ force: true });
+  await nextTurn();
+  registry.activateOwnedLaunch(record, cached);
+  const afterRollback = registry.refreshAfterOwnedLaunchChange();
+  staleGate.resolve();
+  await stale;
+  await afterRollback;
+  assert.equal(calls, 4);
+  assert.equal(registry.get(record.agentId)?.id, record.agentId);
+  await registry.close();
+});
+
 test("forced follow-up does not adopt itself when adapter change queues another refresh", async () => {
   let calls = 0;
   let onChange;

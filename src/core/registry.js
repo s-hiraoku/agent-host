@@ -86,6 +86,7 @@ export class AgentRegistry {
   #forcedProbeMinMs;
   #circuits = new Map();
   #ownedLaunches = new Map();
+  #ownedLaunchGeneration = 0;
   #currentRefreshForced = false;
   #forcedFollowupPromise;
   events = new AgentEventBus();
@@ -298,12 +299,13 @@ export class AgentRegistry {
       throw new TypeError("owned launch record is required");
     }
     this.#ownedLaunches.set(record.id, structuredClone(record));
+    this.#ownedLaunchGeneration += 1;
     if (cachedAgent !== undefined) this.#restoreCachedOwnedAgent(record, cachedAgent);
   }
 
   deactivateOwnedLaunch(id) {
     const record = this.#ownedLaunches.get(id);
-    this.#ownedLaunches.delete(id);
+    if (this.#ownedLaunches.delete(id)) this.#ownedLaunchGeneration += 1;
     return record?.agentId ? this.#evictCachedOwnedAgent(record.agentId) : undefined;
   }
 
@@ -367,6 +369,7 @@ export class AgentRegistry {
           return;
         }
         const outcome = this.#normalizeOutcome(adapter, await this.#discoverAdapter(adapter));
+        if (outcome.status === "superseded") return;
         if (!this.#closed) {
           this.#recordCircuitOutcome(adapter.id, outcome, admission.probe);
           this.#applyOutcome(outcome);
@@ -490,6 +493,10 @@ export class AgentRegistry {
   }
 
   #normalizeOutcome(adapter, outcome) {
+    if (outcome.status === "success" && typeof adapter?.launchCapabilities === "function"
+      && outcome.ownedLaunchGeneration !== this.#ownedLaunchGeneration) {
+      return { ...outcome, status: "superseded" };
+    }
     if (outcome.status !== "success" || !adapter?.isDiscoveryCurrent
       || adapter.isDiscoveryCurrent(outcome.agents)) {
       if (outcome.status !== "success" || typeof adapter?.launchCapabilities !== "function") return outcome;
@@ -720,6 +727,7 @@ export class AgentRegistry {
         controller,
         startedAt: Date.now(),
         startedAtIso: new Date().toISOString(),
+        ownedLaunchGeneration: this.#ownedLaunchGeneration,
       };
       flight.promise = Promise.resolve()
         .then(() => typeof adapter.launchCapabilities === "function"
@@ -753,6 +761,7 @@ export class AgentRegistry {
       adapterId: adapter.id,
       attemptedAt: flight.startedAtIso,
       durationMs: Date.now() - flight.startedAt,
+      ownedLaunchGeneration: flight.ownedLaunchGeneration,
       ...outcome,
     };
   }
