@@ -2509,6 +2509,12 @@ async function makeFixture(t, bridgeOverrides = {}, adapterOptions = {}) {
     async getLocal({ agentId }) { return agents.get(agentId) ?? null; },
     ...bridgeOverrides,
   };
+  if (typeof bridgeOverrides.deleteLocal === "function") {
+    bridge.deleteLocal = async (input) => {
+      await input.onInvoke?.();
+      return bridgeOverrides.deleteLocal(input);
+    };
+  }
   const cwd = join(directory, "workspace");
   await mkdir(cwd);
   const storeDirectory = join(directory, "sdk-store");

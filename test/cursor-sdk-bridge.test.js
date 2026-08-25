@@ -1015,6 +1015,42 @@ test("bridge client deletes only one exact owned local agent and accepts an abse
   await subject.destroy();
 });
 
+test("bridge client acquires its bearer token before the delete invocation fence", async (t) => {
+  const requests = [];
+  const bridge = await fakeBridge(async (req, _body, response) => {
+    requests.push(req.url);
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    return json(response, 200, {});
+  });
+  t.after(() => bridge.close());
+  let tokenCalls = 0;
+  const subject = createCursorSdkBridgeClient({
+    endpoint: bridge.endpoint,
+    sdkVersion: "1.0.28",
+    bearerTokenSource: createCursorSdkCredentialSource(() => {
+      tokenCalls += 1;
+      if (tokenCalls === 3) throw new Error("bearer token unavailable");
+      return TOKEN;
+    }),
+  });
+  await subject.open();
+  let invoked = false;
+  await assert.rejects(subject.deleteLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+    onInvoke: async () => { invoked = true; },
+  }));
+  assert.equal(invoked, false);
+  assert.deepEqual(requests, [
+    "/sdk.v1.SdkBridgeControlService/Ping",
+    "/sdk.v1.SdkBridgeControlService/GetVersion",
+  ]);
+  await subject.destroy();
+});
+
 test("bridge client rejects an absent agent before an ambiguous delete replay", async (t) => {
   const bridge = await fakeBridge(async (req, _body, response) => {
     if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });

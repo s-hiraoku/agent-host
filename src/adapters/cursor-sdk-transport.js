@@ -71,7 +71,7 @@ export function createCursorSdkBridgeClient(options = {}) {
   };
 
   const call = async (method, payload, signal, validateResponse, maximumResponseBytes = MAX_RESPONSE_BYTES,
-    sanitizeResponse) => {
+    sanitizeResponse, onInvoke) => {
     const body = Buffer.from(JSON.stringify(payload), "utf8");
     if (body.length > MAX_REQUEST_BYTES) throw bridgeError("cursor_bridge_request_too_large");
     try {
@@ -79,6 +79,8 @@ export function createCursorSdkBridgeClient(options = {}) {
         const tokenText = token.toString("utf8");
         const authorization = `Bearer ${tokenText}`;
         const redact = createRedactor({ secrets: [tokenText] });
+        signal?.throwIfAborted();
+        await onInvoke?.();
         const response = await directRequest(new URL(method, endpoint), {
           method: "POST",
           headers: {
@@ -87,7 +89,7 @@ export function createCursorSdkBridgeClient(options = {}) {
             "content-type": "application/json",
           },
           body,
-          signal: combinedSignal(signal, timeoutMs),
+          signal: combinedSignal(onInvoke ? undefined : signal, timeoutMs),
         });
         const parsed = await boundedJson(response, maximumResponseBytes);
         if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -358,7 +360,9 @@ export function createCursorSdkBridgeClient(options = {}) {
         throw error;
       }
     },
-    async deleteLocal({ agentId, cwd, storeDirectory, credential, signal, allowNotFound = false }) {
+    async deleteLocal({
+      agentId, cwd, storeDirectory, credential, signal, allowNotFound = false, onInvoke,
+    }) {
       assertReady(ready, destroyed);
       validateOperation(agentId, cwd, storeDirectory, "owned", credential);
       const apiKey = credential.toString("utf8");
@@ -371,7 +375,7 @@ export function createCursorSdkBridgeClient(options = {}) {
             || Object.keys(response).length !== 0) {
             throw bridgeError("cursor_bridge_invalid_response");
           }
-        });
+        }, MAX_RESPONSE_BYTES, undefined, onInvoke);
       } catch (error) {
         if (!(allowNotFound && error?.code === "cursor_bridge_not_found")) {
           markDisposition(

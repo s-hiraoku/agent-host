@@ -286,9 +286,10 @@ export class CursorSdkAdapter {
           cwd: target.cwd,
           storeDirectory: this.#storeDirectory,
           allowNotFound: replayingDelete,
-        }, signal, replayingDelete ? undefined : () => (
-          this.#state.markDeleteAttempted(record.attemptId, record.retirementKeyHash)
-        ));
+          onInvoke: replayingDelete ? undefined : () => (
+            this.#state.markDeleteAttempted(record.attemptId, record.retirementKeyHash)
+          ),
+        }, signal);
       } catch (error) {
         if (!replayingDelete && error?.deleteDisposition === "rejected") {
           await this.#state.cancelRetirement(record.attemptId, record.retirementKeyHash);
