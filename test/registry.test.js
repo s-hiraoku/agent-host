@@ -659,6 +659,46 @@ test("explicit refresh queued during a scheduled refresh is not swallowed", asyn
   await registry.close();
 });
 
+test("owned-launch changes wait for discovery that starts after the change", async () => {
+  const firstGate = deferred();
+  let calls = 0;
+  const adapter = {
+    id: "owned-provider",
+    launchCapabilities() {
+      return {
+        provider: "owned-provider", capabilityVersion: "fixture-v1",
+        targets: [{ id: "workspace", profiles: ["default"], modes: [{
+          id: "local", enabled: true, localMutation: true, externalBillable: false,
+        }] }],
+      };
+    },
+    async discover() { return []; },
+    async discoverOwned(records) {
+      calls += 1;
+      if (calls === 1) await firstGate.promise;
+      return records.map((record) => ({
+        id: record.agentId, provider: "owned-provider", source: "owned-provider",
+        name: "owned agent", status: "idle", capabilities: {},
+      }));
+    },
+  };
+  const registry = new AgentRegistry([adapter]);
+  registry.activateOwnedLaunch({
+    id: "launch:owned", agentId: "owned-provider:agent", state: "owned",
+    request: { provider: "owned-provider" },
+  });
+  const stale = registry.refresh({ force: true });
+  await nextTurn();
+  registry.deactivateOwnedLaunch("launch:owned");
+  const afterChange = registry.refreshAfterOwnedLaunchChange();
+  firstGate.resolve();
+  await stale;
+  await afterChange;
+  assert.equal(calls, 2);
+  assert.deepEqual(registry.list(), []);
+  await registry.close();
+});
+
 test("forced follow-up does not adopt itself when adapter change queues another refresh", async () => {
   let calls = 0;
   let onChange;

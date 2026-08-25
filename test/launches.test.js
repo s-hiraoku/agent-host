@@ -89,6 +89,10 @@ test("launch retirement fences provider deletion and replays from a bounded tomb
   await coordinator.start();
   const accepted = await coordinator.submit(LOCAL_REQUEST, "retirement-launch-key");
   await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  const lifecycle = [];
+  registry.events.subscribe((event) => {
+    if (event.type === "launch.updated" && event.launch.id === accepted.launch.id) lifecycle.push(event);
+  });
   const payload = { confirmDeleteOwnedAgentAndState: true };
   const first = await coordinator.retire(accepted.launch.id, payload, "retirement-delete-key");
   assert.equal(first.replayed, false);
@@ -96,6 +100,12 @@ test("launch retirement fences provider deletion and replays from a bounded tomb
   assert.equal(coordinator.get(accepted.launch.id), undefined);
   assert.equal(deactivated, accepted.launch.id);
   assert.equal(finalized.launchId, accepted.launch.id);
+  assert.deepEqual(lifecycle
+    .filter((event) => ["retiring", "retired"].includes(event.phase))
+    .map((event) => [event.phase, event.launch.state]), [
+    ["retiring", "retiring"],
+    ["retired", "retired"],
+  ]);
   const replay = await coordinator.retire(accepted.launch.id, payload, "retirement-delete-key");
   assert.equal(replay.replayed, true);
   assert.deepEqual(replay.retirement, first.retirement);
@@ -165,6 +175,10 @@ test("a pre-delete retirement refusal restores owned launch state", async (t) =>
   await coordinator.start();
   const accepted = await coordinator.submit(LOCAL_REQUEST, "blocked-launch-key");
   await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  const lifecycle = [];
+  registry.events.subscribe((event) => {
+    if (event.type === "launch.updated" && event.launch.id === accepted.launch.id) lifecycle.push(event);
+  });
   await assert.rejects(
     coordinator.retire(
       accepted.launch.id,
@@ -174,6 +188,13 @@ test("a pre-delete retirement refusal restores owned launch state", async (t) =>
     (error) => error.code === "launch_not_retirable" && error.status === 409,
   );
   assert.equal(coordinator.get(accepted.launch.id).state, "owned");
+  assert.deepEqual(lifecycle
+    .filter((event) => ["retiring", "owned"].includes(event.phase))
+    .slice(-2)
+    .map((event) => [event.phase, event.launch.state]), [
+    ["retiring", "retiring"],
+    ["owned", "owned"],
+  ]);
   await coordinator.stop();
 });
 

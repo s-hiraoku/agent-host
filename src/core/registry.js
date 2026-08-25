@@ -302,6 +302,12 @@ export class AgentRegistry {
     this.#ownedLaunches.delete(id);
   }
 
+  refreshAfterOwnedLaunchChange() {
+    if (this.#closed) return Promise.resolve(this.list());
+    if (!this.#refreshPromise) return this.refresh({ force: true });
+    return this.#queueForcedFollowup();
+  }
+
   #launchAdapter(provider) {
     return [...this.#adapters.values()].find((adapter) => (
       typeof adapter.launchCapabilities === "function" && adapter.launchCapabilities()?.provider === provider
@@ -313,18 +319,7 @@ export class AgentRegistry {
     const force = options.force ?? true;
     if (this.#refreshPromise) {
       if (force && !this.#currentRefreshForced) {
-        if (!this.#forcedFollowupPromise) {
-          let followup;
-          followup = this.#refreshPromise.then(() => {
-            if (this.#closed) return this.list();
-            if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
-            return this.refresh({ force: true });
-          }).finally(() => {
-            if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
-          });
-          this.#forcedFollowupPromise = followup;
-        }
-        return this.#forcedFollowupPromise;
+        return this.#queueForcedFollowup();
       }
       return this.#refreshPromise;
     }
@@ -341,6 +336,21 @@ export class AgentRegistry {
       }
     });
     return this.#refreshPromise;
+  }
+
+  #queueForcedFollowup() {
+    if (!this.#forcedFollowupPromise) {
+      let followup;
+      followup = this.#refreshPromise.then(() => {
+        if (this.#closed) return this.list();
+        if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
+        return this.refresh({ force: true });
+      }).finally(() => {
+        if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
+      });
+      this.#forcedFollowupPromise = followup;
+    }
+    return this.#forcedFollowupPromise;
   }
 
   async #runRefresh(force) {

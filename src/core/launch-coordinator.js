@@ -139,7 +139,10 @@ export class LaunchCoordinator {
     if (record.state !== "owned" && record.state !== "retiring") {
       throw new ContractError("launch_not_retirable", "only an owned launch can be retired", 409);
     }
-    if (record.state === "owned") record = await this.#ledger.beginRetirement(id, keyHash);
+    if (record.state === "owned") {
+      record = await this.#ledger.beginRetirement(id, keyHash);
+      this.#emit(record, "retiring");
+    }
     if (record.retirementKeyHash !== keyHash) throw retirementConflict();
     const existing = this.#retirements.get(id);
     if (existing) return { retirement: retirementView(await existing), replayed: true };
@@ -173,7 +176,7 @@ export class LaunchCoordinator {
 
   async #finishRetirement(record) {
     this.#registry.deactivateOwnedLaunch?.(record.id);
-    await this.#registry.refresh?.({ force: true });
+    await this.#refreshOwnedLaunches();
     const invocation = this.#invoke((options) => this.#registry.retireLaunch?.(
       record.request.provider,
       record,
@@ -184,7 +187,8 @@ export class LaunchCoordinator {
     if (["blocked", "unsupported"].includes(result?.status)) {
       const restored = await this.#ledger.cancelRetirement(record.id, record.retirementKeyHash);
       this.#registry.activateOwnedLaunch?.(restored);
-      await this.#registry.refresh?.({ force: true });
+      await this.#refreshOwnedLaunches();
+      this.#emit(restored, "owned");
       throw new ContractError(
         "launch_not_retirable",
         "owned launch is not currently safe to retire",
@@ -200,7 +204,8 @@ export class LaunchCoordinator {
     }
     const completed = await this.#ledger.completeRetirement(record.id);
     this.#registry.deactivateOwnedLaunch?.(record.id);
-    await this.#registry.refresh?.({ force: true });
+    await this.#refreshOwnedLaunches();
+    this.#emitRetired(completed);
     await this.#registry.finalizeLaunchRetirement?.(completed).catch(() => {});
     return completed;
   }
@@ -353,6 +358,26 @@ export class LaunchCoordinator {
     this.#operations?.logger.log(phase === "failed" || phase === "uncertain" ? "warn" : "info", "launch.updated", {
       component: "launch", provider: record.request.provider, launchId: record.id, outcome: phase,
     });
+  }
+
+  #emitRetired(retirement) {
+    this.#registry.events?.emit({
+      type: "launch.updated",
+      launch: retiredLaunchView(retirement),
+      phase: "retired",
+      at: new Date().toISOString(),
+    });
+    this.#operations?.logger.log("info", "launch.updated", {
+      component: "launch", provider: retirement.provider, launchId: retirement.launchId, outcome: "retired",
+    });
+  }
+
+  async #refreshOwnedLaunches() {
+    if (typeof this.#registry.refreshAfterOwnedLaunchChange === "function") {
+      await this.#registry.refreshAfterOwnedLaunchChange();
+    } else {
+      await this.#registry.refresh?.({ force: true });
+    }
   }
 
   #updateGauge() {
