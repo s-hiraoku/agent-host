@@ -313,13 +313,16 @@ test("full legacy ledgers migrate without expanding their serialized size", asyn
     state: "failed", requestedAt: timestamp, updatedAt: timestamp,
     error: { code: "e", retryable: false },
   }));
+  records[0].state = "requested";
+  delete records[0].error;
   const document = { schemaVersion: 1, records };
   const targetBytes = 999_990;
   let padding = targetBytes - Buffer.byteLength(`${JSON.stringify(document)}\n`);
   for (const record of records) {
     for (const [object, field] of [
       [record.request, "provider"], [record.request, "target"], [record.request, "profile"],
-      [record.request, "mode"], [record.request, "capabilityVersion"], [record.error, "code"],
+      [record.request, "mode"], [record.request, "capabilityVersion"],
+      ...(record.error ? [[record.error, "code"]] : []),
     ]) {
       const added = Math.min(99, padding);
       object[field] += "x".repeat(added);
@@ -345,7 +348,12 @@ test("full legacy ledgers migrate without expanding their serialized size", asyn
 
   const reopened = new LaunchLedger(ledgerFile);
   assert.equal((await reopened.open()).length, 1_000);
+  await reopened.transition(records[0].id, ["requested"], { state: "creating" });
   await reopened.close();
+  const persisted = JSON.parse(await readFile(ledgerFile, "utf8"));
+  assert.equal(persisted.records[0].state, "creating");
+  assert.equal(persisted.retirements, undefined);
+  assert.equal(persisted.retirementCleanups, undefined);
 });
 
 test("ambiguous launch retirement stays fenced and resumes after restart", async (t) => {
@@ -545,7 +553,7 @@ test("retirement cleanup survives replay-tombstone eviction", async (t) => {
   assert.equal(cleanup.cleanupScope, cleanupScope);
   await second.stop();
   const cleaned = JSON.parse(await readFile(ledgerFile, "utf8"));
-  assert.deepEqual(cleaned.retirementCleanups, []);
+  assert.equal(cleaned.retirementCleanups, undefined);
 });
 
 test("a new pre-delete retirement refusal restores owned launch state", async (t) => {

@@ -330,12 +330,15 @@ export class LaunchLedger {
 }
 
 function ledgerContent(records, retirements, retirementCleanups) {
-  return `${JSON.stringify({
+  const document = {
     schemaVersion: LEDGER_SCHEMA_VERSION,
     records: [...records.values()],
-    retirements: [...retirements.values()],
-    retirementCleanups: [...retirementCleanups.values()],
-  })}\n`;
+  };
+  if (retirements.size > 0 || retirementCleanups.size > 0) {
+    document.retirements = [...retirements.values()];
+    document.retirementCleanups = [...retirementCleanups.values()];
+  }
+  return `${JSON.stringify(document)}\n`;
 }
 
 function projectRetirementCompletions(recordsSource, retirementsSource, cleanupsSource) {
