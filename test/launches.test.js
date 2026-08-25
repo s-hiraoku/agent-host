@@ -317,6 +317,53 @@ test("shutdown aborts a retirement waiting for post-deactivation discovery", asy
   assert.equal(retireCalls, 0);
 });
 
+test("shutdown tracks retirement before its durable fence completes", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-fence-shutdown-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const durableLedger = new LaunchLedger(ledgerFile);
+  let releaseFence;
+  const fenceGate = new Promise((resolve) => { releaseFence = resolve; });
+  let fenceStarted = false;
+  const ledger = new Proxy(durableLedger, {
+    get(target, property) {
+      if (property === "beginRetirement") {
+        return async (...args) => {
+          fenceStarted = true;
+          await fenceGate;
+          return target.beginRetirement(...args);
+        };
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  let retireCalls = 0;
+  const registry = fixtureRegistry();
+  registry.retireLaunch = async () => { retireCalls += 1; return { status: "retired" }; };
+  const coordinator = new LaunchCoordinator(registry, { ledger });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "fence-shutdown-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  const retirement = coordinator.retire(
+    accepted.launch.id,
+    { confirmDeleteOwnedAgentAndState: true },
+    "fence-shutdown-retirement-key",
+  );
+  const retirementOutcome = retirement.then(
+    () => undefined,
+    (error) => error,
+  );
+  await waitFor(() => fenceStarted);
+  const stopping = coordinator.stop();
+  releaseFence();
+  assert.equal((await retirementOutcome).code, "shutting_down");
+  await stopping;
+  assert.equal(retireCalls, 0);
+  const persisted = JSON.parse(await readFile(ledgerFile, "utf8"));
+  assert.equal(persisted.records[0].state, "retiring");
+});
+
 test("retirement cleanup survives replay-tombstone eviction", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-cleanup-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

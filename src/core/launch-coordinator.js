@@ -159,22 +159,16 @@ export class LaunchCoordinator {
       throw new ContractError("launch_not_retirable", "only an owned launch can be retired", 409);
     }
     const replayed = record.state === "retiring";
-    if (record.state === "owned") {
-      try { record = await this.#ledger.beginRetirement(id, keyHash); }
-      catch (error) {
-        if (error?.code === "retirement_key_conflict") throw retirementConflict();
-        if (error?.code === "retirement_cleanup_full") {
-          throw new ContractError("launch_retirement_capacity", "launch retirement cleanup is full", 503);
-        }
-        throw error;
-      }
-      this.#emit(record, "retiring");
-    }
-    if (record.retirementKeyHash !== keyHash) throw retirementConflict();
     const existing = this.#retirements.get(id);
-    if (existing) return { retirement: retirementView(await existing), replayed: true };
-    const operation = this.#finishRetirement(record).finally(() => this.#retirements.delete(id));
-    this.#retirements.set(id, operation);
+    if (existing) {
+      if (existing.keyHash !== keyHash) throw retirementConflict();
+      return { retirement: retirementView(await existing.promise), replayed: true };
+    }
+    let operation;
+    operation = this.#runRetirement(record, keyHash).finally(() => {
+      if (this.#retirements.get(id)?.promise === operation) this.#retirements.delete(id);
+    });
+    this.#retirements.set(id, { keyHash, promise: operation });
     return { retirement: retirementView(await operation), replayed };
   }
 
@@ -184,7 +178,7 @@ export class LaunchCoordinator {
     this.#queue = [];
     this.#queued.clear();
     for (const controller of this.#controllers) controller.abort(new Error("agent-host is shutting down"));
-    await Promise.allSettled([...this.#retirements.values()]);
+    await Promise.allSettled([...this.#retirements.values()].map((entry) => entry.promise));
     const active = [...this.#active.values()];
     await Promise.allSettled(active.map((entry) => entry.stateReady));
     this.#updateGauge();
@@ -196,9 +190,33 @@ export class LaunchCoordinator {
 
   async #resumeRetirement(record) {
     if (this.#retirements.has(record.id) || this.#draining) return;
-    const operation = this.#finishRetirement(record).finally(() => this.#retirements.delete(record.id));
-    this.#retirements.set(record.id, operation);
+    let operation;
+    operation = this.#runRetirement(record, record.retirementKeyHash).finally(() => {
+      if (this.#retirements.get(record.id)?.promise === operation) {
+        this.#retirements.delete(record.id);
+      }
+    });
+    this.#retirements.set(record.id, { keyHash: record.retirementKeyHash, promise: operation });
     await operation.catch(() => {});
+  }
+
+  async #runRetirement(record, keyHash) {
+    if (record.state === "owned") {
+      try { record = await this.#ledger.beginRetirement(record.id, keyHash); }
+      catch (error) {
+        if (error?.code === "retirement_key_conflict") throw retirementConflict();
+        if (error?.code === "retirement_cleanup_full") {
+          throw new ContractError("launch_retirement_capacity", "launch retirement cleanup is full", 503);
+        }
+        throw error;
+      }
+      this.#emit(record, "retiring");
+    }
+    if (record.retirementKeyHash !== keyHash) throw retirementConflict();
+    if (this.#draining) {
+      throw new ContractError("shutting_down", "agent-host is shutting down", 503);
+    }
+    return this.#finishRetirement(record);
   }
 
   async #finishRetirement(record) {
