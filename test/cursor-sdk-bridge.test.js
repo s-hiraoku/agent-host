@@ -75,10 +75,16 @@ test("runtime preflights both credential files without repairing unsafe modes", 
   }
 });
 
-test("configured Cursor SDK runtime exposes the read dispatch boundary", async () => {
+test("configured Cursor SDK runtime exposes read and retirement dispatch boundaries", async () => {
   const subject = new CursorSdkBridgeRuntimeAdapter({});
-  assert.equal(typeof subject.read, "function");
-  assert.throws(() => subject.read({ id: "cursor-sdk:not-open" }), /must be opened before use/);
+  for (const [method, args] of [
+    ["read", [{ id: "cursor-sdk:not-open" }]],
+    ["retireLaunch", [{ id: "launch:not-open" }]],
+    ["finalizeLaunchRetirement", [{ launchId: "launch:not-open" }]],
+  ]) {
+    assert.equal(typeof subject[method], "function");
+    assert.throws(() => subject[method](...args), /must be opened before use/);
+  }
   await subject.destroy();
 });
 

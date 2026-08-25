@@ -90,6 +90,10 @@ export class CursorSdkBridgeRuntimeAdapter {
   discover(options) { return this.#adapter?.discover(options) ?? []; }
   launch(request, options) { return this.#required().launch(request, options); }
   reconcileLaunch(record, options) { return this.#required().reconcileLaunch(record, options); }
+  retireLaunch(record, options) { return this.#required().retireLaunch(record, options); }
+  finalizeLaunchRetirement(retirement) {
+    return this.#required().finalizeLaunchRetirement(retirement);
+  }
   discoverOwned(records, options) { return this.#required().discoverOwned(records, options); }
   markStale(agent) { return this.#required().markStale(agent); }
   prompt(agent, text, options) { return this.#required().prompt(agent, text, options); }
