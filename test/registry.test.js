@@ -638,6 +638,59 @@ test("adapter circuit backs off, opens, probes once, and recovers with a fake cl
   await registry.close();
 });
 
+test("superseded half-open discovery releases the circuit probe for its forced follow-up", async () => {
+  let calls = 0;
+  let failing = true;
+  const probeGate = deferred();
+  const adapter = {
+    id: "owned-provider",
+    launchCapabilities() {
+      return {
+        provider: "owned-provider", capabilityVersion: "fixture-v1",
+        targets: [{ id: "workspace", profiles: ["default"], modes: [{
+          id: "local", enabled: true, localMutation: true, externalBillable: false,
+        }] }],
+      };
+    },
+    async discover() {
+      calls += 1;
+      if (failing) throw new Error("open the circuit");
+      if (calls === 2) await probeGate.promise;
+      return [];
+    },
+    async discoverOwned(records) {
+      return records.map((record) => ({
+        id: record.agentId, provider: "owned-provider", source: "owned-provider",
+        name: "owned agent", status: "idle", capabilities: {},
+      }));
+    },
+  };
+  const registry = new AgentRegistry([adapter], {
+    circuitThreshold: 1,
+    circuitBaseMs: 10,
+    circuitMaxMs: 10,
+    forcedProbeMinMs: 10_000,
+  });
+  await registry.refresh({ force: false });
+  assert.equal(registry.adapterHealth()[0].circuit.phase, "open");
+
+  failing = false;
+  const probe = registry.refresh({ force: true });
+  await nextTurn();
+  registry.activateOwnedLaunch({
+    id: "launch:owned", agentId: "owned-provider:agent", state: "owned",
+    request: { provider: "owned-provider" },
+  });
+  const followup = registry.refreshAfterOwnedLaunchChange();
+  probeGate.resolve();
+  await probe;
+  await followup;
+  assert.equal(calls, 3);
+  assert.equal(registry.get("owned-provider:agent")?.id, "owned-provider:agent");
+  assert.equal(registry.adapterHealth()[0].circuit.phase, "closed");
+  await registry.close();
+});
+
 test("explicit refresh queued during a scheduled refresh is not swallowed", async () => {
   let calls = 0;
   const gate = deferred();

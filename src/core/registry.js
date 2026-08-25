@@ -368,7 +368,10 @@ export class AgentRegistry {
           return;
         }
         const outcome = this.#normalizeOutcome(adapter, await this.#discoverAdapter(adapter));
-        if (outcome.status === "superseded") return;
+        if (outcome.status === "superseded") {
+          this.#discardCircuitProbe(adapter.id, admission.probe);
+          return;
+        }
         if (!this.#closed) {
           this.#recordCircuitOutcome(adapter.id, outcome, admission.probe);
           this.#applyOutcome(outcome);
@@ -629,6 +632,14 @@ export class AgentRegistry {
       adapter: adapterId,
       outcome: outcome.status === "timeout" ? "timeout" : "failure",
     });
+  }
+
+  #discardCircuitProbe(adapterId, probe) {
+    if (!probe) return;
+    const circuit = this.#circuits.get(adapterId);
+    circuit.phase = circuit.consecutiveFailures >= this.#circuitThreshold ? "open" : "closed";
+    circuit.probeInFlight = false;
+    circuit.lastForcedProbeAt = -Infinity;
   }
 
   async #loadHistory() {
