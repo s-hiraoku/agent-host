@@ -137,6 +137,27 @@ test("launch retirement fences provider deletion and replays from a bounded tomb
   await coordinator.stop();
 });
 
+test("ledger reservation replays a creation key retired after the caller precheck", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retired-reservation-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledger = new LaunchLedger(join(directory, "launches.json"));
+  await ledger.open();
+  const keyHash = "c".repeat(43);
+  const signature = "s".repeat(43);
+  const request = resolvedRequest();
+  const reserved = await ledger.reserve({ keyHash, signature, request });
+  await ledger.transition(reserved.record.id, ["requested"], {
+    state: "owned", providerAgentId: "provider-agent", agentId: "demo:agent",
+  });
+  await ledger.beginRetirement(reserved.record.id, "r".repeat(43));
+  const retired = await ledger.completeRetirement(reserved.record.id);
+  const replay = await ledger.reserve({ keyHash, signature, request });
+  assert.equal(replay.created, false);
+  assert.deepEqual(replay.retirement, retired);
+  assert.equal(ledger.list().length, 0);
+  await ledger.close();
+});
+
 test("ambiguous launch retirement stays fenced and resumes after restart", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-recovery-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

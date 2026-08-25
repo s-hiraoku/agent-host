@@ -113,6 +113,12 @@ export class LaunchCoordinator {
       this.#operations?.metrics.increment("launches_rejected", { code: "queue_full" });
       throw new ContractError("launch_queue_full", "launch queue is full; retry later", 429);
     }
+    if (reserved.retirement) {
+      if (reserved.retirement.signature !== signature) {
+        throw new ContractError("idempotency_conflict", "Idempotency-Key was already used for a different request", 409);
+      }
+      return { launch: retiredLaunchView(reserved.retirement), replayed: true };
+    }
     if (!reserved.created && reserved.record.signature !== signature) {
       throw new ContractError("idempotency_conflict", "Idempotency-Key was already used for a different request", 409);
     }

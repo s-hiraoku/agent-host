@@ -256,6 +256,8 @@ export class LaunchLedger {
       this.#assertOpen();
       const existing = [...this.#records.values()].find((record) => record.keyHash === keyHash);
       if (existing) return { created: false, record: structuredClone(existing) };
+      const retired = [...this.#retirements.values()].find((entry) => entry.creationKeyHash === keyHash);
+      if (retired) return { created: false, retirement: structuredClone(retired) };
       const mutationConflict = [...this.#records.values()].some((record) => record.retirementKeyHash === keyHash)
         || [...this.#retirements.values()].some((entry) => entry.keyHash === keyHash);
       if (mutationConflict) return { conflict: true };
