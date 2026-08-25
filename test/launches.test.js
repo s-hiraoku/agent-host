@@ -294,6 +294,58 @@ test("retirement capacity reserves the largest tombstones across completion orde
   await ledger.close();
 });
 
+test("full legacy ledgers migrate without expanding their serialized size", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-legacy-capacity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const timestamp = "2026-08-25T00:00:00.000Z";
+  const identity = (index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+  const hash = (prefix, index) => `${prefix}${index.toString(36).padStart(42, "0")}`;
+  const records = Array.from({ length: 1_000 }, (_, index) => ({
+    id: `launch:${identity(index)}`, attemptId: `attempt:${identity(index)}`,
+    keyHash: hash("k", index), signature: hash("s", index),
+    request: {
+      provider: "p", target: "t", profile: "p", mode: "m", capabilityVersion: "v",
+      risk: { localMutation: true, externalBillable: false },
+    },
+    state: "failed", requestedAt: timestamp, updatedAt: timestamp,
+    error: { code: "e", retryable: false },
+  }));
+  const document = { schemaVersion: 1, records };
+  const targetBytes = 999_990;
+  let padding = targetBytes - Buffer.byteLength(`${JSON.stringify(document)}\n`);
+  for (const record of records) {
+    for (const [object, field] of [
+      [record.request, "provider"], [record.request, "target"], [record.request, "profile"],
+      [record.request, "mode"], [record.request, "capabilityVersion"], [record.error, "code"],
+    ]) {
+      const added = Math.min(99, padding);
+      object[field] += "x".repeat(added);
+      padding -= added;
+      if (padding === 0) break;
+    }
+    if (padding === 0) break;
+  }
+  assert.equal(padding, 0);
+  const content = `${JSON.stringify(document)}\n`;
+  assert.equal(Buffer.byteLength(content), targetBytes);
+  await writeFile(ledgerFile, content, { mode: 0o600 });
+
+  const first = new LaunchLedger(ledgerFile);
+  assert.equal((await first.open()).length, 1_000);
+  await first.close();
+  const migrated = await readFile(ledgerFile, "utf8");
+  assert.equal(Buffer.byteLength(migrated), targetBytes);
+  const parsed = JSON.parse(migrated);
+  assert.equal(parsed.schemaVersion, 2);
+  assert.equal(parsed.retirements, undefined);
+  assert.equal(parsed.retirementCleanups, undefined);
+
+  const reopened = new LaunchLedger(ledgerFile);
+  assert.equal((await reopened.open()).length, 1_000);
+  await reopened.close();
+});
+
 test("ambiguous launch retirement stays fenced and resumes after restart", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-recovery-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

@@ -32,17 +32,25 @@ export class LaunchLedger {
       if (this.#opened) return this.list();
       this.#lease = await this.#acquireLock(`${this.#path}.writer.lock`);
       let parsed;
+      let serialized;
       try {
-        try { parsed = JSON.parse(await readPrivateFileBounded(this.#path, MAX_LEDGER_BYTES)); }
+        try {
+          serialized = await readPrivateFileBounded(this.#path, MAX_LEDGER_BYTES);
+          parsed = JSON.parse(serialized);
+        }
         catch (error) {
           if (error?.code !== "ENOENT") throw new Error("launch ledger is invalid or unavailable", { cause: error });
           parsed = { schemaVersion: LEDGER_SCHEMA_VERSION, records: [], retirements: [], retirementCleanups: [] };
           await writePrivateFileAtomic(this.#path, `${JSON.stringify(parsed)}\n`);
         }
         const legacy = parsed?.schemaVersion === LAUNCH_SCHEMA_VERSION && parsed.retirements === undefined;
-        if (!parsed || (!legacy && parsed.schemaVersion !== LEDGER_SCHEMA_VERSION) || !Array.isArray(parsed.records)
+        const compactV2 = parsed?.schemaVersion === LEDGER_SCHEMA_VERSION
+          && parsed.retirements === undefined && parsed.retirementCleanups === undefined;
+        if (!parsed || (!legacy && !compactV2 && parsed.schemaVersion !== LEDGER_SCHEMA_VERSION)
+          || !Array.isArray(parsed.records)
           || parsed.records.length > MAX_RECORDS || parsed.records.some((record) => !validateLaunchRecord(record))
-          || (!legacy && (!Array.isArray(parsed.retirements) || parsed.retirements.length > MAX_RETIREMENTS
+          || (!legacy && !compactV2 && (!Array.isArray(parsed.retirements)
+            || parsed.retirements.length > MAX_RETIREMENTS
             || parsed.retirements.some((entry) => !validRetirement(entry))))
           || (parsed.retirementCleanups !== undefined && (!Array.isArray(parsed.retirementCleanups)
             || parsed.retirementCleanups.length > MAX_RETIREMENT_CLEANUPS
@@ -69,7 +77,16 @@ export class LaunchLedger {
         }
         this.#retirementCleanups = new Map(cleanups.map((entry) => [entry.launchId, structuredClone(entry)]));
         this.#opened = true;
-        if (legacy || parsed.retirementCleanups === undefined) await this.#persist();
+        if (legacy) {
+          const migrated = serialized.replace(
+            /("schemaVersion"\s*:\s*)1\b/,
+            (_match, prefix) => `${prefix}${LEDGER_SCHEMA_VERSION}`,
+          );
+          if (migrated === serialized) throw new Error("launch ledger legacy schema marker is invalid");
+          await writePrivateFileAtomic(this.#path, migrated);
+        } else if (!compactV2 && parsed.retirementCleanups === undefined) {
+          await this.#persist();
+        }
         return this.list();
       } catch (error) {
         this.#opened = false;
