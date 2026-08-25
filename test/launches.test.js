@@ -464,6 +464,55 @@ test("a retry of an uncertain fenced retirement is reported as replayed", async 
   await coordinator.stop();
 });
 
+test("timed-out retirement work remains single-flight until the provider settles", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-timeout-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let releaseFirst;
+  const firstProvider = new Promise((resolve) => { releaseFirst = resolve; });
+  let calls = 0;
+  const registry = fixtureRegistry();
+  registry.retireLaunch = async () => {
+    calls += 1;
+    if (calls === 1) await firstProvider;
+    return { status: "retired" };
+  };
+  registry.deactivateOwnedLaunch = () => {};
+  const coordinator = new LaunchCoordinator(registry, {
+    ledgerFile: join(directory, "launches.json"),
+    launchTimeoutMs: 20,
+  });
+  await coordinator.start();
+  t.after(() => coordinator.stop());
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "timeout-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  const confirmation = { confirmDeleteOwnedAgentAndState: true };
+  await assert.rejects(
+    coordinator.retire(accepted.launch.id, confirmation, "timeout-retirement-key"),
+    (error) => error.code === "launch_retirement_uncertain",
+  );
+  await assert.rejects(
+    coordinator.retire(accepted.launch.id, confirmation, "timeout-retirement-key"),
+    (error) => error.code === "launch_retirement_uncertain",
+  );
+  assert.equal(calls, 1);
+
+  releaseFirst();
+  let replay;
+  await waitFor(async () => {
+    try {
+      replay = await coordinator.retire(
+        accepted.launch.id, confirmation, "timeout-retirement-key",
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  assert.equal(calls, 2);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.retirement.state, "retired");
+});
+
 test("shutdown aborts a retirement waiting for post-deactivation discovery", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-shutdown-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

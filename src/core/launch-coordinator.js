@@ -164,12 +164,8 @@ export class LaunchCoordinator {
       if (existing.keyHash !== keyHash) throw retirementConflict();
       return { retirement: retirementView(await existing.promise), replayed: true };
     }
-    let operation;
-    operation = this.#runRetirement(record, keyHash).finally(() => {
-      if (this.#retirements.get(id)?.promise === operation) this.#retirements.delete(id);
-    });
-    this.#retirements.set(id, { keyHash, promise: operation });
-    return { retirement: retirementView(await operation), replayed };
+    const entry = this.#trackRetirement(record, keyHash);
+    return { retirement: retirementView(await entry.promise), replayed };
   }
 
   async stop() {
@@ -190,17 +186,24 @@ export class LaunchCoordinator {
 
   async #resumeRetirement(record) {
     if (this.#retirements.has(record.id) || this.#draining) return;
-    let operation;
-    operation = this.#runRetirement(record, record.retirementKeyHash).finally(() => {
-      if (this.#retirements.get(record.id)?.promise === operation) {
-        this.#retirements.delete(record.id);
-      }
-    });
-    this.#retirements.set(record.id, { keyHash: record.retirementKeyHash, promise: operation });
-    await operation.catch(() => {});
+    await this.#trackRetirement(record, record.retirementKeyHash).promise.catch(() => {});
   }
 
-  async #runRetirement(record, keyHash) {
+  #trackRetirement(record, keyHash) {
+    const entry = { keyHash, settled: Promise.resolve() };
+    entry.promise = this.#runRetirement(record, keyHash, entry);
+    this.#retirements.set(record.id, entry);
+    const forget = () => {
+      if (this.#retirements.get(record.id) === entry) this.#retirements.delete(record.id);
+    };
+    void entry.promise.then(
+      () => entry.settled,
+      () => entry.settled,
+    ).then(forget, forget);
+    return entry;
+  }
+
+  async #runRetirement(record, keyHash, entry) {
     const recovered = record.state === "retiring";
     if (record.state === "owned") {
       const preparation = await this.#registry.prepareLaunchRetirement?.(
@@ -234,20 +237,20 @@ export class LaunchCoordinator {
     if (this.#draining) {
       throw new ContractError("shutting_down", "agent-host is shutting down", 503);
     }
-    return this.#finishRetirement(record, recovered);
+    return this.#finishRetirement(record, recovered, entry);
   }
 
-  async #finishRetirement(record, recovered) {
+  async #finishRetirement(record, recovered, entry) {
     const controller = new AbortController();
     this.#controllers.add(controller);
     try {
-      return await this.#finishRetirementWithSignal(record, controller.signal, recovered);
+      return await this.#finishRetirementWithSignal(record, controller.signal, recovered, entry);
     } finally {
       this.#controllers.delete(controller);
     }
   }
 
-  async #finishRetirementWithSignal(record, signal, recovered) {
+  async #finishRetirementWithSignal(record, signal, recovered, entry) {
     const cachedAgent = this.#registry.deactivateOwnedLaunch?.(record.id);
     await this.#refreshOwnedLaunches(signal);
     const invocation = this.#invoke((options) => this.#registry.retireLaunch?.(
@@ -255,6 +258,7 @@ export class LaunchCoordinator {
       record,
       options,
     ));
+    entry.settled = invocation.settled;
     const result = await invocation.result.catch(() => ({ status: "uncertain" }));
     void invocation.settled;
     if (result?.status === "unsupported" && recovered) {
