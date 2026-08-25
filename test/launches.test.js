@@ -100,6 +100,14 @@ test("launch retirement fences provider deletion and replays from a bounded tomb
   assert.equal(replay.replayed, true);
   assert.deepEqual(replay.retirement, first.retirement);
   assert.equal(retireCalls, 1);
+  const creationReplay = await coordinator.submit(LOCAL_REQUEST, "retirement-launch-key");
+  assert.equal(creationReplay.replayed, true);
+  assert.equal(creationReplay.launch.id, accepted.launch.id);
+  assert.equal(creationReplay.launch.state, "retired");
+  await assert.rejects(
+    coordinator.submit({ ...LOCAL_REQUEST, profile: "other" }, "retirement-launch-key"),
+    (error) => error.code === "idempotency_conflict",
+  );
   await assert.rejects(
     coordinator.retire(accepted.launch.id, payload, "different-retirement-key"),
     (error) => error.code === "idempotency_conflict",

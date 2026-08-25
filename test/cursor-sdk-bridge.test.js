@@ -994,7 +994,9 @@ test("bridge client deletes only one exact owned local agent and accepts an abse
     credential: Buffer.from(API_KEY),
   };
   assert.deepEqual(await subject.deleteLocal(input), { agentId: "agent-owned", deleted: true });
-  assert.deepEqual(await subject.deleteLocal({ ...input, credential: Buffer.from(API_KEY) }), {
+  assert.deepEqual(await subject.deleteLocal({
+    ...input, credential: Buffer.from(API_KEY), allowNotFound: true,
+  }), {
     agentId: "agent-owned", deleted: true,
   });
   assert.deepEqual(requests, [{
@@ -1004,6 +1006,24 @@ test("bridge client deletes only one exact owned local agent and accepts an abse
     url: "/sdk.v1.SdkAgentService/DeleteAgent",
     body: { agentId: "agent-owned", options: { cwd: "/workspace", apiKey: API_KEY } },
   }]);
+  await subject.destroy();
+});
+
+test("bridge client rejects an absent agent before an ambiguous delete replay", async (t) => {
+  const bridge = await fakeBridge(async (req, _body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    return json(response, 404, { code: "not_found" });
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  await assert.rejects(subject.deleteLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  }), (error) => error.code === "cursor_bridge_not_found" && error.deleteDisposition === "rejected");
   await subject.destroy();
 });
 

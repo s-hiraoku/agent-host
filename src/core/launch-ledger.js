@@ -106,6 +106,12 @@ export class LaunchLedger {
     return entry ? structuredClone(entry) : undefined;
   }
 
+  findRetirementByCreationKeyHash(keyHash) {
+    this.#assertOpen();
+    const entry = [...this.#retirements.values()].find((item) => item.creationKeyHash === keyHash);
+    return entry ? structuredClone(entry) : undefined;
+  }
+
   retirements() {
     this.#assertOpen();
     return [...this.#retirements.values()].map((entry) => structuredClone(entry));
@@ -143,6 +149,10 @@ export class LaunchLedger {
         attemptId: current.attemptId,
         provider: current.request.provider,
         keyHash: current.retirementKeyHash,
+        creationKeyHash: current.keyHash,
+        signature: current.signature,
+        request: structuredClone(current.request),
+        requestedAt: current.requestedAt,
         retiredAt: now,
       };
       if (!validRetirement(entry)) throw new Error("invalid launch retirement tombstone");
@@ -243,11 +253,33 @@ export class LaunchLedger {
 
 function validRetirement(entry) {
   return entry && typeof entry === "object" && !Array.isArray(entry)
-    && Object.keys(entry).every((key) => ["launchId", "attemptId", "provider", "keyHash", "retiredAt"].includes(key))
+    && Object.keys(entry).every((key) => [
+      "launchId", "attemptId", "provider", "keyHash", "creationKeyHash", "signature", "request",
+      "requestedAt", "retiredAt",
+    ].includes(key))
     && /^launch:[0-9a-f-]{36}$/.test(entry.launchId ?? "")
     && /^attempt:[0-9a-f-]{36}$/.test(entry.attemptId ?? "")
     && /^[A-Za-z0-9._:-]{1,100}$/.test(entry.provider ?? "")
-    && SAFE_HASH.test(entry.keyHash ?? "") && Number.isFinite(Date.parse(entry.retiredAt));
+    && SAFE_HASH.test(entry.keyHash ?? "") && SAFE_HASH.test(entry.creationKeyHash ?? "")
+    && SAFE_HASH.test(entry.signature ?? "")
+    && validRetiredRequest(entry.request)
+    && Number.isFinite(Date.parse(entry.requestedAt))
+    && Number.isFinite(Date.parse(entry.retiredAt));
+}
+
+function validRetiredRequest(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) return false;
+  const probe = {
+    id: "launch:00000000-0000-4000-8000-000000000000",
+    attemptId: "attempt:00000000-0000-4000-8000-000000000000",
+    keyHash: "a".repeat(43),
+    signature: "b".repeat(43),
+    request,
+    state: "requested",
+    requestedAt: "2000-01-01T00:00:00.000Z",
+    updatedAt: "2000-01-01T00:00:00.000Z",
+  };
+  return validateLaunchRecord(probe);
 }
 
 function laterTimestamp(previous, candidate) {

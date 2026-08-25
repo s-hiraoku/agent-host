@@ -78,6 +78,17 @@ export class LaunchCoordinator {
     this.#assertStarted();
     if (this.#draining) throw new ContractError("shutting_down", "agent-host is shutting down", 503);
     const keyHash = launchKeyHash(validateIdempotencyKey(key));
+    const retired = this.#ledger.findRetirementByCreationKeyHash?.(keyHash);
+    if (retired) {
+      let replayRequest;
+      try { replayRequest = normalizeLaunchRequest(payload, capabilitiesForRetirement(retired)); }
+      catch { throw new ContractError("idempotency_conflict", "Idempotency-Key was already used for a different request", 409); }
+      const signature = launchRequestSignature(replayRequest);
+      if (signature !== retired.signature) {
+        throw new ContractError("idempotency_conflict", "Idempotency-Key was already used for a different request", 409);
+      }
+      return { launch: retiredLaunchView(retired), replayed: true };
+    }
     const existing = this.#ledger.findByKeyHash(keyHash);
     if (existing) {
       let replayRequest;
@@ -379,6 +390,10 @@ function capabilitiesForRecord(record) {
   };
 }
 
+function capabilitiesForRetirement(retirement) {
+  return capabilitiesForRecord({ request: retirement.request });
+}
+
 function normalizeProviderResult(result) {
   if (result?.status === "owned"
     && isSafeId(result.providerAgentId)
@@ -402,6 +417,20 @@ function retirementConflict() {
 
 function retirementView(entry) {
   return { launchId: entry.launchId, state: "retired", retiredAt: entry.retiredAt };
+}
+
+function retiredLaunchView(entry) {
+  return {
+    id: entry.launchId,
+    provider: entry.request.provider,
+    target: entry.request.target,
+    profile: entry.request.profile,
+    mode: entry.request.mode,
+    risk: { ...entry.request.risk },
+    state: "retired",
+    requestedAt: entry.requestedAt,
+    updatedAt: entry.retiredAt,
+  };
 }
 
 function isSafeId(value) {

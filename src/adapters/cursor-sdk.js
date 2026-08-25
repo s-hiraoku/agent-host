@@ -21,7 +21,7 @@ const LAUNCH_ID = /^launch:[0-9a-f-]{36}$/;
 const RECORD_KEYS = new Set([
   "attemptId", "launchId", "providerAgentId", "agentId", "target", "profile", "sdkVersion",
   "bridgeNamespace", "storeScope", "targetDigest", "runId", "runPending", "cancelAttemptedRunId",
-  "retirementKeyHash", "state", "createdAt", "updatedAt",
+  "retirementKeyHash", "deleteAmbiguous", "state", "createdAt", "updatedAt",
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
 const CREDENTIAL_SOURCES = new WeakMap();
@@ -229,6 +229,7 @@ export class CursorSdkAdapter {
         return { status: "uncertain", code: "cursor_retirement_unproven" };
       }
       if (provenance.state === "retired") return { status: "retired" };
+      const initialDelete = provenance.state === "owned";
       if (provenance.state === "owned") {
         if (provenance.runPending === true || provenance.cancelAttemptedRunId !== undefined) {
           return { status: "blocked", code: "cursor_run_state_unsettled" };
@@ -264,11 +265,24 @@ export class CursorSdkAdapter {
       const retiring = await this.#state.get(record.attemptId);
       const target = this.#targets.get(retiring.target);
       await this.#assertBridgeDirectories(target);
-      const result = await this.#callBridge("deleteLocal", {
-        agentId: retiring.providerAgentId,
-        cwd: target.cwd,
-        storeDirectory: this.#storeDirectory,
-      }, signal);
+      let result;
+      try {
+        result = await this.#callBridge("deleteLocal", {
+          agentId: retiring.providerAgentId,
+          cwd: target.cwd,
+          storeDirectory: this.#storeDirectory,
+          allowNotFound: retiring.deleteAmbiguous === true,
+        }, signal);
+      } catch (error) {
+        if (initialDelete && error?.deleteDisposition === "rejected") {
+          await this.#state.cancelRetirement(record.attemptId, record.retirementKeyHash);
+          return { status: "blocked", code: "cursor_delete_rejected" };
+        }
+        if (error?.deleteDisposition === "ambiguous") {
+          await this.#state.markDeleteAmbiguous(record.attemptId, record.retirementKeyHash);
+        }
+        throw error;
+      }
       assertProviderAgent(result, retiring.providerAgentId);
       if (result.deleted !== true) throw new Error("Cursor SDK bridge did not confirm agent deletion");
       await this.#state.markRetired(record.attemptId, record.retirementKeyHash);
@@ -602,6 +616,9 @@ export class CursorSdkAdapter {
       if (operation === "cancelLocal" && ["not_sent", "rejected"].includes(error?.cancelDisposition)) {
         failure.cancelDisposition = error.cancelDisposition;
       }
+      if (operation === "deleteLocal" && ["rejected", "ambiguous"].includes(error?.deleteDisposition)) {
+        failure.deleteDisposition = error.deleteDisposition;
+      }
       throw failure;
     }
   }
@@ -767,7 +784,24 @@ export class CursorSdkProvenanceStore {
   }
 
   async markRetired(attemptId, keyHash) {
-    return this.#updateRetirement(attemptId, keyHash, (record) => ({ ...record, state: "retired" }));
+    return this.#updateRetirement(attemptId, keyHash, (record) => {
+      const updated = { ...record, state: "retired" };
+      delete updated.deleteAmbiguous;
+      return updated;
+    });
+  }
+
+  async markDeleteAmbiguous(attemptId, keyHash) {
+    return this.#updateRetirement(attemptId, keyHash, (record) => ({ ...record, deleteAmbiguous: true }));
+  }
+
+  async cancelRetirement(attemptId, keyHash) {
+    return this.#updateRetirement(attemptId, keyHash, (record) => {
+      const updated = { ...record, state: "owned" };
+      delete updated.retirementKeyHash;
+      delete updated.deleteAmbiguous;
+      return updated;
+    });
   }
 
   async removeRetired(attemptId, keyHash) {
@@ -1059,6 +1093,8 @@ function validateRecord(record) {
     || !/^[A-Za-z0-9_-]{43}$/.test(record.targetDigest ?? "")
     || !["intent", "owned", "retiring", "retired"].includes(record.state)
     || (record.retirementKeyHash !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(record.retirementKeyHash))
+    || (record.deleteAmbiguous !== undefined && record.deleteAmbiguous !== true)
+    || (record.deleteAmbiguous === true && record.state !== "retiring")
     || (["retiring", "retired"].includes(record.state) !== (record.retirementKeyHash !== undefined))
     || (record.state === "intent" && (record.runId !== undefined || record.runPending !== undefined
       || record.cancelAttemptedRunId !== undefined || record.retirementKeyHash !== undefined))

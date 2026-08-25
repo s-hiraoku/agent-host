@@ -358,7 +358,7 @@ export function createCursorSdkBridgeClient(options = {}) {
         throw error;
       }
     },
-    async deleteLocal({ agentId, cwd, storeDirectory, credential, signal }) {
+    async deleteLocal({ agentId, cwd, storeDirectory, credential, signal, allowNotFound = false }) {
       assertReady(ready, destroyed);
       validateOperation(agentId, cwd, storeDirectory, "owned", credential);
       const apiKey = credential.toString("utf8");
@@ -373,7 +373,14 @@ export function createCursorSdkBridgeClient(options = {}) {
           }
         });
       } catch (error) {
-        if (error?.code !== "cursor_bridge_not_found") throw error;
+        if (!(allowNotFound && error?.code === "cursor_bridge_not_found")) {
+          markDisposition(
+            error,
+            "deleteDisposition",
+            isDefinitiveMutationRejection(error) ? "rejected" : "ambiguous",
+          );
+          throw error;
+        }
       }
       const active = activeRuns.get(agentId);
       if (active) forgetRun(agentId, active);

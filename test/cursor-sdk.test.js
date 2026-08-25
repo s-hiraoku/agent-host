@@ -62,6 +62,59 @@ test("Cursor SDK retires only an exact terminal owned agent behind a durable fen
   assert.deepEqual(state.records, []);
 });
 
+test("Cursor SDK restores owned provenance when the first delete is definitively rejected", async (t) => {
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status: "idle" }; },
+    async deleteLocal() {
+      const error = new Error("agent was absent before deletion");
+      error.deleteDisposition = "rejected";
+      throw error;
+    },
+  });
+  const owned = await fixture.adapter.launch(resolvedRequest(), {
+    attemptId: ATTEMPT_ID, launchId: LAUNCH_ID,
+  });
+  const retirementKeyHash = "r".repeat(43);
+  assert.deepEqual(await fixture.adapter.retireLaunch({
+    ...ledgerRecord(owned), state: "retiring", retirementKeyHash,
+  }), { status: "blocked", code: "cursor_delete_rejected" });
+  const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].state, "owned");
+  assert.equal(state.records[0].retirementKeyHash, undefined);
+});
+
+test("Cursor SDK accepts not-found only after a recorded ambiguous delete", async (t) => {
+  let deletes = 0;
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status: "idle" }; },
+    async deleteLocal({ agentId, allowNotFound }) {
+      deletes += 1;
+      if (deletes === 1) {
+        const error = new Error("delete response was lost");
+        error.deleteDisposition = "ambiguous";
+        throw error;
+      }
+      assert.equal(allowNotFound, true);
+      return { agentId, deleted: true };
+    },
+  });
+  const owned = await fixture.adapter.launch(resolvedRequest(), {
+    attemptId: ATTEMPT_ID, launchId: LAUNCH_ID,
+  });
+  const retirementKeyHash = "r".repeat(43);
+  const retiring = { ...ledgerRecord(owned), state: "retiring", retirementKeyHash };
+  await assert.rejects(
+    fixture.adapter.retireLaunch(retiring),
+    (error) => error.code === "cursor_bridge_failed" && error.deleteDisposition === "ambiguous",
+  );
+  let state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].deleteAmbiguous, true);
+  assert.deepEqual(await fixture.adapter.retireLaunch(retiring), { status: "retired" });
+  state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].state, "retired");
+  assert.equal(state.records[0].deleteAmbiguous, undefined);
+});
+
 test("Cursor SDK credential sources are explicit, bounded, and opaque to serialization", async () => {
   for (const value of [undefined, null, {}, [], "", "short", "x".repeat(16_385)]) {
     assert.throws(
