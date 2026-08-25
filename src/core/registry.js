@@ -299,7 +299,9 @@ export class AgentRegistry {
   }
 
   deactivateOwnedLaunch(id) {
+    const record = this.#ownedLaunches.get(id);
     this.#ownedLaunches.delete(id);
+    if (record?.agentId) this.#evictCachedOwnedAgent(record.agentId);
   }
 
   refreshAfterOwnedLaunchChange() {
@@ -486,13 +488,49 @@ export class AgentRegistry {
 
   #normalizeOutcome(adapter, outcome) {
     if (outcome.status !== "success" || !adapter?.isDiscoveryCurrent
-      || adapter.isDiscoveryCurrent(outcome.agents)) return outcome;
-    return {
-      ...outcome,
-      status: "error",
-      markStale: true,
-      error: new Error("adapter discovery used a stale transport"),
-    };
+      || adapter.isDiscoveryCurrent(outcome.agents)) {
+      if (outcome.status !== "success" || typeof adapter?.launchCapabilities !== "function") return outcome;
+      const provider = adapter.launchCapabilities()?.provider;
+      const ownedAgentIds = new Set([...this.#ownedLaunches.values()]
+        .filter((record) => record.request.provider === provider)
+        .map((record) => record.agentId));
+      return { ...outcome, agents: outcome.agents.filter((agent) => ownedAgentIds.has(agent.id)) };
+    }
+    return { ...outcome, status: "error", markStale: true,
+      error: new Error("adapter discovery used a stale transport") };
+  }
+
+  #evictCachedOwnedAgent(agentId) {
+    const previous = this.#agents.get(agentId);
+    if (!previous) return;
+    const previousCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
+    const previousRaw = this.listRaw().map(semanticAgent);
+    const previousOverlay = historyOverlay(previousRaw, this.#historyAgents);
+    const next = new Map(this.#agents);
+    next.delete(agentId);
+    this.#agents = next;
+    const nextRaw = this.listRaw().map(semanticAgent);
+    if (!isDeepStrictEqual(previousRaw, nextRaw)) this.#rawRevision += 1;
+    if (!isDeepStrictEqual(previousOverlay, historyOverlay(nextRaw, this.#historyAgents))) {
+      this.#historyOverlayRevision += 1;
+    }
+    const at = new Date().toISOString();
+    if (previousCanonical.has(agentId) && !this.list().some((agent) => agent.id === agentId)) {
+      this.#revision += 1;
+      this.events.emit({ type: "agent.removed", agentId, at, snapshotRevision: this.#revision });
+    }
+    const repository = normalizeRepositoryContext(previous.repositoryContext);
+    if (repository.state !== "unsupported") {
+      this.#repositoryRevision += 1;
+      this.events.emit({
+        type: "agent.repository-associations.changed",
+        agentId,
+        removed: true,
+        repositoryRevision: this.#repositoryRevision,
+        snapshotRevision: this.#revision,
+        at,
+      });
+    }
   }
 
   #admitAdapter(adapterId, force) {

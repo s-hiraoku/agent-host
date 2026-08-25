@@ -659,8 +659,8 @@ test("explicit refresh queued during a scheduled refresh is not swallowed", asyn
   await registry.close();
 });
 
-test("owned-launch changes wait for discovery that starts after the change", async () => {
-  const firstGate = deferred();
+test("owned-launch deactivation stays hidden across stale and failed discovery", async () => {
+  const staleGate = deferred();
   let calls = 0;
   const adapter = {
     id: "owned-provider",
@@ -675,7 +675,8 @@ test("owned-launch changes wait for discovery that starts after the change", asy
     async discover() { return []; },
     async discoverOwned(records) {
       calls += 1;
-      if (calls === 1) await firstGate.promise;
+      if (calls === 2) await staleGate.promise;
+      if (calls === 3) throw new Error("follow-up discovery failed");
       return records.map((record) => ({
         id: record.agentId, provider: "owned-provider", source: "owned-provider",
         name: "owned agent", status: "idle", capabilities: {},
@@ -687,15 +688,23 @@ test("owned-launch changes wait for discovery that starts after the change", asy
     id: "launch:owned", agentId: "owned-provider:agent", state: "owned",
     request: { provider: "owned-provider" },
   });
+  await registry.refresh({ force: true });
+  assert.equal(registry.list().length, 1);
+  const removed = [];
+  registry.events.subscribe((event) => {
+    if (event.type === "agent.removed") removed.push(event);
+  });
   const stale = registry.refresh({ force: true });
   await nextTurn();
   registry.deactivateOwnedLaunch("launch:owned");
+  assert.deepEqual(registry.list(), []);
   const afterChange = registry.refreshAfterOwnedLaunchChange();
-  firstGate.resolve();
+  staleGate.resolve();
   await stale;
   await afterChange;
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.deepEqual(registry.list(), []);
+  assert.equal(removed.length, 1);
   await registry.close();
 });
 
