@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { request as httpRequest } from "node:http";
+import { request as httpRequest, validateHeaderValue } from "node:http";
 import { createRedactor } from "../operations/redact.js";
 import { claimCursorSdkCredentialSource } from "./cursor-sdk.js";
 
@@ -80,6 +80,7 @@ export function createCursorSdkBridgeClient(options = {}) {
         const authorization = `Bearer ${tokenText}`;
         const redact = createRedactor({ secrets: [tokenText] });
         signal?.throwIfAborted();
+        validateHeaderValue("authorization", authorization);
         await onInvoke?.();
         const response = await directRequest(new URL(method, endpoint), {
           method: "POST",

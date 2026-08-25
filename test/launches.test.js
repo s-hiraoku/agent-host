@@ -219,6 +219,37 @@ test("retirement fencing reserves ledger capacity before provider deletion", asy
   await ledger.close();
 });
 
+test("provider retirement capacity is reserved before the launch ledger fence", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-provider-retirement-capacity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const registry = fixtureRegistry();
+  let retireCalls = 0;
+  registry.prepareLaunchRetirement = async () => ({
+    status: "blocked", code: "cursor_provenance_capacity",
+  });
+  registry.retireLaunch = async () => { retireCalls += 1; return { status: "retired" }; };
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile });
+  await coordinator.start();
+  t.after(() => coordinator.stop());
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "capacity-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  await waitFor(async () => (
+    JSON.parse(await readFile(ledgerFile, "utf8")).records[0].state === "owned"
+  ));
+  await assert.rejects(
+    coordinator.retire(
+      accepted.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "capacity-retirement-key",
+    ),
+    (error) => error.code === "launch_retirement_capacity" && error.status === 503,
+  );
+  assert.equal(coordinator.get(accepted.launch.id).state, "owned");
+  assert.equal(retireCalls, 0);
+  assert.equal(JSON.parse(await readFile(ledgerFile, "utf8")).records[0].state, "owned");
+});
+
 test("retirement capacity reserves the largest tombstones across completion orders", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-order-capacity-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

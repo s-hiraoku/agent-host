@@ -74,6 +74,38 @@ test("Cursor SDK retires only an exact terminal owned agent behind a durable fen
   assert.deepEqual(state.records, []);
 });
 
+test("Cursor SDK reserves the complete provenance retirement fence before deletion", async (t) => {
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status: "idle" }; },
+    async deleteLocal({ agentId }) { return { agentId, deleted: true }; },
+  });
+  const owned = await fixture.adapter.launch(resolvedRequest(), {
+    attemptId: ATTEMPT_ID, launchId: LAUNCH_ID,
+  });
+  const record = ledgerRecord(owned);
+  const retirementKeyHash = "r".repeat(43);
+  assert.deepEqual(await fixture.adapter.prepareLaunchRetirement(record, {
+    keyHash: retirementKeyHash,
+  }), { status: "prepared" });
+  assert.deepEqual(await fixture.adapter.prepareLaunchRetirement(record, {
+    keyHash: retirementKeyHash,
+  }), { status: "prepared" });
+  let state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].state, "owned");
+  assert.equal(state.records[0].retirementKeyHash, retirementKeyHash);
+  assert.equal(state.records[0].retirementReserved, true);
+  assert.equal(state.records[0].deleteAttempted, false);
+
+  const retired = await fixture.adapter.retireLaunch({
+    ...record, state: "retiring", retirementKeyHash,
+  });
+  assert.equal(retired.status, "retired");
+  state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].state, "retired");
+  assert.equal(state.records[0].retirementReserved, undefined);
+  assert.equal(state.records[0].deleteAttempted, undefined);
+});
+
 test("Cursor SDK restores owned provenance when the first delete is definitively rejected", async (t) => {
   const fixture = await makeFixture(t, {
     async getLocal({ agentId }) { return { agentId, status: "idle" }; },
@@ -92,7 +124,9 @@ test("Cursor SDK restores owned provenance when the first delete is definitively
   }), { status: "blocked", code: "cursor_delete_rejected" });
   const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(state.records[0].state, "owned");
-  assert.equal(state.records[0].retirementKeyHash, undefined);
+  assert.equal(state.records[0].retirementKeyHash, retirementKeyHash);
+  assert.equal(state.records[0].retirementReserved, true);
+  assert.equal(state.records[0].deleteAttempted, false);
 });
 
 test("Cursor SDK restores recovered provenance when pre-delete checks become blocked", async (t) => {
@@ -119,13 +153,14 @@ test("Cursor SDK restores recovered provenance when pre-delete checks become blo
   }), { status: "blocked", code: "cursor_agent_not_terminal" });
   const restored = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(restored.records[0].state, "owned");
-  assert.equal(restored.records[0].retirementKeyHash, undefined);
+  assert.equal(restored.records[0].retirementKeyHash, firstKeyHash);
+  assert.equal(restored.records[0].retirementReserved, true);
+  assert.equal(restored.records[0].deleteAttempted, false);
   assert.equal(deletes, 0);
 
   status = "idle";
-  const secondKeyHash = "s".repeat(43);
   const retired = await fixture.adapter.retireLaunch({
-    ...ledgerRecord(owned), state: "retiring", retirementKeyHash: secondKeyHash,
+    ...ledgerRecord(owned), state: "retiring", retirementKeyHash: firstKeyHash,
   });
   assert.equal(retired.status, "retired");
   assert.match(retired.cleanupScope, /^[A-Za-z0-9_-]{16}$/);
@@ -205,6 +240,9 @@ test("Cursor SDK does not retain a delete attempt when credentials fail before i
   });
   state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(state.records[0].state, "owned");
+  assert.equal(state.records[0].retirementKeyHash, retirementKeyHash);
+  assert.equal(state.records[0].retirementReserved, true);
+  assert.equal(state.records[0].deleteAttempted, false);
   assert.equal(deletes, 0);
 });
 
@@ -2377,6 +2415,81 @@ test("Cursor SDK provenance capacity rejects before bridge invocation", async (t
     /provenance state is full/,
   );
   assert.equal(creates, 0);
+});
+
+test("Cursor SDK retirement preparation rejects before the launch ledger can be fenced", async (t) => {
+  let adapter;
+  t.after(() => adapter?.close());
+  const fixture = await makeFixture(t);
+  const owned = await fixture.adapter.launch(resolvedRequest(), {
+    attemptId: ATTEMPT_ID, launchId: LAUNCH_ID,
+  });
+  const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  const template = state.records[0];
+  state.records = Array.from({ length: 1_000 }, (_, index) => {
+    if (index === 0) return template;
+    const uuid = uuidFor(index + 10);
+    const suffix = (index + 10).toString(16).padStart(32, "0");
+    const providerAgentId = `agent_${suffix}`;
+    return {
+      ...template,
+      attemptId: `attempt:${uuid}`,
+      launchId: `launch:${uuid}`,
+      providerAgentId,
+      agentId: `cursor-sdk:${template.storeScope}:${providerAgentId}`,
+    };
+  });
+  const targetBytes = 1_000_000 - 50;
+  let padding = targetBytes - Buffer.byteLength(`${JSON.stringify(state)}\n`);
+  const reserveRecord = state.records.at(-1);
+  for (const record of state.records.slice(1, -1)) {
+    for (const field of ["target", "profile", "sdkVersion", "bridgeNamespace"]) {
+      const added = Math.min(100 - record[field].length, padding);
+      record[field] += "x".repeat(added);
+      padding -= added;
+      if (padding === 0) break;
+    }
+    if (padding === 0) break;
+  }
+  const reserveCapacity = ["target", "profile", "sdkVersion", "bridgeNamespace"]
+    .reduce((total, field) => total + 100 - reserveRecord[field].length, 0);
+  for (const record of state.records.slice(1, -1)) {
+    if (padding <= reserveCapacity) break;
+    const probe = { ...record, runId: "" };
+    const overhead = Buffer.byteLength(JSON.stringify(probe))
+      - Buffer.byteLength(JSON.stringify(record));
+    const added = Math.min(200, Math.max(1, padding - reserveCapacity - overhead));
+    record.runId = "r".repeat(added);
+    padding -= overhead + added;
+  }
+  for (const field of ["target", "profile", "sdkVersion", "bridgeNamespace"]) {
+    const added = Math.min(100 - reserveRecord[field].length, padding);
+    reserveRecord[field] += "x".repeat(added);
+    padding -= added;
+  }
+  assert.equal(padding, 0);
+  assert.equal(Buffer.byteLength(`${JSON.stringify(state)}\n`), targetBytes);
+  await fixture.adapter.close();
+  await writeFile(fixture.provenanceFile, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  adapter = new CursorSdkAdapter({
+    bridge: {
+      namespace: "fixture", sdkVersion: "1.0.28",
+      async createLocal() {}, async getLocal() { return null; }, async deleteLocal() {},
+    },
+    credentialSource: fixtureCredentialSource(),
+    sdkVersion: "1.0.28",
+    storeDirectory: fixture.storeDirectory,
+    provenanceFile: fixture.provenanceFile,
+    targets: [{ id: "workspace-a", cwd: fixture.cwd, profiles: ["safe"] }],
+    privateState: fixtureFileSystem(dirname(fixture.provenanceFile)),
+  });
+  await adapter.open();
+  assert.deepEqual(await adapter.prepareLaunchRetirement(ledgerRecord(owned), {
+    keyHash: "r".repeat(43),
+  }), { status: "blocked", code: "cursor_provenance_capacity" });
+  const persisted = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(persisted.records[0].state, "owned");
+  assert.equal(persisted.records[0].retirementKeyHash, undefined);
 });
 
 test("injected Cursor SDK adapter composes with the durable launch coordinator", async (t) => {

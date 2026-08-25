@@ -287,6 +287,12 @@ export class AgentRegistry {
     return adapter.retireLaunch(record, options);
   }
 
+  async prepareLaunchRetirement(provider, record, options = {}) {
+    const adapter = this.#launchAdapter(provider);
+    if (!adapter?.prepareLaunchRetirement) return { status: "unsupported" };
+    return adapter.prepareLaunchRetirement(record, options);
+  }
+
   async finalizeLaunchRetirement(retirement) {
     const adapter = this.#launchAdapter(retirement?.provider);
     if (typeof adapter?.finalizeLaunchRetirement !== "function") return false;

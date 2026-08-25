@@ -203,6 +203,23 @@ export class LaunchCoordinator {
   async #runRetirement(record, keyHash) {
     const recovered = record.state === "retiring";
     if (record.state === "owned") {
+      const preparation = await this.#registry.prepareLaunchRetirement?.(
+        record.request.provider, record, { keyHash },
+      );
+      if (preparation?.status === "blocked") {
+        throw new ContractError(
+          "launch_retirement_capacity",
+          "launch provider cannot reserve retirement capacity",
+          503,
+        );
+      }
+      if (preparation?.status === "uncertain") {
+        throw new ContractError(
+          "launch_retirement_uncertain",
+          "owned launch retirement could not be prepared",
+          503,
+        );
+      }
       try { record = await this.#ledger.beginRetirement(record.id, keyHash); }
       catch (error) {
         if (error?.code === "retirement_key_conflict") throw retirementConflict();

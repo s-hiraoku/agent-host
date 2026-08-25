@@ -21,7 +21,7 @@ const LAUNCH_ID = /^launch:[0-9a-f-]{36}$/;
 const RECORD_KEYS = new Set([
   "attemptId", "launchId", "providerAgentId", "agentId", "target", "profile", "sdkVersion",
   "bridgeNamespace", "storeScope", "targetDigest", "runId", "runPending", "cancelAttemptedRunId",
-  "retirementKeyHash", "deleteAttempted", "state", "createdAt", "updatedAt",
+  "retirementKeyHash", "retirementReserved", "deleteAttempted", "state", "createdAt", "updatedAt",
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
 const CREDENTIAL_SOURCES = new WeakMap();
@@ -233,14 +233,14 @@ export class CursorSdkAdapter {
       if (provenance.state === "retired") {
         return { status: "retired", cleanupScope: this.#retirementScope };
       }
-      if (provenance.state === "retiring"
+      if (provenance.retirementKeyHash !== undefined
         && provenance.retirementKeyHash !== record.retirementKeyHash) {
         return { status: "uncertain", code: "cursor_retirement_conflict" };
       }
       const replayingDelete = provenance.state === "retiring" && provenance.deleteAttempted === true;
       if (!replayingDelete) {
         const blocked = async (code) => {
-          if (provenance.state === "retiring") {
+          if (provenance.retirementKeyHash === record.retirementKeyHash) {
             await this.#state.cancelRetirement(record.attemptId, record.retirementKeyHash);
           }
           return { status: "blocked", code };
@@ -301,6 +301,28 @@ export class CursorSdkAdapter {
       if (result.deleted !== true) throw new Error("Cursor SDK bridge did not confirm agent deletion");
       await this.#state.markRetired(record.attemptId, record.retirementKeyHash);
       return { status: "retired", cleanupScope: this.#retirementScope };
+    }));
+  }
+
+  async prepareLaunchRetirement(record, { keyHash } = {}) {
+    return this.#run(() => this.#exclusiveAgent(record?.agentId, async () => {
+      if (record?.state !== "owned" || !/^[A-Za-z0-9_-]{43}$/.test(keyHash ?? "")
+        || typeof this.#bridge.deleteLocal !== "function") {
+        return { status: "unsupported" };
+      }
+      const provenance = await this.#state.get(record.attemptId);
+      if (!this.#matchesConfiguration(provenance, record) || provenance?.state !== "owned") {
+        return { status: "uncertain", code: "cursor_retirement_unproven" };
+      }
+      try {
+        await this.#state.reserveRetirement(record.attemptId, keyHash);
+      } catch (error) {
+        if (error?.code === "cursor_provenance_capacity") {
+          return { status: "blocked", code: "cursor_provenance_capacity" };
+        }
+        throw error;
+      }
+      return { status: "prepared" };
     }));
   }
 
@@ -792,11 +814,27 @@ export class CursorSdkProvenanceStore {
 
   async beginRetirement(attemptId, keyHash) {
     if (!/^[A-Za-z0-9_-]{43}$/.test(keyHash ?? "")) throw new Error("invalid Cursor SDK retirement key");
-    return this.#updateOwned(attemptId, (record) => ({
-      ...record,
-      state: "retiring",
-      retirementKeyHash: keyHash,
-    }));
+    return this.#updateOwned(attemptId, (record) => {
+      if (record.retirementKeyHash !== undefined && record.retirementKeyHash !== keyHash) {
+        throw new Error("Cursor SDK retirement reservation changed");
+      }
+      const updated = { ...record, state: "retiring", retirementKeyHash: keyHash };
+      delete updated.retirementReserved;
+      return updated;
+    });
+  }
+
+  async reserveRetirement(attemptId, keyHash) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(keyHash ?? "")) throw new Error("invalid Cursor SDK retirement key");
+    return this.#updateOwned(attemptId, (record) => {
+      const updated = {
+        ...record,
+        retirementKeyHash: keyHash,
+        retirementReserved: true,
+        deleteAttempted: false,
+      };
+      return updated;
+    }, true);
   }
 
   async markRetired(attemptId, keyHash) {
@@ -812,11 +850,25 @@ export class CursorSdkProvenanceStore {
   }
 
   async cancelRetirement(attemptId, keyHash) {
-    return this.#updateRetirement(attemptId, keyHash, (record) => {
-      const updated = { ...record, state: "owned" };
-      delete updated.retirementKeyHash;
-      delete updated.deleteAttempted;
-      return updated;
+    return this.#exclusive(async () => {
+      await this.#open();
+      const state = await this.#load();
+      const index = state.records.findIndex((record) => record.attemptId === attemptId);
+      const current = state.records[index];
+      if (index < 0 || !["owned", "retiring"].includes(current?.state)
+        || current.retirementKeyHash !== keyHash) {
+        throw new Error("Cursor SDK retirement provenance is missing");
+      }
+      const updated = {
+        ...current,
+        state: "owned",
+        retirementReserved: true,
+        deleteAttempted: false,
+        updatedAt: monotonicTimestamp(current.updatedAt, this.#now),
+      };
+      state.records[index] = validateRecord(updated);
+      await this.#save(state);
+      return structuredClone(state.records[index]);
     });
   }
 
@@ -925,7 +977,7 @@ export class CursorSdkProvenanceStore {
     await this.#privateState.writeFileAtomic(this.#file, `${JSON.stringify(state)}\n`);
     await this.#assertOpen();
   }
-  async #updateOwned(attemptId, update) {
+  async #updateOwned(attemptId, update, reserveCapacity = false) {
     return this.#exclusive(async () => {
       await this.#open();
       const state = await this.#load();
@@ -940,6 +992,11 @@ export class CursorSdkProvenanceStore {
           ? state.records[index].updatedAt
           : updatedAt,
       });
+      if (reserveCapacity && Buffer.byteLength(`${JSON.stringify(state)}\n`) > MAX_STATE_BYTES) {
+        const error = new Error("Cursor SDK provenance cannot reserve retirement capacity");
+        error.code = "cursor_provenance_capacity";
+        throw error;
+      }
       await this.#save(state);
       return structuredClone(state.records[index]);
     });
@@ -1109,11 +1166,19 @@ function validateRecord(record) {
     || !/^[A-Za-z0-9_-]{43}$/.test(record.targetDigest ?? "")
     || !["intent", "owned", "retiring", "retired"].includes(record.state)
     || (record.retirementKeyHash !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(record.retirementKeyHash))
-    || (record.deleteAttempted !== undefined && record.deleteAttempted !== true)
+    || (record.retirementReserved !== undefined && record.retirementReserved !== true)
+    || (record.deleteAttempted !== undefined && typeof record.deleteAttempted !== "boolean")
     || (record.deleteAttempted === true && record.state !== "retiring")
-    || (["retiring", "retired"].includes(record.state) !== (record.retirementKeyHash !== undefined))
+    || (record.retirementReserved === true && (record.state !== "owned"
+      || record.retirementKeyHash === undefined || record.deleteAttempted !== false))
+    || (record.deleteAttempted === false && record.state !== "retiring"
+      && record.retirementReserved !== true)
+    || ((["retiring", "retired"].includes(record.state) || record.retirementReserved === true)
+      !== (record.retirementKeyHash !== undefined))
+    || (record.state === "retired" && record.deleteAttempted !== undefined)
     || (record.state === "intent" && (record.runId !== undefined || record.runPending !== undefined
-      || record.cancelAttemptedRunId !== undefined || record.retirementKeyHash !== undefined))
+      || record.cancelAttemptedRunId !== undefined || record.retirementKeyHash !== undefined
+      || record.retirementReserved !== undefined || record.deleteAttempted !== undefined))
     || !validTimestamp(record.createdAt) || !validTimestamp(record.updatedAt)
     || Date.parse(record.updatedAt) < Date.parse(record.createdAt)) {
     throw new Error("invalid Cursor SDK provenance record");
