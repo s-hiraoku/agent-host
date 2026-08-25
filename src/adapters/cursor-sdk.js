@@ -235,8 +235,14 @@ export class CursorSdkAdapter {
       }
       const replayingDelete = provenance.state === "retiring" && provenance.deleteAttempted === true;
       if (!replayingDelete) {
+        const blocked = async (code) => {
+          if (provenance.state === "retiring") {
+            await this.#state.cancelRetirement(record.attemptId, record.retirementKeyHash);
+          }
+          return { status: "blocked", code };
+        };
         if (provenance.runPending === true || provenance.cancelAttemptedRunId !== undefined) {
-          return { status: "blocked", code: "cursor_run_state_unsettled" };
+          return blocked("cursor_run_state_unsettled");
         }
         const target = this.#targets.get(provenance.target);
         await this.#assertBridgeDirectories(target);
@@ -247,11 +253,11 @@ export class CursorSdkAdapter {
         }, signal);
         assertProviderAgent(current, provenance.providerAgentId);
         if (!["idle", "error"].includes(normalizeStatus(current.status))) {
-          return { status: "blocked", code: "cursor_agent_not_terminal" };
+          return blocked("cursor_agent_not_terminal");
         }
         if (SAFE_RUN_ID.test(provenance.runId ?? "")) {
           if (typeof this.#bridge.inspectRunLocal !== "function") {
-            return { status: "blocked", code: "cursor_run_inspection_unavailable" };
+            return blocked("cursor_run_inspection_unavailable");
           }
           const run = await this.#callBridge("inspectRunLocal", {
             agentId: provenance.providerAgentId,
@@ -260,7 +266,7 @@ export class CursorSdkAdapter {
             storeDirectory: this.#storeDirectory,
           }, signal);
           assertRunIdentity(run, provenance.providerAgentId, provenance.runId);
-          if (run.status !== "terminal") return { status: "blocked", code: "cursor_run_not_terminal" };
+          if (run.status !== "terminal") return blocked("cursor_run_not_terminal");
         }
         if (provenance.state === "owned") {
           await this.#state.beginRetirement(record.attemptId, record.retirementKeyHash);

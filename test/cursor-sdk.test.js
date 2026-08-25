@@ -83,6 +83,41 @@ test("Cursor SDK restores owned provenance when the first delete is definitively
   assert.equal(state.records[0].retirementKeyHash, undefined);
 });
 
+test("Cursor SDK restores recovered provenance when pre-delete checks become blocked", async (t) => {
+  let status = "working";
+  let deletes = 0;
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status }; },
+    async deleteLocal({ agentId }) {
+      deletes += 1;
+      return { agentId, deleted: true };
+    },
+  });
+  const owned = await fixture.adapter.launch(resolvedRequest(), {
+    attemptId: ATTEMPT_ID, launchId: LAUNCH_ID,
+  });
+  const firstKeyHash = "r".repeat(43);
+  const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  state.records[0].state = "retiring";
+  state.records[0].retirementKeyHash = firstKeyHash;
+  await writePrivateFileAtomic(fixture.provenanceFile, `${JSON.stringify(state)}\n`);
+
+  assert.deepEqual(await fixture.adapter.retireLaunch({
+    ...ledgerRecord(owned), state: "retiring", retirementKeyHash: firstKeyHash,
+  }), { status: "blocked", code: "cursor_agent_not_terminal" });
+  const restored = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(restored.records[0].state, "owned");
+  assert.equal(restored.records[0].retirementKeyHash, undefined);
+  assert.equal(deletes, 0);
+
+  status = "idle";
+  const secondKeyHash = "s".repeat(43);
+  assert.deepEqual(await fixture.adapter.retireLaunch({
+    ...ledgerRecord(owned), state: "retiring", retirementKeyHash: secondKeyHash,
+  }), { status: "retired" });
+  assert.equal(deletes, 1);
+});
+
 test("Cursor SDK accepts not-found only after a durably attempted delete", async (t) => {
   let deletes = 0;
   const fixture = await makeFixture(t, {
