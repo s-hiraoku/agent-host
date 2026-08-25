@@ -513,6 +513,60 @@ test("timed-out retirement work remains single-flight until the provider settles
   assert.equal(replay.retirement.state, "retired");
 });
 
+test("retirement work is bounded globally and per provider", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-bounds-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const registry = fixtureRegistry();
+  const capability = new DemoLaunchAdapter().launchCapabilities();
+  registry.launchCapabilities = () => Array.from({ length: 5 }, (_, index) => ({
+    ...capability, provider: `provider-${index}`,
+  }));
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let active = 0;
+  let maximumActive = 0;
+  const activeByProvider = new Map();
+  let maximumPerProvider = 0;
+  let calls = 0;
+  registry.retireLaunch = async (provider) => {
+    calls += 1;
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    const providerActive = (activeByProvider.get(provider) ?? 0) + 1;
+    activeByProvider.set(provider, providerActive);
+    maximumPerProvider = Math.max(maximumPerProvider, providerActive);
+    await gate;
+    active -= 1;
+    activeByProvider.set(provider, providerActive - 1);
+    return { status: "retired" };
+  };
+  registry.deactivateOwnedLaunch = () => {};
+  const coordinator = new LaunchCoordinator(registry, {
+    ledgerFile: join(directory, "launches.json"),
+  });
+  await coordinator.start();
+  t.after(() => coordinator.stop());
+  const providers = ["provider-0", "provider-0", "provider-1", "provider-2", "provider-3", "provider-4"];
+  const accepted = await Promise.all(providers.map((provider, index) => coordinator.submit({
+    ...LOCAL_REQUEST, provider,
+  }, `bounded-launch-${index}`)));
+  await Promise.all(accepted.map(({ launch }) => waitFor(
+    () => coordinator.get(launch.id)?.state === "owned",
+  )));
+  const confirmation = { confirmDeleteOwnedAgentAndState: true };
+  const retirements = accepted.map(({ launch }, index) => coordinator.retire(
+    launch.id, confirmation, `bounded-retirement-${index}`,
+  ));
+  await waitFor(() => calls === 4);
+  assert.equal(maximumActive, 4);
+  assert.equal(maximumPerProvider, 1);
+  release();
+  await Promise.all(retirements);
+  assert.equal(calls, providers.length);
+  assert.equal(maximumActive, 4);
+  assert.equal(maximumPerProvider, 1);
+});
+
 test("shutdown aborts a retirement waiting for post-deactivation discovery", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-shutdown-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

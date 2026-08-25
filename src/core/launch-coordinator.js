@@ -25,6 +25,9 @@ export class LaunchCoordinator {
   #activeProviders = new Map();
   #controllers = new Set();
   #retirements = new Map();
+  #retirementQueue = [];
+  #activeRetirements = new Map();
+  #activeRetirementProviders = new Map();
   #draining = false;
   #started = false;
 
@@ -173,6 +176,13 @@ export class LaunchCoordinator {
     this.#draining = true;
     this.#queue = [];
     this.#queued.clear();
+    const queuedRetirements = this.#retirementQueue.splice(0);
+    for (const entry of queuedRetirements) {
+      if (this.#retirements.get(entry.record.id) === entry) {
+        this.#retirements.delete(entry.record.id);
+      }
+      entry.reject(new ContractError("shutting_down", "agent-host is shutting down", 503));
+    }
     for (const controller of this.#controllers) controller.abort(new Error("agent-host is shutting down"));
     await Promise.allSettled([...this.#retirements.values()].map((entry) => entry.promise));
     const active = [...this.#active.values()];
@@ -190,17 +200,54 @@ export class LaunchCoordinator {
   }
 
   #trackRetirement(record, keyHash) {
-    const entry = { keyHash, settled: Promise.resolve() };
-    entry.promise = this.#runRetirement(record, keyHash, entry);
-    this.#retirements.set(record.id, entry);
-    const forget = () => {
-      if (this.#retirements.get(record.id) === entry) this.#retirements.delete(record.id);
+    let resolve;
+    let reject;
+    const promise = new Promise((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    const entry = {
+      record, keyHash, provider: record.request.provider,
+      promise, resolve, reject, settled: Promise.resolve(),
     };
-    void entry.promise.then(
-      () => entry.settled,
-      () => entry.settled,
-    ).then(forget, forget);
+    this.#retirements.set(record.id, entry);
+    this.#retirementQueue.push(entry);
+    this.#pumpRetirements();
+    this.#updateGauge();
     return entry;
+  }
+
+  #pumpRetirements() {
+    if (this.#draining) return;
+    while (this.#activeRetirements.size < MAX_ACTIVE_GLOBAL) {
+      const index = this.#retirementQueue.findIndex((entry) => (
+        (this.#activeRetirementProviders.get(entry.provider) ?? 0) < MAX_ACTIVE_PER_PROVIDER
+      ));
+      if (index < 0) break;
+      const [entry] = this.#retirementQueue.splice(index, 1);
+      this.#activeRetirements.set(entry.record.id, entry);
+      this.#activeRetirementProviders.set(
+        entry.provider,
+        (this.#activeRetirementProviders.get(entry.provider) ?? 0) + 1,
+      );
+      const operation = this.#runRetirement(entry.record, entry.keyHash, entry);
+      operation.then(entry.resolve, entry.reject);
+      const release = () => {
+        if (this.#retirements.get(entry.record.id) === entry) {
+          this.#retirements.delete(entry.record.id);
+        }
+        this.#activeRetirements.delete(entry.record.id);
+        const count = (this.#activeRetirementProviders.get(entry.provider) ?? 1) - 1;
+        if (count) this.#activeRetirementProviders.set(entry.provider, count);
+        else this.#activeRetirementProviders.delete(entry.provider);
+        this.#updateGauge();
+        this.#pumpRetirements();
+      };
+      void operation.then(
+        () => entry.settled,
+        () => entry.settled,
+      ).then(release, release);
+    }
   }
 
   async #runRetirement(record, keyHash, entry) {
@@ -477,7 +524,11 @@ export class LaunchCoordinator {
   }
 
   #updateGauge() {
-    this.#operations?.metrics.setGauge("launch_queue_depth", this.#queue.length + this.#active.size);
+    this.#operations?.metrics.setGauge(
+      "launch_queue_depth",
+      this.#queue.length + this.#active.size
+        + this.#retirementQueue.length + this.#activeRetirements.size,
+    );
   }
 
   #assertStarted() { if (!this.#started) throw new ContractError("launch_unavailable", "launch service is unavailable", 503); }
