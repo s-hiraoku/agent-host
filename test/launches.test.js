@@ -567,6 +567,80 @@ test("retirement work is bounded globally and per provider", async (t) => {
   assert.equal(maximumPerProvider, 1);
 });
 
+test("launch and retirement work share global and provider admission limits", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-mixed-bounds-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const registry = fixtureRegistry();
+  const capability = new DemoLaunchAdapter().launchCapabilities();
+  registry.launchCapabilities = () => Array.from({ length: 5 }, (_, index) => ({
+    ...capability, provider: `provider-${index}`,
+  }));
+  const coordinator = new LaunchCoordinator(registry, {
+    ledgerFile: join(directory, "launches.json"),
+  });
+  await coordinator.start();
+  t.after(() => coordinator.stop());
+  const retiringTarget = await coordinator.submit({
+    ...LOCAL_REQUEST, provider: "provider-0",
+  }, "mixed-retiring-target");
+  await waitFor(() => coordinator.get(retiringTarget.launch.id)?.state === "owned");
+
+  let releaseLaunches;
+  const launchGate = new Promise((resolve) => { releaseLaunches = resolve; });
+  let active = 0;
+  let maximumActive = 0;
+  const activeByProvider = new Map();
+  let maximumPerProvider = 0;
+  let launchCalls = 0;
+  let retirementCalls = 0;
+  const enter = (provider) => {
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    const providerActive = (activeByProvider.get(provider) ?? 0) + 1;
+    activeByProvider.set(provider, providerActive);
+    maximumPerProvider = Math.max(maximumPerProvider, providerActive);
+  };
+  const leave = (provider) => {
+    active -= 1;
+    activeByProvider.set(provider, (activeByProvider.get(provider) ?? 1) - 1);
+  };
+  registry.launch = async (provider, record) => {
+    launchCalls += 1;
+    enter(provider);
+    await launchGate;
+    leave(provider);
+    return ownedResult(record);
+  };
+  registry.retireLaunch = async (provider) => {
+    retirementCalls += 1;
+    enter(provider);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    leave(provider);
+    return { status: "retired" };
+  };
+  registry.deactivateOwnedLaunch = () => {};
+
+  const launches = ["provider-0", "provider-1", "provider-2", "provider-3"].map(
+    (provider, index) => coordinator.submit({ ...LOCAL_REQUEST, provider }, `mixed-launch-${index}`),
+  );
+  await waitFor(() => launchCalls === 4);
+  const retirement = coordinator.retire(
+    retiringTarget.launch.id,
+    { confirmDeleteOwnedAgentAndState: true },
+    "mixed-retirement",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(retirementCalls, 0);
+  assert.equal(maximumActive, 4);
+  assert.equal(maximumPerProvider, 1);
+
+  releaseLaunches();
+  await Promise.all([...launches, retirement]);
+  assert.equal(retirementCalls, 1);
+  assert.equal(maximumActive, 4);
+  assert.equal(maximumPerProvider, 1);
+});
+
 test("shutdown aborts a retirement waiting for post-deactivation discovery", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-shutdown-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

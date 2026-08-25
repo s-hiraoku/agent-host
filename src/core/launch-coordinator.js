@@ -27,7 +27,6 @@ export class LaunchCoordinator {
   #retirements = new Map();
   #retirementQueue = [];
   #activeRetirements = new Map();
-  #activeRetirementProviders = new Map();
   #draining = false;
   #started = false;
 
@@ -219,16 +218,16 @@ export class LaunchCoordinator {
 
   #pumpRetirements() {
     if (this.#draining) return;
-    while (this.#activeRetirements.size < MAX_ACTIVE_GLOBAL) {
+    while (this.#active.size + this.#activeRetirements.size < MAX_ACTIVE_GLOBAL) {
       const index = this.#retirementQueue.findIndex((entry) => (
-        (this.#activeRetirementProviders.get(entry.provider) ?? 0) < MAX_ACTIVE_PER_PROVIDER
+        (this.#activeProviders.get(entry.provider) ?? 0) < MAX_ACTIVE_PER_PROVIDER
       ));
       if (index < 0) break;
       const [entry] = this.#retirementQueue.splice(index, 1);
       this.#activeRetirements.set(entry.record.id, entry);
-      this.#activeRetirementProviders.set(
+      this.#activeProviders.set(
         entry.provider,
-        (this.#activeRetirementProviders.get(entry.provider) ?? 0) + 1,
+        (this.#activeProviders.get(entry.provider) ?? 0) + 1,
       );
       const operation = this.#runRetirement(entry.record, entry.keyHash, entry);
       operation.then(entry.resolve, entry.reject);
@@ -237,10 +236,11 @@ export class LaunchCoordinator {
           this.#retirements.delete(entry.record.id);
         }
         this.#activeRetirements.delete(entry.record.id);
-        const count = (this.#activeRetirementProviders.get(entry.provider) ?? 1) - 1;
-        if (count) this.#activeRetirementProviders.set(entry.provider, count);
-        else this.#activeRetirementProviders.delete(entry.provider);
+        const count = (this.#activeProviders.get(entry.provider) ?? 1) - 1;
+        if (count) this.#activeProviders.set(entry.provider, count);
+        else this.#activeProviders.delete(entry.provider);
         this.#updateGauge();
+        this.#pump();
         this.#pumpRetirements();
       };
       void operation.then(
@@ -360,7 +360,7 @@ export class LaunchCoordinator {
 
   #pump() {
     if (this.#draining) return;
-    while (this.#active.size < MAX_ACTIVE_GLOBAL) {
+    while (this.#active.size + this.#activeRetirements.size < MAX_ACTIVE_GLOBAL) {
       const index = this.#queue.findIndex((item) => (
         this.#activeProviders.get(item.provider) ?? 0
       ) < MAX_ACTIVE_PER_PROVIDER);
@@ -378,6 +378,7 @@ export class LaunchCoordinator {
         if (count) this.#activeProviders.set(item.provider, count);
         else this.#activeProviders.delete(item.provider);
         this.#updateGauge();
+        this.#pumpRetirements();
         this.#pump();
       });
       this.#updateGauge();
