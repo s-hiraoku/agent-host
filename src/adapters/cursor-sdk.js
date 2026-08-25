@@ -21,7 +21,7 @@ const LAUNCH_ID = /^launch:[0-9a-f-]{36}$/;
 const RECORD_KEYS = new Set([
   "attemptId", "launchId", "providerAgentId", "agentId", "target", "profile", "sdkVersion",
   "bridgeNamespace", "storeScope", "targetDigest", "runId", "runPending", "cancelAttemptedRunId",
-  "retirementKeyHash", "deleteAmbiguous", "state", "createdAt", "updatedAt",
+  "retirementKeyHash", "deleteAttempted", "state", "createdAt", "updatedAt",
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
 const CREDENTIAL_SOURCES = new WeakMap();
@@ -229,8 +229,12 @@ export class CursorSdkAdapter {
         return { status: "uncertain", code: "cursor_retirement_unproven" };
       }
       if (provenance.state === "retired") return { status: "retired" };
-      const initialDelete = provenance.state === "owned";
-      if (provenance.state === "owned") {
+      if (provenance.state === "retiring"
+        && provenance.retirementKeyHash !== record.retirementKeyHash) {
+        return { status: "uncertain", code: "cursor_retirement_conflict" };
+      }
+      const replayingDelete = provenance.state === "retiring" && provenance.deleteAttempted === true;
+      if (!replayingDelete) {
         if (provenance.runPending === true || provenance.cancelAttemptedRunId !== undefined) {
           return { status: "blocked", code: "cursor_run_state_unsettled" };
         }
@@ -258,9 +262,10 @@ export class CursorSdkAdapter {
           assertRunIdentity(run, provenance.providerAgentId, provenance.runId);
           if (run.status !== "terminal") return { status: "blocked", code: "cursor_run_not_terminal" };
         }
-        await this.#state.beginRetirement(record.attemptId, record.retirementKeyHash);
-      } else if (provenance.retirementKeyHash !== record.retirementKeyHash) {
-        return { status: "uncertain", code: "cursor_retirement_conflict" };
+        if (provenance.state === "owned") {
+          await this.#state.beginRetirement(record.attemptId, record.retirementKeyHash);
+        }
+        await this.#state.markDeleteAttempted(record.attemptId, record.retirementKeyHash);
       }
       const retiring = await this.#state.get(record.attemptId);
       const target = this.#targets.get(retiring.target);
@@ -271,15 +276,12 @@ export class CursorSdkAdapter {
           agentId: retiring.providerAgentId,
           cwd: target.cwd,
           storeDirectory: this.#storeDirectory,
-          allowNotFound: retiring.deleteAmbiguous === true,
+          allowNotFound: replayingDelete,
         }, signal);
       } catch (error) {
-        if (initialDelete && error?.deleteDisposition === "rejected") {
+        if (!replayingDelete && error?.deleteDisposition === "rejected") {
           await this.#state.cancelRetirement(record.attemptId, record.retirementKeyHash);
           return { status: "blocked", code: "cursor_delete_rejected" };
-        }
-        if (error?.deleteDisposition === "ambiguous") {
-          await this.#state.markDeleteAmbiguous(record.attemptId, record.retirementKeyHash);
         }
         throw error;
       }
@@ -786,20 +788,20 @@ export class CursorSdkProvenanceStore {
   async markRetired(attemptId, keyHash) {
     return this.#updateRetirement(attemptId, keyHash, (record) => {
       const updated = { ...record, state: "retired" };
-      delete updated.deleteAmbiguous;
+      delete updated.deleteAttempted;
       return updated;
     });
   }
 
-  async markDeleteAmbiguous(attemptId, keyHash) {
-    return this.#updateRetirement(attemptId, keyHash, (record) => ({ ...record, deleteAmbiguous: true }));
+  async markDeleteAttempted(attemptId, keyHash) {
+    return this.#updateRetirement(attemptId, keyHash, (record) => ({ ...record, deleteAttempted: true }));
   }
 
   async cancelRetirement(attemptId, keyHash) {
     return this.#updateRetirement(attemptId, keyHash, (record) => {
       const updated = { ...record, state: "owned" };
       delete updated.retirementKeyHash;
-      delete updated.deleteAmbiguous;
+      delete updated.deleteAttempted;
       return updated;
     });
   }
@@ -1093,8 +1095,8 @@ function validateRecord(record) {
     || !/^[A-Za-z0-9_-]{43}$/.test(record.targetDigest ?? "")
     || !["intent", "owned", "retiring", "retired"].includes(record.state)
     || (record.retirementKeyHash !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(record.retirementKeyHash))
-    || (record.deleteAmbiguous !== undefined && record.deleteAmbiguous !== true)
-    || (record.deleteAmbiguous === true && record.state !== "retiring")
+    || (record.deleteAttempted !== undefined && record.deleteAttempted !== true)
+    || (record.deleteAttempted === true && record.state !== "retiring")
     || (["retiring", "retired"].includes(record.state) !== (record.retirementKeyHash !== undefined))
     || (record.state === "intent" && (record.runId !== undefined || record.runPending !== undefined
       || record.cancelAttemptedRunId !== undefined || record.retirementKeyHash !== undefined))

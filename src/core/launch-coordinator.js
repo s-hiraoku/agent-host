@@ -133,6 +133,10 @@ export class LaunchCoordinator {
       if (completed.keyHash !== keyHash) throw retirementConflict();
       return { retirement: retirementView(completed), replayed: true };
     }
+    const completedForKey = this.#ledger.findRetirementByKeyHash?.(keyHash);
+    if (completedForKey && completedForKey.launchId !== id) throw retirementConflict();
+    const activeForKey = this.#ledger.findByRetirementKeyHash?.(keyHash);
+    if (activeForKey && activeForKey.id !== id) throw retirementConflict();
     let record = this.#ledger.get(id);
     if (!record) throw new ContractError("launch_not_found", "launch not found", 404);
     if (record.state === "retiring" && record.retirementKeyHash !== keyHash) throw retirementConflict();
@@ -140,7 +144,11 @@ export class LaunchCoordinator {
       throw new ContractError("launch_not_retirable", "only an owned launch can be retired", 409);
     }
     if (record.state === "owned") {
-      record = await this.#ledger.beginRetirement(id, keyHash);
+      try { record = await this.#ledger.beginRetirement(id, keyHash); }
+      catch (error) {
+        if (error?.code === "retirement_key_conflict") throw retirementConflict();
+        throw error;
+      }
       this.#emit(record, "retiring");
     }
     if (record.retirementKeyHash !== keyHash) throw retirementConflict();

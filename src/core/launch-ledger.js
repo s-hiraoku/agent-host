@@ -112,6 +112,18 @@ export class LaunchLedger {
     return entry ? structuredClone(entry) : undefined;
   }
 
+  findByRetirementKeyHash(keyHash) {
+    this.#assertOpen();
+    const record = [...this.#records.values()].find((entry) => entry.retirementKeyHash === keyHash);
+    return record ? structuredClone(record) : undefined;
+  }
+
+  findRetirementByKeyHash(keyHash) {
+    this.#assertOpen();
+    const entry = [...this.#retirements.values()].find((item) => item.keyHash === keyHash);
+    return entry ? structuredClone(entry) : undefined;
+  }
+
   retirements() {
     this.#assertOpen();
     return [...this.#retirements.values()].map((entry) => structuredClone(entry));
@@ -125,6 +137,15 @@ export class LaunchLedger {
       if (!current) return undefined;
       if (current.state === "retiring") return structuredClone(current);
       if (current.state !== "owned") throw new Error("only owned launches can be retired");
+      const activeConflict = [...this.#records.values()].some((entry) => (
+        entry.id !== id && entry.retirementKeyHash === keyHash
+      ));
+      const completedConflict = [...this.#retirements.values()].some((entry) => entry.keyHash === keyHash);
+      if (activeConflict || completedConflict) {
+        const error = new Error("retirement idempotency hash is already claimed");
+        error.code = "retirement_key_conflict";
+        throw error;
+      }
       const next = {
         ...current,
         state: "retiring",

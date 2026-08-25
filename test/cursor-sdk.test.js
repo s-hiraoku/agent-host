@@ -83,13 +83,15 @@ test("Cursor SDK restores owned provenance when the first delete is definitively
   assert.equal(state.records[0].retirementKeyHash, undefined);
 });
 
-test("Cursor SDK accepts not-found only after a recorded ambiguous delete", async (t) => {
+test("Cursor SDK accepts not-found only after a durably attempted delete", async (t) => {
   let deletes = 0;
   const fixture = await makeFixture(t, {
     async getLocal({ agentId }) { return { agentId, status: "idle" }; },
     async deleteLocal({ agentId, allowNotFound }) {
       deletes += 1;
       if (deletes === 1) {
+        const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+        assert.equal(state.records[0].deleteAttempted, true);
         const error = new Error("delete response was lost");
         error.deleteDisposition = "ambiguous";
         throw error;
@@ -108,11 +110,11 @@ test("Cursor SDK accepts not-found only after a recorded ambiguous delete", asyn
     (error) => error.code === "cursor_bridge_failed" && error.deleteDisposition === "ambiguous",
   );
   let state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
-  assert.equal(state.records[0].deleteAmbiguous, true);
+  assert.equal(state.records[0].deleteAttempted, true);
   assert.deepEqual(await fixture.adapter.retireLaunch(retiring), { status: "retired" });
   state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(state.records[0].state, "retired");
-  assert.equal(state.records[0].deleteAmbiguous, undefined);
+  assert.equal(state.records[0].deleteAttempted, undefined);
 });
 
 test("Cursor SDK credential sources are explicit, bounded, and opaque to serialization", async () => {

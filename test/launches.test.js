@@ -227,6 +227,41 @@ test("concurrent retirement cannot cross-replay a different idempotency key", as
   await coordinator.stop();
 });
 
+test("a retirement idempotency key cannot be reused across launch IDs", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-global-key-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let release;
+  let calls = 0;
+  const registry = fixtureRegistry();
+  registry.retireLaunch = async () => {
+    calls += 1;
+    await new Promise((resolve) => { release = resolve; });
+    return { status: "retired" };
+  };
+  registry.deactivateOwnedLaunch = () => {};
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile: join(directory, "launches.json") });
+  await coordinator.start();
+  const firstLaunch = await coordinator.submit(LOCAL_REQUEST, "global-key-launch-a");
+  const secondLaunch = await coordinator.submit(LOCAL_REQUEST, "global-key-launch-b");
+  await waitFor(() => coordinator.get(firstLaunch.launch.id)?.state === "owned"
+    && coordinator.get(secondLaunch.launch.id)?.state === "owned");
+  const confirmation = { confirmDeleteOwnedAgentAndState: true };
+  const first = coordinator.retire(firstLaunch.launch.id, confirmation, "global-retirement-key");
+  await waitFor(() => calls === 1);
+  await assert.rejects(
+    coordinator.retire(secondLaunch.launch.id, confirmation, "global-retirement-key"),
+    (error) => error.code === "idempotency_conflict",
+  );
+  release();
+  await first;
+  await assert.rejects(
+    coordinator.retire(secondLaunch.launch.id, confirmation, "global-retirement-key"),
+    (error) => error.code === "idempotency_conflict",
+  );
+  assert.equal(calls, 1);
+  await coordinator.stop();
+});
+
 test("uncertain launch delivery is reconciled without blind create retry", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-uncertain-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
