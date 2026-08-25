@@ -376,8 +376,9 @@ export function createAgentServer(registry, options) {
         : Promise.resolve();
       const actionState = await actionExecutor.shutdown({ graceMs: options.shutdownGraceMs });
       try {
-        await launchCoordinator.stop();
-        const registryClosed = Promise.resolve().then(() => registry.close?.());
+        const coordinatorStopped = Promise.resolve().then(() => launchCoordinator.stop());
+        const registryClosed = coordinatorStopped.then(() => registry.close?.());
+        void registryClosed.catch(() => {});
         server.closeIdleConnections?.();
         if (actionState.timedOut) server.closeAllConnections?.();
         let shutdownTimer;
