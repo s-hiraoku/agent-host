@@ -90,6 +90,7 @@ export class CursorSdkAdapter {
   #storeDirectory;
   #storeIdentity;
   #scope;
+  #retirementScope;
   #sdkVersion;
   #now;
   #activeOperations = new Set();
@@ -122,6 +123,7 @@ export class CursorSdkAdapter {
     }
     this.#state = new CursorSdkProvenanceStore(provenanceFile, options.privateState, this.#now);
     this.#scope = createHash("sha256").update(this.#storeDirectory).digest("base64url").slice(0, 16);
+    this.#retirementScope = createHash("sha256").update(provenanceFile).digest("base64url").slice(0, 16);
     this.#credentialSource = validateCredentialSource(options.credentialSource);
   }
 
@@ -228,7 +230,9 @@ export class CursorSdkAdapter {
         || !["owned", "retiring", "retired"].includes(provenance?.state)) {
         return { status: "uncertain", code: "cursor_retirement_unproven" };
       }
-      if (provenance.state === "retired") return { status: "retired" };
+      if (provenance.state === "retired") {
+        return { status: "retired", cleanupScope: this.#retirementScope };
+      }
       if (provenance.state === "retiring"
         && provenance.retirementKeyHash !== record.retirementKeyHash) {
         return { status: "uncertain", code: "cursor_retirement_conflict" };
@@ -294,14 +298,16 @@ export class CursorSdkAdapter {
       assertProviderAgent(result, retiring.providerAgentId);
       if (result.deleted !== true) throw new Error("Cursor SDK bridge did not confirm agent deletion");
       await this.#state.markRetired(record.attemptId, record.retirementKeyHash);
-      return { status: "retired" };
+      return { status: "retired", cleanupScope: this.#retirementScope };
     }));
   }
 
   async finalizeLaunchRetirement(retirement) {
     return this.#run(async () => {
-      if (retirement?.provider !== "cursor" || !ATTEMPT_ID.test(retirement.attemptId ?? "")) return;
+      if (retirement?.provider !== "cursor" || !ATTEMPT_ID.test(retirement.attemptId ?? "")
+        || retirement.cleanupScope !== this.#retirementScope) return false;
       await this.#state.removeRetired(retirement.attemptId, retirement.keyHash);
+      return true;
     });
   }
 

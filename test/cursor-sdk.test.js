@@ -48,16 +48,28 @@ test("Cursor SDK retires only an exact terminal owned agent behind a durable fen
   });
   assert.equal(deletes, 0);
   status = "idle";
-  assert.deepEqual(await fixture.adapter.retireLaunch(retiring), { status: "retired" });
+  const retired = await fixture.adapter.retireLaunch(retiring);
+  assert.equal(retired.status, "retired");
+  assert.match(retired.cleanupScope, /^[A-Za-z0-9_-]{16}$/);
   assert.equal(deletes, 1);
   let state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(state.records[0].state, "retired");
   assert.equal(state.records[0].retirementKeyHash, retirementKeyHash);
-  assert.deepEqual(await fixture.adapter.retireLaunch(retiring), { status: "retired" });
+  assert.deepEqual(await fixture.adapter.retireLaunch(retiring), retired);
   assert.equal(deletes, 1);
-  await fixture.adapter.finalizeLaunchRetirement({
+  const wrongScope = retired.cleanupScope === "x".repeat(16) ? "y".repeat(16) : "x".repeat(16);
+  assert.equal(await fixture.adapter.finalizeLaunchRetirement({
     provider: "cursor", attemptId: ATTEMPT_ID, keyHash: retirementKeyHash,
-  });
+    cleanupScope: wrongScope,
+  }), false);
+  state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].state, "retired");
+  const cleanup = {
+    provider: "cursor", attemptId: ATTEMPT_ID, keyHash: retirementKeyHash,
+    cleanupScope: retired.cleanupScope,
+  };
+  assert.equal(await fixture.adapter.finalizeLaunchRetirement(cleanup), true);
+  assert.equal(await fixture.adapter.finalizeLaunchRetirement(cleanup), true);
   state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.deepEqual(state.records, []);
 });
@@ -112,9 +124,11 @@ test("Cursor SDK restores recovered provenance when pre-delete checks become blo
 
   status = "idle";
   const secondKeyHash = "s".repeat(43);
-  assert.deepEqual(await fixture.adapter.retireLaunch({
+  const retired = await fixture.adapter.retireLaunch({
     ...ledgerRecord(owned), state: "retiring", retirementKeyHash: secondKeyHash,
-  }), { status: "retired" });
+  });
+  assert.equal(retired.status, "retired");
+  assert.match(retired.cleanupScope, /^[A-Za-z0-9_-]{16}$/);
   assert.equal(deletes, 1);
 });
 
@@ -146,7 +160,9 @@ test("Cursor SDK accepts not-found only after a durably attempted delete", async
   );
   let state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(state.records[0].deleteAttempted, true);
-  assert.deepEqual(await fixture.adapter.retireLaunch(retiring), { status: "retired" });
+  const retired = await fixture.adapter.retireLaunch(retiring);
+  assert.equal(retired.status, "retired");
+  assert.match(retired.cleanupScope, /^[A-Za-z0-9_-]{16}$/);
   state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(state.records[0].state, "retired");
   assert.equal(state.records[0].deleteAttempted, undefined);

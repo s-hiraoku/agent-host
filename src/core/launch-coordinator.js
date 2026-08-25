@@ -257,7 +257,9 @@ export class LaunchCoordinator {
         503,
       );
     }
-    const completed = await this.#ledger.completeRetirement(record.id);
+    const completed = await this.#ledger.completeRetirement(
+      record.id, undefined, result.cleanupScope,
+    );
     this.#registry.deactivateOwnedLaunch?.(record.id);
     await this.#refreshOwnedLaunches(signal);
     this.#emitRetired(completed);

@@ -202,12 +202,12 @@ export class LaunchLedger {
     });
   }
 
-  async completeRetirement(id, now = new Date().toISOString()) {
+  async completeRetirement(id, now = new Date().toISOString(), cleanupScope) {
     return this.#exclusive(async () => {
       this.#assertOpen();
       const current = this.#records.get(id);
       if (!current || current.state !== "retiring") throw new Error("launch retirement is not fenced");
-      const entry = retirementEntry(current, now);
+      const entry = retirementEntry(current, now, cleanupScope);
       if (!validRetirement(entry)) throw new Error("invalid launch retirement tombstone");
       const previousRetirements = new Map(this.#retirements);
       const previousCleanups = new Map(this.#retirementCleanups);
@@ -344,7 +344,7 @@ function projectRetirementCompletions(recordsSource, retirementsSource, cleanups
   const retirementCandidates = [...retirementsSource.values()];
   for (const record of recordsSource.values()) {
     if (record.state !== "retiring") continue;
-    const entry = retirementEntry(record, record.updatedAt);
+    const entry = retirementEntry(record, record.updatedAt, "x".repeat(16));
     records.delete(record.id);
     retirementCandidates.push(entry);
     retirementCleanups.set(record.id, retirementCleanup(entry));
@@ -359,7 +359,7 @@ function projectRetirementCompletions(recordsSource, retirementsSource, cleanups
   return { records, retirements, retirementCleanups };
 }
 
-function retirementEntry(record, now) {
+function retirementEntry(record, now, cleanupScope) {
   return {
     launchId: record.id,
     attemptId: record.attemptId,
@@ -370,6 +370,7 @@ function retirementEntry(record, now) {
     request: structuredClone(record.request),
     requestedAt: record.requestedAt,
     retiredAt: laterTimestamp(record.updatedAt, now),
+    ...(cleanupScope === undefined ? {} : { cleanupScope }),
   };
 }
 
@@ -377,13 +378,14 @@ function validRetirement(entry) {
   return entry && typeof entry === "object" && !Array.isArray(entry)
     && Object.keys(entry).every((key) => [
       "launchId", "attemptId", "provider", "keyHash", "creationKeyHash", "signature", "request",
-      "requestedAt", "retiredAt",
+      "requestedAt", "retiredAt", "cleanupScope",
     ].includes(key))
     && /^launch:[0-9a-f-]{36}$/.test(entry.launchId ?? "")
     && /^attempt:[0-9a-f-]{36}$/.test(entry.attemptId ?? "")
     && /^[A-Za-z0-9._:-]{1,100}$/.test(entry.provider ?? "")
     && SAFE_HASH.test(entry.keyHash ?? "") && SAFE_HASH.test(entry.creationKeyHash ?? "")
     && SAFE_HASH.test(entry.signature ?? "")
+    && (entry.cleanupScope === undefined || /^[A-Za-z0-9_-]{16}$/.test(entry.cleanupScope))
     && validRetiredRequest(entry.request)
     && Number.isFinite(Date.parse(entry.requestedAt))
     && Number.isFinite(Date.parse(entry.retiredAt));
@@ -395,16 +397,20 @@ function retirementCleanup(entry) {
     attemptId: entry.attemptId,
     provider: entry.provider,
     keyHash: entry.keyHash,
+    ...(entry.cleanupScope === undefined ? {} : { cleanupScope: entry.cleanupScope }),
   };
 }
 
 function validRetirementCleanup(entry) {
   return entry && typeof entry === "object" && !Array.isArray(entry)
-    && Object.keys(entry).every((key) => ["launchId", "attemptId", "provider", "keyHash"].includes(key))
+    && Object.keys(entry).every((key) => [
+      "launchId", "attemptId", "provider", "keyHash", "cleanupScope",
+    ].includes(key))
     && /^launch:[0-9a-f-]{36}$/.test(entry.launchId ?? "")
     && /^attempt:[0-9a-f-]{36}$/.test(entry.attemptId ?? "")
     && /^[A-Za-z0-9._:-]{1,100}$/.test(entry.provider ?? "")
-    && SAFE_HASH.test(entry.keyHash ?? "");
+    && SAFE_HASH.test(entry.keyHash ?? "")
+    && (entry.cleanupScope === undefined || /^[A-Za-z0-9_-]{16}$/.test(entry.cleanupScope));
 }
 
 function validRetiredRequest(request) {

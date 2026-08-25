@@ -250,9 +250,11 @@ test("retirement capacity reserves the largest tombstones across completion orde
     launchId: record.id, attemptId: record.attemptId, provider: record.request.provider,
     keyHash: record.retirementKeyHash, creationKeyHash: record.keyHash, signature: record.signature,
     request: record.request, requestedAt: record.requestedAt, retiredAt: record.updatedAt,
+    cleanupScope: "x".repeat(16),
   });
   const cleanup = (entry) => ({
     launchId: entry.launchId, attemptId: entry.attemptId, provider: entry.provider, keyHash: entry.keyHash,
+    cleanupScope: entry.cleanupScope,
   });
   const tombstones = retiring.map(tombstone);
   const cleanups = tombstones.map(cleanup);
@@ -495,10 +497,11 @@ test("retirement cleanup survives replay-tombstone eviction", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-cleanup-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const ledgerFile = join(directory, "launches.json");
+  const cleanupScope = "cursor_scope_001";
   const firstRegistry = fixtureRegistry();
-  firstRegistry.retireLaunch = async () => ({ status: "retired" });
+  firstRegistry.retireLaunch = async () => ({ status: "retired", cleanupScope });
   firstRegistry.deactivateOwnedLaunch = () => {};
-  firstRegistry.finalizeLaunchRetirement = async () => { throw new Error("cleanup unavailable"); };
+  firstRegistry.finalizeLaunchRetirement = async () => false;
   const first = new LaunchCoordinator(firstRegistry, { ledgerFile });
   await first.start();
   const accepted = await first.submit(LOCAL_REQUEST, "cleanup-launch-key");
@@ -511,6 +514,7 @@ test("retirement cleanup survives replay-tombstone eviction", async (t) => {
   await first.stop();
   const persisted = JSON.parse(await readFile(ledgerFile, "utf8"));
   assert.equal(persisted.retirementCleanups.length, 1);
+  assert.equal(persisted.retirementCleanups[0].cleanupScope, cleanupScope);
   persisted.retirements = [];
   await writeFile(ledgerFile, `${JSON.stringify(persisted)}\n`, { mode: 0o600 });
 
@@ -525,6 +529,7 @@ test("retirement cleanup survives replay-tombstone eviction", async (t) => {
   const second = new LaunchCoordinator(secondRegistry, { ledgerFile });
   await second.start();
   assert.equal(cleanup.launchId, accepted.launch.id);
+  assert.equal(cleanup.cleanupScope, cleanupScope);
   await second.stop();
   const cleaned = JSON.parse(await readFile(ledgerFile, "utf8"));
   assert.deepEqual(cleaned.retirementCleanups, []);
