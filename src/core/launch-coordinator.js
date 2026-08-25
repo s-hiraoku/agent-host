@@ -201,6 +201,7 @@ export class LaunchCoordinator {
   }
 
   async #runRetirement(record, keyHash) {
+    const recovered = record.state === "retiring";
     if (record.state === "owned") {
       try { record = await this.#ledger.beginRetirement(record.id, keyHash); }
       catch (error) {
@@ -216,20 +217,20 @@ export class LaunchCoordinator {
     if (this.#draining) {
       throw new ContractError("shutting_down", "agent-host is shutting down", 503);
     }
-    return this.#finishRetirement(record);
+    return this.#finishRetirement(record, recovered);
   }
 
-  async #finishRetirement(record) {
+  async #finishRetirement(record, recovered) {
     const controller = new AbortController();
     this.#controllers.add(controller);
     try {
-      return await this.#finishRetirementWithSignal(record, controller.signal);
+      return await this.#finishRetirementWithSignal(record, controller.signal, recovered);
     } finally {
       this.#controllers.delete(controller);
     }
   }
 
-  async #finishRetirementWithSignal(record, signal) {
+  async #finishRetirementWithSignal(record, signal, recovered) {
     const cachedAgent = this.#registry.deactivateOwnedLaunch?.(record.id);
     await this.#refreshOwnedLaunches(signal);
     const invocation = this.#invoke((options) => this.#registry.retireLaunch?.(
@@ -239,6 +240,13 @@ export class LaunchCoordinator {
     ));
     const result = await invocation.result.catch(() => ({ status: "uncertain" }));
     void invocation.settled;
+    if (result?.status === "unsupported" && recovered) {
+      throw new ContractError(
+        "launch_retirement_uncertain",
+        "owned launch retirement could not be confirmed",
+        503,
+      );
+    }
     if (["blocked", "unsupported"].includes(result?.status)) {
       const restored = await this.#ledger.cancelRetirement(record.id, record.retirementKeyHash);
       this.#registry.activateOwnedLaunch?.(restored, cachedAgent);

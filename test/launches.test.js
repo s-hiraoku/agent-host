@@ -367,6 +367,19 @@ test("ambiguous launch retirement stays fenced and resumes after restart", async
   assert.equal(first.get(accepted.launch.id).state, "retiring");
   await first.stop();
 
+  let unsupportedCalls = 0;
+  const disabledRegistry = fixtureRegistry();
+  disabledRegistry.retireLaunch = async () => {
+    unsupportedCalls += 1;
+    return { status: "unsupported" };
+  };
+  disabledRegistry.deactivateOwnedLaunch = () => {};
+  const disabled = new LaunchCoordinator(disabledRegistry, { ledgerFile });
+  await disabled.start();
+  await waitFor(() => unsupportedCalls === 1);
+  assert.equal(disabled.get(accepted.launch.id).state, "retiring");
+  await disabled.stop();
+
   let resumed = 0;
   let finalized;
   const secondRegistry = fixtureRegistry();
@@ -535,7 +548,7 @@ test("retirement cleanup survives replay-tombstone eviction", async (t) => {
   assert.deepEqual(cleaned.retirementCleanups, []);
 });
 
-test("a pre-delete retirement refusal restores owned launch state", async (t) => {
+test("a new pre-delete retirement refusal restores owned launch state", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-blocked-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const registry = fixtureRegistry();
@@ -565,6 +578,16 @@ test("a pre-delete retirement refusal restores owned launch state", async (t) =>
     ["retiring", "retiring"],
     ["owned", "owned"],
   ]);
+  registry.retireLaunch = async () => ({ status: "unsupported" });
+  await assert.rejects(
+    coordinator.retire(
+      accepted.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "unsupported-retirement-key",
+    ),
+    (error) => error.code === "launch_not_retirable" && error.status === 409,
+  );
+  assert.equal(coordinator.get(accepted.launch.id).state, "owned");
   await coordinator.stop();
 });
 
