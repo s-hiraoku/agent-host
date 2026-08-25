@@ -196,8 +196,18 @@ export class LaunchCoordinator {
   }
 
   async #finishRetirement(record) {
+    const controller = new AbortController();
+    this.#controllers.add(controller);
+    try {
+      return await this.#finishRetirementWithSignal(record, controller.signal);
+    } finally {
+      this.#controllers.delete(controller);
+    }
+  }
+
+  async #finishRetirementWithSignal(record, signal) {
     const cachedAgent = this.#registry.deactivateOwnedLaunch?.(record.id);
-    await this.#refreshOwnedLaunches();
+    await this.#refreshOwnedLaunches(signal);
     const invocation = this.#invoke((options) => this.#registry.retireLaunch?.(
       record.request.provider,
       record,
@@ -208,7 +218,7 @@ export class LaunchCoordinator {
     if (["blocked", "unsupported"].includes(result?.status)) {
       const restored = await this.#ledger.cancelRetirement(record.id, record.retirementKeyHash);
       this.#registry.activateOwnedLaunch?.(restored, cachedAgent);
-      await this.#refreshOwnedLaunches();
+      await this.#refreshOwnedLaunches(signal);
       this.#emit(restored, "owned");
       throw new ContractError(
         "launch_not_retirable",
@@ -225,7 +235,7 @@ export class LaunchCoordinator {
     }
     const completed = await this.#ledger.completeRetirement(record.id);
     this.#registry.deactivateOwnedLaunch?.(record.id);
-    await this.#refreshOwnedLaunches();
+    await this.#refreshOwnedLaunches(signal);
     this.#emitRetired(completed);
     await this.#finalizeRetirementCleanup(completed);
     return completed;
@@ -401,12 +411,14 @@ export class LaunchCoordinator {
     });
   }
 
-  async #refreshOwnedLaunches() {
+  async #refreshOwnedLaunches(signal) {
+    let refresh;
     if (typeof this.#registry.refreshAfterOwnedLaunchChange === "function") {
-      await this.#registry.refreshAfterOwnedLaunchChange();
+      refresh = this.#registry.refreshAfterOwnedLaunchChange();
     } else {
-      await this.#registry.refresh?.({ force: true });
+      refresh = this.#registry.refresh?.({ force: true });
     }
+    await waitForAbort(refresh, signal);
   }
 
   #updateGauge() {
@@ -489,4 +501,14 @@ function retiredLaunchView(entry) {
 
 function isSafeId(value) {
   return typeof value === "string" && /^[A-Za-z0-9._:-]{1,100}$/.test(value);
+}
+
+async function waitForAbort(operation, signal) {
+  if (signal?.aborted) throw signal.reason ?? new Error("launch retirement aborted");
+  let rejectAborted;
+  const aborted = new Promise((_, reject) => { rejectAborted = reject; });
+  const onAbort = () => rejectAborted(signal.reason ?? new Error("launch retirement aborted"));
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try { return await Promise.race([Promise.resolve(operation), aborted]); }
+  finally { signal?.removeEventListener("abort", onAbort); }
 }

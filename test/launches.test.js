@@ -201,6 +201,40 @@ test("a retry of an uncertain fenced retirement is reported as replayed", async 
   await coordinator.stop();
 });
 
+test("shutdown aborts a retirement waiting for post-deactivation discovery", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-shutdown-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let refreshStarted = false;
+  let retireCalls = 0;
+  const registry = fixtureRegistry();
+  registry.deactivateOwnedLaunch = () => {};
+  registry.refreshAfterOwnedLaunchChange = async () => {
+    refreshStarted = true;
+    await new Promise(() => {});
+  };
+  registry.retireLaunch = async () => { retireCalls += 1; return { status: "retired" }; };
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile: join(directory, "launches.json") });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "shutdown-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  const retirement = coordinator.retire(
+    accepted.launch.id,
+    { confirmDeleteOwnedAgentAndState: true },
+    "shutdown-retirement-key",
+  );
+  const retirementOutcome = retirement.then(
+    () => undefined,
+    (error) => error,
+  );
+  await waitFor(() => refreshStarted);
+  await Promise.race([
+    coordinator.stop(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("coordinator stop exceeded bound")), 100)),
+  ]);
+  assert.match((await retirementOutcome).message, /shutting down/);
+  assert.equal(retireCalls, 0);
+});
+
 test("retirement cleanup survives replay-tombstone eviction", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-cleanup-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
