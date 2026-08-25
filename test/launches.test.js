@@ -84,11 +84,19 @@ test("launch retirement fences provider deletion and replays from a bounded tomb
     return { status: "retired" };
   };
   registry.deactivateOwnedLaunch = (id) => { deactivated = id; };
-  registry.finalizeLaunchRetirement = async (entry) => { finalized = entry; };
+  registry.finalizeLaunchRetirement = async (entry) => { finalized = entry; return true; };
   const coordinator = new LaunchCoordinator(registry, { ledgerFile: join(directory, "launches.json") });
   await coordinator.start();
   const accepted = await coordinator.submit(LOCAL_REQUEST, "retirement-launch-key");
   await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  await assert.rejects(
+    coordinator.retire(
+      accepted.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "retirement-launch-key",
+    ),
+    (error) => error.code === "idempotency_conflict",
+  );
   const lifecycle = [];
   registry.events.subscribe((event) => {
     if (event.type === "launch.updated" && event.launch.id === accepted.launch.id) lifecycle.push(event);
@@ -114,6 +122,10 @@ test("launch retirement fences provider deletion and replays from a bounded tomb
   assert.equal(creationReplay.replayed, true);
   assert.equal(creationReplay.launch.id, accepted.launch.id);
   assert.equal(creationReplay.launch.state, "retired");
+  await assert.rejects(
+    coordinator.submit(LOCAL_REQUEST, "retirement-delete-key"),
+    (error) => error.code === "idempotency_conflict",
+  );
   await assert.rejects(
     coordinator.submit({ ...LOCAL_REQUEST, profile: "other" }, "retirement-launch-key"),
     (error) => error.code === "idempotency_conflict",
@@ -153,7 +165,7 @@ test("ambiguous launch retirement stays fenced and resumes after restart", async
     return { status: "retired" };
   };
   secondRegistry.deactivateOwnedLaunch = () => {};
-  secondRegistry.finalizeLaunchRetirement = async (entry) => { finalized = entry; };
+  secondRegistry.finalizeLaunchRetirement = async (entry) => { finalized = entry; return true; };
   const second = new LaunchCoordinator(secondRegistry, { ledgerFile });
   await second.start();
   await waitFor(() => second.get(accepted.launch.id) === undefined && finalized);
@@ -212,9 +224,14 @@ test("retirement cleanup survives replay-tombstone eviction", async (t) => {
   persisted.retirements = [];
   await writeFile(ledgerFile, `${JSON.stringify(persisted)}\n`, { mode: 0o600 });
 
+  const disabled = new LaunchCoordinator(fixtureRegistry(), { ledgerFile });
+  await disabled.start();
+  await disabled.stop();
+  assert.equal(JSON.parse(await readFile(ledgerFile, "utf8")).retirementCleanups.length, 1);
+
   let cleanup;
   const secondRegistry = fixtureRegistry();
-  secondRegistry.finalizeLaunchRetirement = async (entry) => { cleanup = entry; };
+  secondRegistry.finalizeLaunchRetirement = async (entry) => { cleanup = entry; return true; };
   const second = new LaunchCoordinator(secondRegistry, { ledgerFile });
   await second.start();
   assert.equal(cleanup.launchId, accepted.launch.id);

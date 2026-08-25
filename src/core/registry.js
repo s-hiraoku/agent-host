@@ -288,7 +288,9 @@ export class AgentRegistry {
 
   async finalizeLaunchRetirement(retirement) {
     const adapter = this.#launchAdapter(retirement?.provider);
-    await adapter?.finalizeLaunchRetirement?.(retirement);
+    if (typeof adapter?.finalizeLaunchRetirement !== "function") return false;
+    await adapter.finalizeLaunchRetirement(retirement);
+    return true;
   }
 
   activateOwnedLaunch(record, cachedAgent) {

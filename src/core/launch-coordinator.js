@@ -78,6 +78,10 @@ export class LaunchCoordinator {
     this.#assertStarted();
     if (this.#draining) throw new ContractError("shutting_down", "agent-host is shutting down", 503);
     const keyHash = launchKeyHash(validateIdempotencyKey(key));
+    if (this.#ledger.findByRetirementKeyHash?.(keyHash)
+      || this.#ledger.findRetirementByKeyHash?.(keyHash)) {
+      throw new ContractError("idempotency_conflict", "Idempotency-Key was already used for a different request", 409);
+    }
     const retired = this.#ledger.findRetirementByCreationKeyHash?.(keyHash);
     if (retired) {
       let replayRequest;
@@ -102,6 +106,9 @@ export class LaunchCoordinator {
     const request = normalizeLaunchRequest(payload, this.#capabilities);
     const signature = launchRequestSignature(request);
     const reserved = await this.#ledger.reserve({ keyHash, signature, request });
+    if (reserved.conflict) {
+      throw new ContractError("idempotency_conflict", "Idempotency-Key was already used for a different request", 409);
+    }
     if (reserved.full) {
       this.#operations?.metrics.increment("launches_rejected", { code: "queue_full" });
       throw new ContractError("launch_queue_full", "launch queue is full; retry later", 429);
@@ -128,6 +135,8 @@ export class LaunchCoordinator {
       );
     }
     const keyHash = launchKeyHash(validateIdempotencyKey(key));
+    if (this.#ledger.findByKeyHash?.(keyHash)
+      || this.#ledger.findRetirementByCreationKeyHash?.(keyHash)) throw retirementConflict();
     const completed = this.#ledger.retirement?.(id);
     if (completed) {
       if (completed.keyHash !== keyHash) throw retirementConflict();
@@ -224,7 +233,8 @@ export class LaunchCoordinator {
 
   async #finalizeRetirementCleanup(retirement) {
     try {
-      await this.#registry.finalizeLaunchRetirement?.(retirement);
+      const finalized = await this.#registry.finalizeLaunchRetirement?.(retirement);
+      if (finalized !== true) return;
       await this.#ledger.completeRetirementCleanup?.(retirement.launchId, retirement.keyHash);
     } catch {}
   }

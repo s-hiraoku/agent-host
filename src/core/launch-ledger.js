@@ -164,7 +164,9 @@ export class LaunchLedger {
         entry.id !== id && entry.retirementKeyHash === keyHash
       ));
       const completedConflict = [...this.#retirements.values()].some((entry) => entry.keyHash === keyHash);
-      if (activeConflict || completedConflict) {
+      const creationConflict = [...this.#records.values()].some((entry) => entry.keyHash === keyHash)
+        || [...this.#retirements.values()].some((entry) => entry.creationKeyHash === keyHash);
+      if (activeConflict || completedConflict || creationConflict) {
         const error = new Error("retirement idempotency hash is already claimed");
         error.code = "retirement_key_conflict";
         throw error;
@@ -254,6 +256,9 @@ export class LaunchLedger {
       this.#assertOpen();
       const existing = [...this.#records.values()].find((record) => record.keyHash === keyHash);
       if (existing) return { created: false, record: structuredClone(existing) };
+      const mutationConflict = [...this.#records.values()].some((record) => record.retirementKeyHash === keyHash)
+        || [...this.#retirements.values()].some((entry) => entry.keyHash === keyHash);
+      if (mutationConflict) return { conflict: true };
       const pending = [...this.#records.values()].filter((record) => (
         ["requested", "creating", "uncertain"].includes(record.state)
       ));
