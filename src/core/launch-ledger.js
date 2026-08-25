@@ -8,12 +8,14 @@ const MAX_RECORDS = 1_000;
 const MAX_PENDING = 32;
 const LEDGER_SCHEMA_VERSION = 2;
 const MAX_RETIREMENTS = 100;
+const MAX_RETIREMENT_CLEANUPS = 1_000;
 const SAFE_HASH = /^[A-Za-z0-9_-]{43}$/;
 
 export class LaunchLedger {
   #path;
   #records = new Map();
   #retirements = new Map();
+  #retirementCleanups = new Map();
   #tail = Promise.resolve();
   #opened = false;
   #lease;
@@ -34,14 +36,17 @@ export class LaunchLedger {
         try { parsed = JSON.parse(await readPrivateFileBounded(this.#path, MAX_LEDGER_BYTES)); }
         catch (error) {
           if (error?.code !== "ENOENT") throw new Error("launch ledger is invalid or unavailable", { cause: error });
-          parsed = { schemaVersion: LEDGER_SCHEMA_VERSION, records: [], retirements: [] };
+          parsed = { schemaVersion: LEDGER_SCHEMA_VERSION, records: [], retirements: [], retirementCleanups: [] };
           await writePrivateFileAtomic(this.#path, `${JSON.stringify(parsed)}\n`);
         }
         const legacy = parsed?.schemaVersion === LAUNCH_SCHEMA_VERSION && parsed.retirements === undefined;
         if (!parsed || (!legacy && parsed.schemaVersion !== LEDGER_SCHEMA_VERSION) || !Array.isArray(parsed.records)
           || parsed.records.length > MAX_RECORDS || parsed.records.some((record) => !validateLaunchRecord(record))
           || (!legacy && (!Array.isArray(parsed.retirements) || parsed.retirements.length > MAX_RETIREMENTS
-            || parsed.retirements.some((entry) => !validRetirement(entry))))) {
+            || parsed.retirements.some((entry) => !validRetirement(entry))))
+          || (parsed.retirementCleanups !== undefined && (!Array.isArray(parsed.retirementCleanups)
+            || parsed.retirementCleanups.length > MAX_RETIREMENT_CLEANUPS
+            || parsed.retirementCleanups.some((entry) => !validRetirementCleanup(entry))))) {
           throw new Error("launch ledger has an unsupported or malformed schema");
         }
         const records = new Map();
@@ -58,13 +63,19 @@ export class LaunchLedger {
           throw new Error("launch ledger contains duplicate retirement records");
         }
         this.#retirements = new Map(retirements.map((entry) => [entry.launchId, structuredClone(entry)]));
+        const cleanups = parsed.retirementCleanups ?? retirements.map(retirementCleanup);
+        if (new Set(cleanups.map((entry) => entry.launchId)).size !== cleanups.length) {
+          throw new Error("launch ledger contains duplicate retirement cleanups");
+        }
+        this.#retirementCleanups = new Map(cleanups.map((entry) => [entry.launchId, structuredClone(entry)]));
         this.#opened = true;
-        if (legacy) await this.#persist();
+        if (legacy || parsed.retirementCleanups === undefined) await this.#persist();
         return this.list();
       } catch (error) {
         this.#opened = false;
         this.#records.clear();
         this.#retirements.clear();
+        this.#retirementCleanups.clear();
         await this.#lease.release().catch(() => {});
         this.#lease = undefined;
         throw error;
@@ -78,6 +89,7 @@ export class LaunchLedger {
       this.#opened = false;
       this.#records.clear();
       this.#retirements.clear();
+      this.#retirementCleanups.clear();
       await this.#lease?.release();
       this.#lease = undefined;
     });
@@ -129,6 +141,11 @@ export class LaunchLedger {
     return [...this.#retirements.values()].map((entry) => structuredClone(entry));
   }
 
+  retirementCleanups() {
+    this.#assertOpen();
+    return [...this.#retirementCleanups.values()].map((entry) => structuredClone(entry));
+  }
+
   async beginRetirement(id, keyHash, now = new Date().toISOString()) {
     if (!SAFE_HASH.test(keyHash ?? "")) throw new TypeError("invalid retirement idempotency hash");
     return this.#exclusive(async () => {
@@ -137,6 +154,12 @@ export class LaunchLedger {
       if (!current) return undefined;
       if (current.state === "retiring") return structuredClone(current);
       if (current.state !== "owned") throw new Error("only owned launches can be retired");
+      const retiringCount = [...this.#records.values()].filter((entry) => entry.state === "retiring").length;
+      if (this.#retirementCleanups.size + retiringCount >= MAX_RETIREMENT_CLEANUPS) {
+        const error = new Error("retirement cleanup capacity is full");
+        error.code = "retirement_cleanup_full";
+        throw error;
+      }
       const activeConflict = [...this.#records.values()].some((entry) => (
         entry.id !== id && entry.retirementKeyHash === keyHash
       ));
@@ -178,8 +201,10 @@ export class LaunchLedger {
       };
       if (!validRetirement(entry)) throw new Error("invalid launch retirement tombstone");
       const previousRetirements = new Map(this.#retirements);
+      const previousCleanups = new Map(this.#retirementCleanups);
       this.#records.delete(id);
       this.#retirements.set(id, entry);
+      this.#retirementCleanups.set(id, retirementCleanup(entry));
       while (this.#retirements.size > MAX_RETIREMENTS) {
         this.#retirements.delete(this.#retirements.keys().next().value);
       }
@@ -187,9 +212,23 @@ export class LaunchLedger {
       catch (error) {
         this.#records.set(id, current);
         this.#retirements = previousRetirements;
+        this.#retirementCleanups = previousCleanups;
         throw error;
       }
       return structuredClone(entry);
+    });
+  }
+
+  async completeRetirementCleanup(id, keyHash) {
+    return this.#exclusive(async () => {
+      this.#assertOpen();
+      const current = this.#retirementCleanups.get(id);
+      if (!current) return false;
+      if (current.keyHash !== keyHash) throw new Error("retirement cleanup fence does not match");
+      this.#retirementCleanups.delete(id);
+      try { await this.#persist(); }
+      catch (error) { this.#retirementCleanups.set(id, current); throw error; }
+      return true;
     });
   }
 
@@ -260,6 +299,7 @@ export class LaunchLedger {
       schemaVersion: LEDGER_SCHEMA_VERSION,
       records: [...this.#records.values()],
       retirements: [...this.#retirements.values()],
+      retirementCleanups: [...this.#retirementCleanups.values()],
     })}\n`;
     if (Buffer.byteLength(content) > MAX_LEDGER_BYTES) throw new Error("launch ledger exceeds its size limit");
     await writePrivateFileAtomic(this.#path, content);
@@ -286,6 +326,24 @@ function validRetirement(entry) {
     && validRetiredRequest(entry.request)
     && Number.isFinite(Date.parse(entry.requestedAt))
     && Number.isFinite(Date.parse(entry.retiredAt));
+}
+
+function retirementCleanup(entry) {
+  return {
+    launchId: entry.launchId,
+    attemptId: entry.attemptId,
+    provider: entry.provider,
+    keyHash: entry.keyHash,
+  };
+}
+
+function validRetirementCleanup(entry) {
+  return entry && typeof entry === "object" && !Array.isArray(entry)
+    && Object.keys(entry).every((key) => ["launchId", "attemptId", "provider", "keyHash"].includes(key))
+    && /^launch:[0-9a-f-]{36}$/.test(entry.launchId ?? "")
+    && /^attempt:[0-9a-f-]{36}$/.test(entry.attemptId ?? "")
+    && /^[A-Za-z0-9._:-]{1,100}$/.test(entry.provider ?? "")
+    && SAFE_HASH.test(entry.keyHash ?? "");
 }
 
 function validRetiredRequest(request) {

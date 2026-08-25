@@ -291,17 +291,18 @@ export class AgentRegistry {
     await adapter?.finalizeLaunchRetirement?.(retirement);
   }
 
-  activateOwnedLaunch(record) {
+  activateOwnedLaunch(record, cachedAgent) {
     if (record?.state !== "owned" || typeof record.id !== "string" || typeof record.agentId !== "string") {
       throw new TypeError("owned launch record is required");
     }
     this.#ownedLaunches.set(record.id, structuredClone(record));
+    if (cachedAgent !== undefined) this.#restoreCachedOwnedAgent(record, cachedAgent);
   }
 
   deactivateOwnedLaunch(id) {
     const record = this.#ownedLaunches.get(id);
     this.#ownedLaunches.delete(id);
-    if (record?.agentId) this.#evictCachedOwnedAgent(record.agentId);
+    return record?.agentId ? this.#evictCachedOwnedAgent(record.agentId) : undefined;
   }
 
   refreshAfterOwnedLaunchChange() {
@@ -502,7 +503,7 @@ export class AgentRegistry {
 
   #evictCachedOwnedAgent(agentId) {
     const previous = this.#agents.get(agentId);
-    if (!previous) return;
+    if (!previous) return undefined;
     const previousCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
     const previousRaw = this.listRaw().map(semanticAgent);
     const previousOverlay = historyOverlay(previousRaw, this.#historyAgents);
@@ -526,6 +527,39 @@ export class AgentRegistry {
         type: "agent.repository-associations.changed",
         agentId,
         removed: true,
+        repositoryRevision: this.#repositoryRevision,
+        snapshotRevision: this.#revision,
+        at,
+      });
+    }
+    return structuredClone(previous);
+  }
+
+  #restoreCachedOwnedAgent(record, cachedAgent) {
+    const adapter = this.#launchAdapter(record.request.provider);
+    if (!cachedAgent || cachedAgent.id !== record.agentId || cachedAgent.provider !== record.request.provider
+      || cachedAgent.source !== adapter?.id || this.#agents.has(cachedAgent.id)) return;
+    const previousRaw = this.listRaw().map(semanticAgent);
+    const previousOverlay = historyOverlay(previousRaw, this.#historyAgents);
+    const at = new Date().toISOString();
+    const restored = { ...structuredClone(cachedAgent), updatedAt: at };
+    const next = new Map(this.#agents);
+    next.set(restored.id, restored);
+    this.#agents = next;
+    const nextRaw = this.listRaw().map(semanticAgent);
+    if (!isDeepStrictEqual(previousRaw, nextRaw)) this.#rawRevision += 1;
+    if (!isDeepStrictEqual(previousOverlay, historyOverlay(nextRaw, this.#historyAgents))) {
+      this.#historyOverlayRevision += 1;
+    }
+    this.#revision += 1;
+    this.events.emit({ type: "agent.discovered", agent: restored, at, snapshotRevision: this.#revision });
+    const repository = normalizeRepositoryContext(restored.repositoryContext);
+    if (repository.state !== "unsupported") {
+      this.#repositoryRevision += 1;
+      this.events.emit({
+        type: "agent.repository-associations.changed",
+        agentId: restored.id,
+        state: repository.state,
         repositoryRevision: this.#repositoryRevision,
         snapshotRevision: this.#revision,
         at,

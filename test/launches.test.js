@@ -165,6 +165,64 @@ test("ambiguous launch retirement stays fenced and resumes after restart", async
   await second.stop();
 });
 
+test("a retry of an uncertain fenced retirement is reported as replayed", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-replayed-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let calls = 0;
+  const registry = fixtureRegistry();
+  registry.retireLaunch = async () => ({ status: ++calls === 1 ? "uncertain" : "retired" });
+  registry.deactivateOwnedLaunch = () => {};
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile: join(directory, "launches.json") });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "replayed-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  const confirmation = { confirmDeleteOwnedAgentAndState: true };
+  await assert.rejects(
+    coordinator.retire(accepted.launch.id, confirmation, "replayed-retirement-key"),
+    (error) => error.code === "launch_retirement_uncertain",
+  );
+  const replay = await coordinator.retire(
+    accepted.launch.id, confirmation, "replayed-retirement-key",
+  );
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.retirement.state, "retired");
+  await coordinator.stop();
+});
+
+test("retirement cleanup survives replay-tombstone eviction", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-cleanup-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const firstRegistry = fixtureRegistry();
+  firstRegistry.retireLaunch = async () => ({ status: "retired" });
+  firstRegistry.deactivateOwnedLaunch = () => {};
+  firstRegistry.finalizeLaunchRetirement = async () => { throw new Error("cleanup unavailable"); };
+  const first = new LaunchCoordinator(firstRegistry, { ledgerFile });
+  await first.start();
+  const accepted = await first.submit(LOCAL_REQUEST, "cleanup-launch-key");
+  await waitFor(() => first.get(accepted.launch.id)?.state === "owned");
+  await first.retire(
+    accepted.launch.id,
+    { confirmDeleteOwnedAgentAndState: true },
+    "cleanup-retirement-key",
+  );
+  await first.stop();
+  const persisted = JSON.parse(await readFile(ledgerFile, "utf8"));
+  assert.equal(persisted.retirementCleanups.length, 1);
+  persisted.retirements = [];
+  await writeFile(ledgerFile, `${JSON.stringify(persisted)}\n`, { mode: 0o600 });
+
+  let cleanup;
+  const secondRegistry = fixtureRegistry();
+  secondRegistry.finalizeLaunchRetirement = async (entry) => { cleanup = entry; };
+  const second = new LaunchCoordinator(secondRegistry, { ledgerFile });
+  await second.start();
+  assert.equal(cleanup.launchId, accepted.launch.id);
+  await second.stop();
+  const cleaned = JSON.parse(await readFile(ledgerFile, "utf8"));
+  assert.deepEqual(cleaned.retirementCleanups, []);
+});
+
 test("a pre-delete retirement refusal restores owned launch state", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-blocked-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

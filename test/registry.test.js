@@ -696,7 +696,7 @@ test("owned-launch deactivation stays hidden across stale and failed discovery",
   });
   const stale = registry.refresh({ force: true });
   await nextTurn();
-  registry.deactivateOwnedLaunch("launch:owned");
+  const cached = registry.deactivateOwnedLaunch("launch:owned");
   assert.deepEqual(registry.list(), []);
   const afterChange = registry.refreshAfterOwnedLaunchChange();
   staleGate.resolve();
@@ -705,6 +705,11 @@ test("owned-launch deactivation stays hidden across stale and failed discovery",
   assert.equal(calls, 3);
   assert.deepEqual(registry.list(), []);
   assert.equal(removed.length, 1);
+  registry.activateOwnedLaunch({
+    id: "launch:owned", agentId: "owned-provider:agent", state: "owned",
+    request: { provider: "owned-provider" },
+  }, cached);
+  assert.equal(registry.list().length, 1);
   await registry.close();
 });
 

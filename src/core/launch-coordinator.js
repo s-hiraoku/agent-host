@@ -43,8 +43,8 @@ export class LaunchCoordinator {
     const records = await this.#ledger.open();
     this.#capabilities = normalizeLaunchCapabilities(this.#registry.launchCapabilities?.() ?? []);
     this.#started = true;
-    for (const retirement of this.#ledger.retirements?.() ?? []) {
-      await this.#registry.finalizeLaunchRetirement?.(retirement).catch(() => {});
+    for (const cleanup of this.#ledger.retirementCleanups?.() ?? []) {
+      await this.#finalizeRetirementCleanup(cleanup);
     }
     for (const record of records) {
       if (record.state === "owned") {
@@ -143,10 +143,14 @@ export class LaunchCoordinator {
     if (record.state !== "owned" && record.state !== "retiring") {
       throw new ContractError("launch_not_retirable", "only an owned launch can be retired", 409);
     }
+    const replayed = record.state === "retiring";
     if (record.state === "owned") {
       try { record = await this.#ledger.beginRetirement(id, keyHash); }
       catch (error) {
         if (error?.code === "retirement_key_conflict") throw retirementConflict();
+        if (error?.code === "retirement_cleanup_full") {
+          throw new ContractError("launch_retirement_capacity", "launch retirement cleanup is full", 503);
+        }
         throw error;
       }
       this.#emit(record, "retiring");
@@ -156,7 +160,7 @@ export class LaunchCoordinator {
     if (existing) return { retirement: retirementView(await existing), replayed: true };
     const operation = this.#finishRetirement(record).finally(() => this.#retirements.delete(id));
     this.#retirements.set(id, operation);
-    return { retirement: retirementView(await operation), replayed: false };
+    return { retirement: retirementView(await operation), replayed };
   }
 
   async stop() {
@@ -183,7 +187,7 @@ export class LaunchCoordinator {
   }
 
   async #finishRetirement(record) {
-    this.#registry.deactivateOwnedLaunch?.(record.id);
+    const cachedAgent = this.#registry.deactivateOwnedLaunch?.(record.id);
     await this.#refreshOwnedLaunches();
     const invocation = this.#invoke((options) => this.#registry.retireLaunch?.(
       record.request.provider,
@@ -194,7 +198,7 @@ export class LaunchCoordinator {
     void invocation.settled;
     if (["blocked", "unsupported"].includes(result?.status)) {
       const restored = await this.#ledger.cancelRetirement(record.id, record.retirementKeyHash);
-      this.#registry.activateOwnedLaunch?.(restored);
+      this.#registry.activateOwnedLaunch?.(restored, cachedAgent);
       await this.#refreshOwnedLaunches();
       this.#emit(restored, "owned");
       throw new ContractError(
@@ -214,8 +218,15 @@ export class LaunchCoordinator {
     this.#registry.deactivateOwnedLaunch?.(record.id);
     await this.#refreshOwnedLaunches();
     this.#emitRetired(completed);
-    await this.#registry.finalizeLaunchRetirement?.(completed).catch(() => {});
+    await this.#finalizeRetirementCleanup(completed);
     return completed;
+  }
+
+  async #finalizeRetirementCleanup(retirement) {
+    try {
+      await this.#registry.finalizeLaunchRetirement?.(retirement);
+      await this.#ledger.completeRetirementCleanup?.(retirement.launchId, retirement.keyHash);
+    } catch {}
   }
 
   #enqueue(id, kind, provider) {
