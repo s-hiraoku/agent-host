@@ -132,6 +132,15 @@ test("Cursor SDK Bridge configuration is explicit, loopback-only, and resolves p
     loadConfiguration({ cli: { configFile }, env: {}, homeDirectory: home }),
     /token and API key files must be separate/,
   );
+  await writeFile(configFile, JSON.stringify({
+    schemaVersion: 1,
+    enabledAdapters: ["cursor-sdk-bridge"],
+    cursorSdkBridge: { ...bridge, sdkVersion: `1.0.0-${"x".repeat(64)}` },
+  }));
+  await assert.rejects(
+    loadConfiguration({ cli: { configFile }, env: {}, homeDirectory: home }),
+    /sdkVersion must be explicit semver/,
+  );
 });
 
 test("command-line parsing preserves positional action payloads and repeated origins", () => {

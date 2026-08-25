@@ -412,6 +412,20 @@ not register it. Its bounded owned-agent contract, prompt delivery, restart-safe
 exact-run interrupt, terminal exact-run read behavior, and launch/ownership gate are documented in
 [`docs/cursor-sdk-adapter.md`](docs/cursor-sdk-adapter.md).
 
+With an explicit `cursorSdkBridge` configuration, probe only the Bridge control protocol:
+
+```bash
+node src/cli.js cursor-sdk doctor --json
+node src/cli.js cursor-sdk doctor --report ./cursor-sdk-doctor.json
+```
+
+The doctor reads the configured owner-only credential files and sends authenticated
+`Ping` and `GetVersion` calls only. It never opens Agent Host's anchored private state or
+calls an agent/run lifecycle RPC. Its success proves control-protocol and pinned-version
+compatibility, not create, prompt, cancel, or read compatibility. A Bridge may still
+record access or authentication audit logs, so “read-only” here means protocol-read-only
+with respect to Cursor agent/run state.
+
 If duplicate transcript streams are identical or exact prefixes, the longest complete
 record sequence is used. A divergent or corrupt stream disables `read` for that session.
 The adapter repeats this comparison for every read so a conflict appearing after

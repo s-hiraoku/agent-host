@@ -188,6 +188,60 @@ test("offline diagnostics writes an owner-only redacted bounded JSON bundle", as
   assert.deepEqual(bundle.versions.configSchema, publicReleaseInfo().configSchema);
 });
 
+test("cursor SDK doctor writes a private sanitized report without opening runtime state", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-host-cli-cursor-doctor-"));
+  t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));
+  const configFile = join(home, "config.json");
+  const reportFile = join(home, "doctor.json");
+  await writeFile(configFile, `${JSON.stringify({
+    schemaVersion: 1,
+    cursorSdkBridge: {
+      endpoint: "http://127.0.0.1:40555",
+      sdkVersion: "1.0.28",
+      bearerTokenFile: "bridge.token",
+      apiKeyFile: "cursor.key",
+      helperPath: "helper",
+      storeDirectory: "store",
+      provenanceFile: "provenance.json",
+      targets: [{ id: "dedicated", cwd: "workspace", profiles: ["profile"] }],
+    },
+  })}\n`, { mode: 0o600 });
+  const safeReport = Object.freeze({
+    schemaVersion: 1,
+    kind: "cursor-sdk-bridge-doctor",
+    overall: "pass",
+    checks: Object.freeze([{ id: "configuration", status: "pass" }]),
+  });
+  let diagnosedConfiguration;
+  const lines = [];
+  assert.equal(await runCli([
+    "cursor-sdk", "doctor", "--config", configFile, "--report", reportFile, "--json",
+  ], {
+    homeDirectory: home,
+    env: {},
+    output: (line) => lines.push(line),
+    diagnoseCursorSdkBridge: async (configuration) => {
+      diagnosedConfiguration = configuration;
+      return { report: safeReport, exitCode: 0 };
+    },
+  }), 0);
+  assert.equal(diagnosedConfiguration.sdkVersion, "1.0.28");
+  assert.deepEqual(JSON.parse(lines[0]), safeReport);
+  assert.deepEqual(JSON.parse(await readFile(reportFile, "utf8")), safeReport);
+  assert.equal((await lstat(reportFile)).mode & 0o777, 0o600);
+
+  let refusedDiagnoses = 0;
+  assert.equal(await runCli([
+    "cursor-sdk", "doctor", "--config", configFile, "--report", join(home, "bridge.token"), "--json",
+  ], {
+    homeDirectory: home,
+    env: {},
+    output() {},
+    diagnoseCursorSdkBridge: async () => { refusedDiagnoses += 1; return { report: safeReport, exitCode: 0 }; },
+  }), 4);
+  assert.equal(refusedDiagnoses, 0);
+});
+
 test("online diagnostics keep the same release metadata as the offline fallback", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "agent-host-cli-diagnostics-online-"));
   t.after(() => import("node:fs/promises").then(({ rm }) => rm(home, { recursive: true })));

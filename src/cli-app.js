@@ -24,6 +24,8 @@ import { fileURLToPath } from "node:url";
 import { OperationsContext, diagnosticVersions } from "./operations/context.js";
 import { createRedactor } from "./operations/redact.js";
 import { publicReleaseInfo } from "./release-info.js";
+import { diagnoseCursorSdkBridge } from "./adapters/cursor-sdk-doctor.js";
+import { serializePrivateReport, validatePrivateReportDestination } from "./private-report.js";
 
 const DEFAULT_CLI_PATH = fileURLToPath(new URL("./cli.js", import.meta.url));
 const PACKAGED_DASHBOARD_PATH = fileURLToPath(new URL("../dashboard", import.meta.url));
@@ -79,6 +81,51 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
     }
     print({ valid: true, configFile, configuration: serializableConfiguration(configuration) });
     return 0;
+  }
+  if (parsed.command === "cursor-sdk") {
+    const [operation, ...rest] = parsed.positionals;
+    if (operation !== "doctor" || rest.length) {
+      throw new Error("usage: agent-host cursor-sdk doctor [--report <file>]");
+    }
+    let reportFile;
+    if (parsed.options.reportFile) {
+      try {
+        const bridge = configuration.cursorSdkBridge;
+        reportFile = await validatePrivateReportDestination(resolve(parsed.options.reportFile), {
+          exactPaths: [
+            configFile, configuration.tokenFile, configuration.lockFile, configuration.logFile,
+            bridge?.bearerTokenFile, bridge?.apiKeyFile, bridge?.helperPath, bridge?.provenanceFile,
+          ],
+          directoryPaths: [bridge?.storeDirectory],
+        });
+      } catch {
+        print({
+          schemaVersion: 1,
+          kind: "cursor-sdk-bridge-doctor",
+          overall: "fail",
+          checks: [{ id: "reportWrite", status: "fail", reason: "report_destination_invalid" }],
+        });
+        return 4;
+      }
+    }
+    const diagnose = dependencies.diagnoseCursorSdkBridge ?? diagnoseCursorSdkBridge;
+    const result = await diagnose(configuration.cursorSdkBridge);
+    if (reportFile) {
+      try {
+        await writePrivateFileAtomic(reportFile, serializePrivateReport(result.report), {
+          tightenDirectory: false,
+        });
+      } catch {
+        print({
+          ...result.report,
+          overall: "fail",
+          checks: [...result.report.checks, { id: "reportWrite", status: "fail", reason: "report_write_failed" }],
+        });
+        return 4;
+      }
+    }
+    print(result.report);
+    return result.exitCode;
   }
   if (parsed.command === "diagnostics") {
     const outputFile = resolve(parsed.positionals[0] ?? join(paths.stateDirectory, "diagnostics.json"));

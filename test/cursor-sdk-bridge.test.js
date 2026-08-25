@@ -5,7 +5,10 @@ import { once } from "node:events";
 import { chmod, lstat, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createCursorSdkBridgeClient } from "../src/adapters/cursor-sdk-transport.js";
+import {
+  createCursorSdkBridgeClient,
+  createCursorSdkBridgeDiagnosticClient,
+} from "../src/adapters/cursor-sdk-transport.js";
 import { CursorSdkBridgeRuntimeAdapter } from "../src/adapters/cursor-sdk-runtime.js";
 import { createCursorSdkCredentialSource } from "../src/adapters/cursor-sdk.js";
 import { readStrictPrivateFileBufferBounded } from "../src/secure-state.js";
@@ -23,6 +26,31 @@ test("bridge client requires an exact literal loopback origin", () => {
   }
   const valid = client("http://127.0.0.1:1234");
   assert.match(valid.namespace, /^sdkv1-[a-f0-9]{16}$/);
+});
+
+test("diagnostic client exposes only Ping and GetVersion capability", async (t) => {
+  const calls = [];
+  const bridge = await fakeBridge((request, _body, response) => {
+    calls.push(request.url);
+    if (request.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (request.url.endsWith("/GetVersion")) {
+      return json(response, 200, { protocolVersion: "sdk.v1", bridgeVersion: "1.0.28", capabilities: [] });
+    }
+    return json(response, 500, { code: "unexpected" });
+  });
+  t.after(() => bridge.close());
+  const subject = createCursorSdkBridgeDiagnosticClient({
+    endpoint: bridge.endpoint,
+    sdkVersion: "1.0.28",
+    bearerTokenSource: createCursorSdkCredentialSource(TOKEN),
+  });
+  assert.deepEqual(Object.keys(subject).sort(), ["destroy", "inspect"]);
+  assert.deepEqual(await subject.inspect(), { protocolVersion: "sdk.v1", bridgeVersion: "1.0.28" });
+  assert.deepEqual(calls, [
+    "/sdk.v1.SdkBridgeControlService/Ping",
+    "/sdk.v1.SdkBridgeControlService/GetVersion",
+  ]);
+  await subject.destroy();
 });
 
 test("runtime preflights both credential files without repairing unsafe modes", async (t) => {
@@ -946,7 +974,8 @@ test("bridge client rejects malformed response media without interpreting it", a
 });
 
 test("official Cursor SDK Bridge conformance is available as an explicit live opt-in", {
-  skip: !liveConfiguration(),
+  skip: !liveConfiguration()
+    || process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_CONFIRMED !== "dedicated-bridge-state-mutation-confirmed-v1",
 }, async () => {
   const config = liveConfiguration();
   const subject = createCursorSdkBridgeClient({

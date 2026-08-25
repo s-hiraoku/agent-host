@@ -1,10 +1,11 @@
 import { dirname } from "node:path";
 import { openAnchoredPrivateState } from "../anchored-private-state.js";
-import { readStrictPrivateFileBufferBounded } from "../secure-state.js";
+import {
+  createCursorSdkFileCredentialSource,
+  preflightCursorSdkCredentialFile,
+} from "./cursor-sdk-credentials.js";
 import { createCursorSdkBridgeClient } from "./cursor-sdk-transport.js";
-import { CursorSdkAdapter, createCursorSdkCredentialSource } from "./cursor-sdk.js";
-
-const MAX_CREDENTIAL_BYTES = 16_384;
+import { CursorSdkAdapter } from "./cursor-sdk.js";
 
 export class CursorSdkBridgeRuntimeAdapter {
   id = "cursor-sdk";
@@ -36,11 +37,11 @@ export class CursorSdkBridgeRuntimeAdapter {
   async #create() {
     const config = this.#configuration;
     await Promise.all([
-      preflightCredentialFile(config.bearerTokenFile),
-      preflightCredentialFile(config.apiKeyFile),
+      preflightCursorSdkCredentialFile(config.bearerTokenFile),
+      preflightCursorSdkCredentialFile(config.apiKeyFile),
     ]);
-    const bearerTokenSource = fileCredentialSource(config.bearerTokenFile);
-    const credentialSource = fileCredentialSource(config.apiKeyFile);
+    const bearerTokenSource = createCursorSdkFileCredentialSource(config.bearerTokenFile);
+    const credentialSource = createCursorSdkFileCredentialSource(config.apiKeyFile);
     let bridge;
     let privateState;
     let adapter;
@@ -123,38 +124,5 @@ export class CursorSdkBridgeRuntimeAdapter {
   #required() {
     if (!this.#adapter) throw new Error("Cursor SDK Bridge runtime must be opened before use");
     return this.#adapter;
-  }
-}
-
-function fileCredentialSource(path) {
-  return createCursorSdkCredentialSource(async () => {
-    const bytes = await readStrictPrivateFileBufferBounded(path, MAX_CREDENTIAL_BYTES + 1);
-    let start = 0;
-    let end = bytes.length;
-    while (start < end && whitespace(bytes[start])) start += 1;
-    while (end > start && whitespace(bytes[end - 1])) end -= 1;
-    if (start > 0) bytes.fill(0, 0, start);
-    if (end < bytes.length) bytes.fill(0, end);
-    return bytes.subarray(start, end);
-  });
-}
-
-function whitespace(byte) {
-  return byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x20;
-}
-
-async function preflightCredentialFile(path) {
-  let bytes;
-  try {
-    bytes = await readStrictPrivateFileBufferBounded(path, MAX_CREDENTIAL_BYTES + 1);
-    let start = 0;
-    let end = bytes.length;
-    while (start < end && whitespace(bytes[start])) start += 1;
-    while (end > start && whitespace(bytes[end - 1])) end -= 1;
-    if (end - start < 8 || end - start > MAX_CREDENTIAL_BYTES) throw new Error("invalid credential");
-  } catch {
-    throw Object.assign(new Error("Cursor SDK credential unavailable"), { code: "cursor_sdk_credential_unavailable" });
-  } finally {
-    bytes?.fill(0);
   }
 }
