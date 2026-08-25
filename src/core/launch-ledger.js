@@ -323,18 +323,22 @@ function ledgerContent(records, retirements, retirementCleanups) {
 
 function projectRetirementCompletions(recordsSource, retirementsSource, cleanupsSource) {
   const records = new Map(recordsSource);
-  const retirements = new Map(retirementsSource);
   const retirementCleanups = new Map(cleanupsSource);
+  const retirementCandidates = [...retirementsSource.values()];
   for (const record of recordsSource.values()) {
     if (record.state !== "retiring") continue;
     const entry = retirementEntry(record, record.updatedAt);
     records.delete(record.id);
-    retirements.set(record.id, entry);
+    retirementCandidates.push(entry);
     retirementCleanups.set(record.id, retirementCleanup(entry));
-    while (retirements.size > MAX_RETIREMENTS) {
-      retirements.delete(retirements.keys().next().value);
-    }
   }
+  retirementCandidates.sort((left, right) => (
+    Buffer.byteLength(JSON.stringify(right)) - Buffer.byteLength(JSON.stringify(left))
+      || left.launchId.localeCompare(right.launchId)
+  ));
+  const retirements = new Map(retirementCandidates
+    .slice(0, MAX_RETIREMENTS)
+    .map((entry) => [entry.launchId, entry]));
   return { records, retirements, retirementCleanups };
 }
 

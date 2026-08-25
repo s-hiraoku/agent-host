@@ -219,6 +219,81 @@ test("retirement fencing reserves ledger capacity before provider deletion", asy
   await ledger.close();
 });
 
+test("retirement capacity reserves the largest tombstones across completion orders", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-order-capacity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const timestamp = "2026-08-25T00:00:00.000Z";
+  const identity = (index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+  const hash = (prefix, index) => `${prefix}${index.toString(36).padStart(42, "0")}`;
+  const request = (size) => ({
+    provider: "p".repeat(size), target: "t".repeat(size), profile: "p".repeat(size),
+    mode: "m".repeat(size), capabilityVersion: "v".repeat(size),
+    risk: { localMutation: true, externalBillable: false },
+  });
+  const retiring = Array.from({ length: 101 }, (_, index) => ({
+    id: `launch:${identity(index)}`, attemptId: `attempt:${identity(index)}`,
+    keyHash: hash("k", index), signature: hash("s", index),
+    request: request(index === 0 ? 100 : 1), state: "retiring",
+    requestedAt: timestamp, updatedAt: timestamp, providerAgentId: "provider", agentId: "agent",
+    retirementKeyHash: hash("r", index),
+  }));
+  const fillers = Array.from({ length: 899 }, (_, offset) => {
+    const index = offset + retiring.length;
+    return {
+      id: `launch:${identity(index)}`, attemptId: `attempt:${identity(index)}`,
+      keyHash: hash("k", index), signature: hash("s", index), request: request(1), state: "failed",
+      requestedAt: timestamp, updatedAt: timestamp, error: { code: "e", retryable: false },
+    };
+  });
+  const tombstone = (record) => ({
+    launchId: record.id, attemptId: record.attemptId, provider: record.request.provider,
+    keyHash: record.retirementKeyHash, creationKeyHash: record.keyHash, signature: record.signature,
+    request: record.request, requestedAt: record.requestedAt, retiredAt: record.updatedAt,
+  });
+  const cleanup = (entry) => ({
+    launchId: entry.launchId, attemptId: entry.attemptId, provider: entry.provider, keyHash: entry.keyHash,
+  });
+  const tombstones = retiring.map(tombstone);
+  const cleanups = tombstones.map(cleanup);
+  const projected = (retirements) => ({
+    schemaVersion: 2, records: fillers, retirements, retirementCleanups: cleanups,
+  });
+  const assumed = projected(tombstones.slice(1));
+  const targetBytes = 1_000_000 - 100;
+  let padding = targetBytes - Buffer.byteLength(`${JSON.stringify(assumed)}\n`);
+  for (const record of fillers) {
+    for (const [object, field] of [
+      [record.request, "provider"], [record.request, "target"], [record.request, "profile"],
+      [record.request, "mode"], [record.request, "capabilityVersion"], [record.error, "code"],
+    ]) {
+      const added = Math.min(99, padding);
+      object[field] += "x".repeat(added);
+      padding -= added;
+      if (padding === 0) break;
+    }
+    if (padding === 0) break;
+  }
+  assert.equal(padding, 0);
+  assert.equal(Buffer.byteLength(`${JSON.stringify(assumed)}\n`), targetBytes);
+  assert.ok(Buffer.byteLength(`${JSON.stringify(projected([
+    tombstones[0], ...tombstones.slice(1, 100),
+  ]))}\n`) > 1_000_000);
+  const content = `${JSON.stringify({
+    schemaVersion: 2, records: [...retiring, ...fillers], retirements: [], retirementCleanups: [],
+  })}\n`;
+  assert.ok(Buffer.byteLength(content) <= 1_000_000);
+  await writeFile(ledgerFile, content, { mode: 0o600 });
+
+  const ledger = new LaunchLedger(ledgerFile);
+  await ledger.open();
+  await assert.rejects(
+    ledger.transition(fillers[0].id, ["failed"], {}, timestamp),
+    /cannot reserve retirement completion capacity/,
+  );
+  await ledger.close();
+});
+
 test("ambiguous launch retirement stays fenced and resumes after restart", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-recovery-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
