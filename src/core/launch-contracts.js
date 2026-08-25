@@ -2,14 +2,14 @@ import { createHash } from "node:crypto";
 import { ContractError } from "./contracts.js";
 
 export const LAUNCH_SCHEMA_VERSION = 1;
-export const LAUNCH_STATES = new Set(["requested", "creating", "owned", "failed", "uncertain"]);
+export const LAUNCH_STATES = new Set(["requested", "creating", "owned", "retiring", "failed", "uncertain"]);
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
 const REQUEST_KEYS = new Set(["provider", "target", "profile", "mode", "confirmations"]);
 const CONFIRMATION_KEYS = new Set(["localMutation", "externalBillable"]);
 const RECORD_KEYS = new Set([
   "id", "attemptId", "keyHash", "signature", "request", "state", "providerAgentId", "agentId", "error",
-  "requestedAt", "updatedAt",
+  "retirementKeyHash", "requestedAt", "updatedAt",
 ]);
 const RESOLVED_REQUEST_KEYS = new Set(["provider", "target", "profile", "mode", "risk", "capabilityVersion"]);
 const ERROR_KEYS = new Set(["code", "retryable"]);
@@ -129,9 +129,12 @@ export function validateLaunchRecord(record) {
     || typeof record.request.risk.externalBillable !== "boolean"
     || !validTimestamp(record.requestedAt) || !validTimestamp(record.updatedAt)
     || Date.parse(record.updatedAt) < Date.parse(record.requestedAt)) return false;
-  if (record.state === "owned") {
+  if (record.state === "owned" || record.state === "retiring") {
     if (!safeId(record.providerAgentId) || !safeId(record.agentId) || record.error !== undefined) return false;
   } else if (record.providerAgentId !== undefined || record.agentId !== undefined) return false;
+  if (record.state === "retiring") {
+    if (!safeHash(record.retirementKeyHash)) return false;
+  } else if (record.retirementKeyHash !== undefined) return false;
   if (record.state === "failed" || record.state === "uncertain") {
     if (!plainObject(record.error) || hasUnknownKeys(record.error, ERROR_KEYS)
       || !safeId(record.error.code) || typeof record.error.retryable !== "boolean"

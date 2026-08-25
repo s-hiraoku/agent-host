@@ -40,6 +40,7 @@ const METHODS = Object.freeze({
   getRun: "sdk.v1.SdkAgentService/GetRun",
   getRunConversation: "sdk.v1.SdkAgentService/GetRunConversation",
   cancel: "sdk.v1.SdkAgentService/CancelRun",
+  delete: "sdk.v1.SdkAgentService/DeleteAgent",
 });
 
 export function createCursorSdkBridgeClient(options = {}) {
@@ -356,6 +357,30 @@ export function createCursorSdkBridgeClient(options = {}) {
         markDisposition(error, "cancelDisposition", disposition);
         throw error;
       }
+    },
+    async deleteLocal({ agentId, cwd, storeDirectory, credential, signal }) {
+      assertReady(ready, destroyed);
+      validateOperation(agentId, cwd, storeDirectory, "owned", credential);
+      const apiKey = credential.toString("utf8");
+      try {
+        await call(METHODS.delete, {
+          agentId,
+          options: { cwd, apiKey },
+        }, signal, (response) => {
+          if (!response || typeof response !== "object" || Array.isArray(response)
+            || Object.keys(response).length !== 0) {
+            throw bridgeError("cursor_bridge_invalid_response");
+          }
+        });
+      } catch (error) {
+        if (error?.code !== "cursor_bridge_not_found") throw error;
+      }
+      const active = activeRuns.get(agentId);
+      if (active) forgetRun(agentId, active);
+      const pending = pendingSends.get(agentId);
+      pending?.controller.abort();
+      pendingSends.delete(agentId);
+      return { agentId, deleted: true };
     },
     onChange(listener) {
       if (typeof listener !== "function") throw new TypeError("listener must be a function");

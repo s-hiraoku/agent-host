@@ -280,11 +280,26 @@ export class AgentRegistry {
     return adapter.reconcileLaunch(record, options);
   }
 
+  async retireLaunch(provider, record, options = {}) {
+    const adapter = this.#launchAdapter(provider);
+    if (!adapter?.retireLaunch) return { status: "unsupported" };
+    return adapter.retireLaunch(record, options);
+  }
+
+  async finalizeLaunchRetirement(retirement) {
+    const adapter = this.#launchAdapter(retirement?.provider);
+    await adapter?.finalizeLaunchRetirement?.(retirement);
+  }
+
   activateOwnedLaunch(record) {
     if (record?.state !== "owned" || typeof record.id !== "string" || typeof record.agentId !== "string") {
       throw new TypeError("owned launch record is required");
     }
     this.#ownedLaunches.set(record.id, structuredClone(record));
+  }
+
+  deactivateOwnedLaunch(id) {
+    this.#ownedLaunches.delete(id);
   }
 
   #launchAdapter(provider) {

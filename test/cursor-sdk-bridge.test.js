@@ -973,6 +973,40 @@ test("bridge client rejects malformed response media without interpreting it", a
   await subject.destroy();
 });
 
+test("bridge client deletes only one exact owned local agent and accepts an absent replay", async (t) => {
+  const requests = [];
+  let missing = false;
+  const bridge = await fakeBridge(async (req, body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    requests.push({ url: req.url, body });
+    if (missing) return json(response, 404, { code: "not_found" });
+    missing = true;
+    return json(response, 200, {});
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  const input = {
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  };
+  assert.deepEqual(await subject.deleteLocal(input), { agentId: "agent-owned", deleted: true });
+  assert.deepEqual(await subject.deleteLocal({ ...input, credential: Buffer.from(API_KEY) }), {
+    agentId: "agent-owned", deleted: true,
+  });
+  assert.deepEqual(requests, [{
+    url: "/sdk.v1.SdkAgentService/DeleteAgent",
+    body: { agentId: "agent-owned", options: { cwd: "/workspace", apiKey: API_KEY } },
+  }, {
+    url: "/sdk.v1.SdkAgentService/DeleteAgent",
+    body: { agentId: "agent-owned", options: { cwd: "/workspace", apiKey: API_KEY } },
+  }]);
+  await subject.destroy();
+});
+
 test("official Cursor SDK Bridge conformance is available as an explicit live opt-in", {
   skip: !liveConfiguration()
     || process.env.AGENT_HOST_CURSOR_BRIDGE_TEST_CONFIRMED !== "dedicated-bridge-state-mutation-confirmed-v1",

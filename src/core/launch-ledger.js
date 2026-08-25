@@ -6,10 +6,14 @@ import { acquireInstanceLock } from "../instance-lock.js";
 const MAX_LEDGER_BYTES = 1_000_000;
 const MAX_RECORDS = 1_000;
 const MAX_PENDING = 32;
+const LEDGER_SCHEMA_VERSION = 2;
+const MAX_RETIREMENTS = 100;
+const SAFE_HASH = /^[A-Za-z0-9_-]{43}$/;
 
 export class LaunchLedger {
   #path;
   #records = new Map();
+  #retirements = new Map();
   #tail = Promise.resolve();
   #opened = false;
   #lease;
@@ -30,11 +34,14 @@ export class LaunchLedger {
         try { parsed = JSON.parse(await readPrivateFileBounded(this.#path, MAX_LEDGER_BYTES)); }
         catch (error) {
           if (error?.code !== "ENOENT") throw new Error("launch ledger is invalid or unavailable", { cause: error });
-          parsed = { schemaVersion: LAUNCH_SCHEMA_VERSION, records: [] };
+          parsed = { schemaVersion: LEDGER_SCHEMA_VERSION, records: [], retirements: [] };
           await writePrivateFileAtomic(this.#path, `${JSON.stringify(parsed)}\n`);
         }
-        if (!parsed || parsed.schemaVersion !== LAUNCH_SCHEMA_VERSION || !Array.isArray(parsed.records)
-          || parsed.records.length > MAX_RECORDS || parsed.records.some((record) => !validateLaunchRecord(record))) {
+        const legacy = parsed?.schemaVersion === LAUNCH_SCHEMA_VERSION && parsed.retirements === undefined;
+        if (!parsed || (!legacy && parsed.schemaVersion !== LEDGER_SCHEMA_VERSION) || !Array.isArray(parsed.records)
+          || parsed.records.length > MAX_RECORDS || parsed.records.some((record) => !validateLaunchRecord(record))
+          || (!legacy && (!Array.isArray(parsed.retirements) || parsed.retirements.length > MAX_RETIREMENTS
+            || parsed.retirements.some((entry) => !validRetirement(entry))))) {
           throw new Error("launch ledger has an unsupported or malformed schema");
         }
         const records = new Map();
@@ -45,9 +52,19 @@ export class LaunchLedger {
           keys.add(record.keyHash);
         }
         this.#records = records;
+        const retirements = parsed.retirements ?? [];
+        if (new Set(retirements.map((entry) => entry.launchId)).size !== retirements.length
+          || retirements.some((entry) => records.has(entry.launchId))) {
+          throw new Error("launch ledger contains duplicate retirement records");
+        }
+        this.#retirements = new Map(retirements.map((entry) => [entry.launchId, structuredClone(entry)]));
         this.#opened = true;
+        if (legacy) await this.#persist();
         return this.list();
       } catch (error) {
+        this.#opened = false;
+        this.#records.clear();
+        this.#retirements.clear();
         await this.#lease.release().catch(() => {});
         this.#lease = undefined;
         throw error;
@@ -60,6 +77,7 @@ export class LaunchLedger {
       if (!this.#opened) return;
       this.#opened = false;
       this.#records.clear();
+      this.#retirements.clear();
       await this.#lease?.release();
       this.#lease = undefined;
     });
@@ -80,6 +98,85 @@ export class LaunchLedger {
     this.#assertOpen();
     const record = [...this.#records.values()].find((entry) => entry.keyHash === keyHash);
     return record ? structuredClone(record) : undefined;
+  }
+
+  retirement(id) {
+    this.#assertOpen();
+    const entry = this.#retirements.get(id);
+    return entry ? structuredClone(entry) : undefined;
+  }
+
+  retirements() {
+    this.#assertOpen();
+    return [...this.#retirements.values()].map((entry) => structuredClone(entry));
+  }
+
+  async beginRetirement(id, keyHash, now = new Date().toISOString()) {
+    if (!SAFE_HASH.test(keyHash ?? "")) throw new TypeError("invalid retirement idempotency hash");
+    return this.#exclusive(async () => {
+      this.#assertOpen();
+      const current = this.#records.get(id);
+      if (!current) return undefined;
+      if (current.state === "retiring") return structuredClone(current);
+      if (current.state !== "owned") throw new Error("only owned launches can be retired");
+      const next = {
+        ...current,
+        state: "retiring",
+        retirementKeyHash: keyHash,
+        updatedAt: laterTimestamp(current.updatedAt, now),
+      };
+      if (!validateLaunchRecord(next)) throw new Error("invalid launch retirement transition");
+      this.#records.set(id, next);
+      try { await this.#persist(); }
+      catch (error) { this.#records.set(id, current); throw error; }
+      return structuredClone(next);
+    });
+  }
+
+  async completeRetirement(id, now = new Date().toISOString()) {
+    return this.#exclusive(async () => {
+      this.#assertOpen();
+      const current = this.#records.get(id);
+      if (!current || current.state !== "retiring") throw new Error("launch retirement is not fenced");
+      const entry = {
+        launchId: current.id,
+        attemptId: current.attemptId,
+        provider: current.request.provider,
+        keyHash: current.retirementKeyHash,
+        retiredAt: now,
+      };
+      if (!validRetirement(entry)) throw new Error("invalid launch retirement tombstone");
+      const previousRetirements = new Map(this.#retirements);
+      this.#records.delete(id);
+      this.#retirements.set(id, entry);
+      while (this.#retirements.size > MAX_RETIREMENTS) {
+        this.#retirements.delete(this.#retirements.keys().next().value);
+      }
+      try { await this.#persist(); }
+      catch (error) {
+        this.#records.set(id, current);
+        this.#retirements = previousRetirements;
+        throw error;
+      }
+      return structuredClone(entry);
+    });
+  }
+
+  async cancelRetirement(id, keyHash, now = new Date().toISOString()) {
+    return this.#exclusive(async () => {
+      this.#assertOpen();
+      const current = this.#records.get(id);
+      if (!current || current.state !== "retiring" || current.retirementKeyHash !== keyHash) {
+        throw new Error("launch retirement fence does not match");
+      }
+      const next = { ...current, state: "owned", updatedAt: laterTimestamp(current.updatedAt, now) };
+      delete next.retirementKeyHash;
+      if (!validateLaunchRecord(next)) throw new Error("invalid launch retirement rollback");
+      this.#records.set(id, next);
+      try { await this.#persist(); }
+      catch (error) { this.#records.set(id, current); throw error; }
+      return structuredClone(next);
+    });
   }
 
   async reserve({ keyHash, signature, request, now = new Date().toISOString() }) {
@@ -128,7 +225,11 @@ export class LaunchLedger {
   #assertOpen() { if (!this.#opened) throw new Error("launch ledger is not open"); }
 
   async #persist() {
-    const content = `${JSON.stringify({ schemaVersion: LAUNCH_SCHEMA_VERSION, records: [...this.#records.values()] })}\n`;
+    const content = `${JSON.stringify({
+      schemaVersion: LEDGER_SCHEMA_VERSION,
+      records: [...this.#records.values()],
+      retirements: [...this.#retirements.values()],
+    })}\n`;
     if (Buffer.byteLength(content) > MAX_LEDGER_BYTES) throw new Error("launch ledger exceeds its size limit");
     await writePrivateFileAtomic(this.#path, content);
   }
@@ -138,4 +239,17 @@ export class LaunchLedger {
     this.#tail = next.catch(() => {});
     return next;
   }
+}
+
+function validRetirement(entry) {
+  return entry && typeof entry === "object" && !Array.isArray(entry)
+    && Object.keys(entry).every((key) => ["launchId", "attemptId", "provider", "keyHash", "retiredAt"].includes(key))
+    && /^launch:[0-9a-f-]{36}$/.test(entry.launchId ?? "")
+    && /^attempt:[0-9a-f-]{36}$/.test(entry.attemptId ?? "")
+    && /^[A-Za-z0-9._:-]{1,100}$/.test(entry.provider ?? "")
+    && SAFE_HASH.test(entry.keyHash ?? "") && Number.isFinite(Date.parse(entry.retiredAt));
+}
+
+function laterTimestamp(previous, candidate) {
+  return Date.parse(candidate) < Date.parse(previous) ? previous : candidate;
 }

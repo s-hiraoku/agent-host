@@ -45,3 +45,7 @@ that owned agent after an Agent Host prompt; it returns bounded user/assistant t
 It does not list, infer, or stream runs and cannot read arbitrary existing Cursor desktop
 sessions. Approval, focus, archive, delete, and cloud mode are not advertised. See
 `docs/cursor-sdk-adapter.md` and `docs/spikes/cursor-sdk.md`.
+
+The agent capability model still does not advertise delete. An authenticated explicit
+launch-retirement endpoint may call the official local `DeleteAgent` RPC only for an exact
+Agent Host-owned terminal agent behind matching launch/provenance fences.

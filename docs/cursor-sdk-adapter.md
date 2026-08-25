@@ -114,9 +114,23 @@ bounded suffix is returned in conversation order with `truncated: true`; raw con
 documents and text are never logged or persisted by Agent Host. A run that is still
 creating or working cannot be read.
 
+An authenticated launch retirement is separate from the agent action capability model.
+It requires the exact owned launch ID, an idempotency key, and
+`confirmDeleteOwnedAgentAndState: true`. Before deletion the adapter rechecks the
+launch/provenance/configuration agreement, agent identity, idle/error state, and exact
+terminal run when a run is recorded. It then writes a private `retiring` fence before
+calling official `DeleteAgent` with that one agent ID, cwd, and API key. A not-found
+response is accepted only while recovering the same fenced deletion. An ambiguous result
+keeps the launch fenced and absent from discovery; Agent Host never removes either
+ownership record on ambiguity. After confirmed deletion it marks provenance retired,
+atomically replaces the launch record with a bounded replay tombstone, and finally removes
+the matching retired provenance. Startup resumes fenced work and cleans a provenance
+tombstone only when the launch ledger already proves completion. No age-based or recursive
+store cleanup occurs.
+
 The adapter never calls `ListAgents`, `ListRuns`, `ListAgentMessages`, or `ObserveRun`,
 adopts arbitrary Bridge agents, guesses a latest run, or correlates desktop
-conversations. Live reads, archive, delete, cloud mode, managed Bridge lifecycle, and
+conversations. Live reads, archive, agent-action delete, cloud mode, managed Bridge lifecycle, and
 existing Cursor desktop sessions remain out of scope. Transport failures after
 `CreateAgent` are uncertain and are not retried.
 
@@ -216,7 +230,8 @@ When directly composed with `AgentRegistry`, the adapter:
   proves that run is still working;
 - advertises read only for the exact terminal run durably recorded from a successful
   Agent Host prompt;
-- leaves approval, focus, archive, delete, live-read, and cloud operations absent.
+- leaves approval, focus, archive, agent-action delete, live-read, and cloud operations absent;
+  retirement remains a separate launch-scoped operation with destructive confirmation.
 
 The private provenance file contains opaque target/profile identifiers, exact SDK
 version, the bridge namespace, a hash-derived store scope, canonical-target digest,

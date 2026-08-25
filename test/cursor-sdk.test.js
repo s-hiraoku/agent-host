@@ -26,6 +26,42 @@ test("Cursor SDK adapter is explicit-injection only and advertises both local ri
   assert.deepEqual(await fixture.adapter.discover(), []);
 });
 
+test("Cursor SDK retires only an exact terminal owned agent behind a durable fence", async (t) => {
+  let status = "idle";
+  let deletes = 0;
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status }; },
+    async deleteLocal({ agentId }) {
+      deletes += 1;
+      fixture.agents.delete(agentId);
+      return { agentId, deleted: true };
+    },
+  });
+  const owned = await fixture.adapter.launch(resolvedRequest(), {
+    attemptId: ATTEMPT_ID, launchId: LAUNCH_ID,
+  });
+  const retirementKeyHash = "r".repeat(43);
+  const retiring = { ...ledgerRecord(owned), state: "retiring", retirementKeyHash };
+  status = "working";
+  assert.deepEqual(await fixture.adapter.retireLaunch(retiring), {
+    status: "blocked", code: "cursor_agent_not_terminal",
+  });
+  assert.equal(deletes, 0);
+  status = "idle";
+  assert.deepEqual(await fixture.adapter.retireLaunch(retiring), { status: "retired" });
+  assert.equal(deletes, 1);
+  let state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].state, "retired");
+  assert.equal(state.records[0].retirementKeyHash, retirementKeyHash);
+  assert.deepEqual(await fixture.adapter.retireLaunch(retiring), { status: "retired" });
+  assert.equal(deletes, 1);
+  await fixture.adapter.finalizeLaunchRetirement({
+    provider: "cursor", attemptId: ATTEMPT_ID, keyHash: retirementKeyHash,
+  });
+  state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.deepEqual(state.records, []);
+});
+
 test("Cursor SDK credential sources are explicit, bounded, and opaque to serialization", async () => {
   for (const value of [undefined, null, {}, [], "", "short", "x".repeat(16_385)]) {
     assert.throws(

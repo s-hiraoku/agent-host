@@ -71,6 +71,133 @@ test("launch coordinator persists idempotency and converges concurrent requests"
   await coordinator.stop();
 });
 
+test("launch retirement fences provider deletion and replays from a bounded tombstone", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let retireCalls = 0;
+  let deactivated;
+  let finalized;
+  const registry = fixtureRegistry();
+  registry.retireLaunch = async (...args) => {
+    retireCalls += 1;
+    assert.equal(args[1].state, "retiring");
+    return { status: "retired" };
+  };
+  registry.deactivateOwnedLaunch = (id) => { deactivated = id; };
+  registry.finalizeLaunchRetirement = async (entry) => { finalized = entry; };
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile: join(directory, "launches.json") });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "retirement-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  const payload = { confirmDeleteOwnedAgentAndState: true };
+  const first = await coordinator.retire(accepted.launch.id, payload, "retirement-delete-key");
+  assert.equal(first.replayed, false);
+  assert.equal(first.retirement.state, "retired");
+  assert.equal(coordinator.get(accepted.launch.id), undefined);
+  assert.equal(deactivated, accepted.launch.id);
+  assert.equal(finalized.launchId, accepted.launch.id);
+  const replay = await coordinator.retire(accepted.launch.id, payload, "retirement-delete-key");
+  assert.equal(replay.replayed, true);
+  assert.deepEqual(replay.retirement, first.retirement);
+  assert.equal(retireCalls, 1);
+  await assert.rejects(
+    coordinator.retire(accepted.launch.id, payload, "different-retirement-key"),
+    (error) => error.code === "idempotency_conflict",
+  );
+  await coordinator.stop();
+});
+
+test("ambiguous launch retirement stays fenced and resumes after restart", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-recovery-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const firstRegistry = fixtureRegistry();
+  firstRegistry.retireLaunch = async () => ({ status: "uncertain" });
+  firstRegistry.deactivateOwnedLaunch = () => {};
+  const first = new LaunchCoordinator(firstRegistry, { ledgerFile });
+  await first.start();
+  const accepted = await first.submit(LOCAL_REQUEST, "recovery-launch-key");
+  await waitFor(() => first.get(accepted.launch.id)?.state === "owned");
+  const confirmation = { confirmDeleteOwnedAgentAndState: true };
+  await assert.rejects(
+    first.retire(accepted.launch.id, confirmation, "recovery-retirement-key"),
+    (error) => error.code === "launch_retirement_uncertain" && error.status === 503,
+  );
+  assert.equal(first.get(accepted.launch.id).state, "retiring");
+  await first.stop();
+
+  let resumed = 0;
+  let finalized;
+  const secondRegistry = fixtureRegistry();
+  secondRegistry.retireLaunch = async (_provider, record) => {
+    resumed += 1;
+    assert.equal(record.state, "retiring");
+    return { status: "retired" };
+  };
+  secondRegistry.deactivateOwnedLaunch = () => {};
+  secondRegistry.finalizeLaunchRetirement = async (entry) => { finalized = entry; };
+  const second = new LaunchCoordinator(secondRegistry, { ledgerFile });
+  await second.start();
+  await waitFor(() => second.get(accepted.launch.id) === undefined && finalized);
+  assert.equal(resumed, 1);
+  const replay = await second.retire(
+    accepted.launch.id, confirmation, "recovery-retirement-key",
+  );
+  assert.equal(replay.replayed, true);
+  await second.stop();
+});
+
+test("a pre-delete retirement refusal restores owned launch state", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-blocked-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const registry = fixtureRegistry();
+  registry.retireLaunch = async () => ({ status: "blocked", code: "agent_working" });
+  registry.deactivateOwnedLaunch = () => {};
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile: join(directory, "launches.json") });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "blocked-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  await assert.rejects(
+    coordinator.retire(
+      accepted.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "blocked-retirement-key",
+    ),
+    (error) => error.code === "launch_not_retirable" && error.status === 409,
+  );
+  assert.equal(coordinator.get(accepted.launch.id).state, "owned");
+  await coordinator.stop();
+});
+
+test("concurrent retirement cannot cross-replay a different idempotency key", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-race-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let release;
+  let calls = 0;
+  const registry = fixtureRegistry();
+  registry.retireLaunch = async () => {
+    calls += 1;
+    await new Promise((resolve) => { release = resolve; });
+    return { status: "retired" };
+  };
+  registry.deactivateOwnedLaunch = () => {};
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile: join(directory, "launches.json") });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "race-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  const confirmation = { confirmDeleteOwnedAgentAndState: true };
+  const first = coordinator.retire(accepted.launch.id, confirmation, "race-retirement-key-a");
+  await waitFor(() => calls === 1);
+  await assert.rejects(
+    coordinator.retire(accepted.launch.id, confirmation, "race-retirement-key-b"),
+    (error) => error.code === "idempotency_conflict",
+  );
+  release();
+  assert.equal((await first).retirement.state, "retired");
+  assert.equal(calls, 1);
+  await coordinator.stop();
+});
+
 test("uncertain launch delivery is reconciled without blind create retry", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-uncertain-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -409,6 +536,70 @@ test("HTTP disconnect does not cancel an issued launch", async (t) => {
   finish();
   await waitFor(() => coordinator.get(issuedRecord.id)?.state === "owned" && registry.owned.length === 1);
   await server.stop();
+});
+
+test("authenticated launch retirement route requires JSON confirmation and an idempotency key", async () => {
+  const registry = new AgentRegistry([new DemoAdapter()]);
+  const audits = [];
+  registry.events.subscribe((event) => { if (event.type === "audit.action") audits.push(event); });
+  const calls = [];
+  const launchCoordinator = {
+    capabilities: () => ({ version: "1", providers: [] }),
+    async start() {},
+    async stop() {},
+    get() {},
+    async submit() {},
+    async retire(id, payload, key) {
+      calls.push({ id, payload, key });
+      if (!key) throw Object.assign(new Error("missing"), {
+        name: "ContractError", code: "invalid_idempotency_key", status: 400,
+      });
+      return {
+        retirement: { launchId: id, state: "retired", retiredAt: "2026-08-25T00:00:00.000Z" },
+        replayed: false,
+      };
+    },
+  };
+  const server = createAgentServer(registry, {
+    host: "127.0.0.1", port: 0, refreshMs: 60_000, apiToken: TOKEN, launchCoordinator,
+  });
+  const address = await server.start();
+  const endpoint = `http://127.0.0.1:${address.port}/v1/launches/${encodeURIComponent("launch:owned")}/retire`;
+  try {
+    assert.equal((await fetch(endpoint, {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    })).status, 401);
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { ...AUTH, "content-type": "application/json", "idempotency-key": "retire-route-key" },
+      body: JSON.stringify({ confirmDeleteOwnedAgentAndState: true }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    assert.deepEqual(await response.json(), {
+      apiVersion: "1",
+      retirement: {
+        launchId: "launch:owned", state: "retired", retiredAt: "2026-08-25T00:00:00.000Z",
+      },
+      replayed: false,
+    });
+    assert.deepEqual(calls, [{
+      id: "launch:owned",
+      payload: { confirmDeleteOwnedAgentAndState: true },
+      key: "retire-route-key",
+    }]);
+    assert.deepEqual(audits.map(({ phase, agentId, action, ok, replayed }) => ({
+      phase, agentId, action, ok, replayed,
+    })), [{
+      phase: "attempted", agentId: "launch:owned", action: "retire-launch", ok: undefined, replayed: undefined,
+    }, {
+      phase: "completed", agentId: "launch:owned", action: "retire-launch", ok: true, replayed: false,
+    }]);
+    assert.equal(JSON.stringify(audits).includes("confirmDeleteOwnedAgentAndState"), false);
+    assert.equal(JSON.stringify(audits).includes("retire-route-key"), false);
+  } finally {
+    await server.stop();
+  }
 });
 
 test("authenticated launch API exposes only ledger-owned demo agents across restart", async (t) => {

@@ -50,6 +50,7 @@ GET  /v1/adapters
 GET  /v1/capabilities
 POST /v1/launches                       # explicit provider-owned agent creation
 GET  /v1/launches/:id                  # durable launch state
+POST /v1/launches/:id/retire           { "confirmDeleteOwnedAgentAndState": true }
 GET  /v1/diagnostics                   # authenticated, sanitized, bounded operations snapshot
 GET  /v1/agents                        # bounded summaries; default limit 50, maximum 200
 GET  /v1/agents/:id
@@ -89,13 +90,20 @@ must acknowledge both server-resolved risk flags exactly:
 
 `POST /v1/launches` requires the same authentication, JSON content type, and
 `Idempotency-Key` rules as actions. It returns `202 Accepted` and a `Location` for the
-durable launch resource. States are `requested`, `creating`, `owned`, `failed`, and
-`uncertain`. A timeout, shutdown, or transport loss after provider invocation becomes
+durable launch resource. States are `requested`, `creating`, `owned`, `retiring`, `failed`,
+and `uncertain`. A timeout, shutdown, or transport loss after provider invocation becomes
 `uncertain` and is never blindly reissued. Only an `owned` ledger record can introduce
 its exact agent ID through the adapter's separate owned-discovery boundary. Idempotency
-key values are hashed before persistence; launch records are owner-only, bounded at
-1,000, and retained rather than automatically expired so an old key cannot silently
-duplicate execution or spend. The deterministic demo provider exercises local-mutation
+key values are hashed before persistence; launch records are owner-only and bounded at
+1,000. They are never expired by age, so an old key cannot silently duplicate execution
+or spend. An adapter may separately implement explicit retirement for an exact owned
+launch. `POST /v1/launches/:id/retire` requires JSON, a new `Idempotency-Key`, and the
+literal destructive confirmation shown above. Cursor SDK retirement is admitted only
+after exact terminal proof. It persists a fence, deletes that one durable Bridge agent,
+then removes the matching launch and provenance records. Ambiguous deletion remains
+`retiring`, hidden from discovery, and resumes safely after restart; it never deletes a
+directory or unrelated agent. The latest 100 completed retirement keys are retained as
+bounded replay tombstones. The deterministic demo provider exercises local-mutation
 and external/billable confirmations without changing files or contacting a provider.
 
 Launch adapters are trusted host code. They must expose launched agents only through

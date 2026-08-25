@@ -24,6 +24,7 @@ export class LaunchCoordinator {
   #active = new Map();
   #activeProviders = new Map();
   #controllers = new Set();
+  #retirements = new Map();
   #draining = false;
   #started = false;
 
@@ -42,6 +43,9 @@ export class LaunchCoordinator {
     const records = await this.#ledger.open();
     this.#capabilities = normalizeLaunchCapabilities(this.#registry.launchCapabilities?.() ?? []);
     this.#started = true;
+    for (const retirement of this.#ledger.retirements?.() ?? []) {
+      await this.#registry.finalizeLaunchRetirement?.(retirement).catch(() => {});
+    }
     for (const record of records) {
       if (record.state === "owned") {
         this.#registry.activateOwnedLaunch?.(record);
@@ -55,6 +59,8 @@ export class LaunchCoordinator {
         this.#enqueue(uncertain.id, "reconcile", uncertain.request.provider);
       } else if (record.state === "uncertain") {
         this.#enqueue(record.id, "reconcile", record.request.provider);
+      } else if (record.state === "retiring") {
+        void this.#resumeRetirement(record);
       }
     }
     this.#pump();
@@ -100,12 +106,44 @@ export class LaunchCoordinator {
     return { launch: launchView(reserved.record), replayed: !reserved.created };
   }
 
+  async retire(id, payload, key) {
+    this.#assertStarted();
+    if (this.#draining) throw new ContractError("shutting_down", "agent-host is shutting down", 503);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)
+      || Object.keys(payload).length !== 1 || payload.confirmDeleteOwnedAgentAndState !== true) {
+      throw new ContractError(
+        "invalid_retirement_confirmation",
+        "confirmDeleteOwnedAgentAndState must be true",
+      );
+    }
+    const keyHash = launchKeyHash(validateIdempotencyKey(key));
+    const completed = this.#ledger.retirement?.(id);
+    if (completed) {
+      if (completed.keyHash !== keyHash) throw retirementConflict();
+      return { retirement: retirementView(completed), replayed: true };
+    }
+    let record = this.#ledger.get(id);
+    if (!record) throw new ContractError("launch_not_found", "launch not found", 404);
+    if (record.state === "retiring" && record.retirementKeyHash !== keyHash) throw retirementConflict();
+    if (record.state !== "owned" && record.state !== "retiring") {
+      throw new ContractError("launch_not_retirable", "only an owned launch can be retired", 409);
+    }
+    if (record.state === "owned") record = await this.#ledger.beginRetirement(id, keyHash);
+    if (record.retirementKeyHash !== keyHash) throw retirementConflict();
+    const existing = this.#retirements.get(id);
+    if (existing) return { retirement: retirementView(await existing), replayed: true };
+    const operation = this.#finishRetirement(record).finally(() => this.#retirements.delete(id));
+    this.#retirements.set(id, operation);
+    return { retirement: retirementView(await operation), replayed: false };
+  }
+
   async stop() {
     if (this.#draining) return;
     this.#draining = true;
     this.#queue = [];
     this.#queued.clear();
     for (const controller of this.#controllers) controller.abort(new Error("agent-host is shutting down"));
+    await Promise.allSettled([...this.#retirements.values()]);
     const active = [...this.#active.values()];
     await Promise.allSettled(active.map((entry) => entry.stateReady));
     this.#updateGauge();
@@ -113,6 +151,47 @@ export class LaunchCoordinator {
     else void Promise.allSettled(active.map((entry) => entry.task))
       .then(() => this.#ledger.close?.())
       .catch(() => {});
+  }
+
+  async #resumeRetirement(record) {
+    if (this.#retirements.has(record.id) || this.#draining) return;
+    const operation = this.#finishRetirement(record).finally(() => this.#retirements.delete(record.id));
+    this.#retirements.set(record.id, operation);
+    await operation.catch(() => {});
+  }
+
+  async #finishRetirement(record) {
+    this.#registry.deactivateOwnedLaunch?.(record.id);
+    await this.#registry.refresh?.({ force: true });
+    const invocation = this.#invoke((options) => this.#registry.retireLaunch?.(
+      record.request.provider,
+      record,
+      options,
+    ));
+    const result = await invocation.result.catch(() => ({ status: "uncertain" }));
+    void invocation.settled;
+    if (["blocked", "unsupported"].includes(result?.status)) {
+      const restored = await this.#ledger.cancelRetirement(record.id, record.retirementKeyHash);
+      this.#registry.activateOwnedLaunch?.(restored);
+      await this.#registry.refresh?.({ force: true });
+      throw new ContractError(
+        "launch_not_retirable",
+        "owned launch is not currently safe to retire",
+        409,
+      );
+    }
+    if (result?.status !== "retired") {
+      throw new ContractError(
+        "launch_retirement_uncertain",
+        "owned launch retirement could not be confirmed",
+        503,
+      );
+    }
+    const completed = await this.#ledger.completeRetirement(record.id);
+    this.#registry.deactivateOwnedLaunch?.(record.id);
+    await this.#registry.refresh?.({ force: true });
+    await this.#registry.finalizeLaunchRetirement?.(completed).catch(() => {});
+    return completed;
   }
 
   #enqueue(id, kind, provider) {
@@ -278,6 +357,7 @@ export class DisabledLaunchCoordinator {
   async stop() {}
   get() { return undefined; }
   async submit() { throw new ContractError("launch_unavailable", "launch service is unavailable", 503); }
+  async retire() { throw new ContractError("launch_unavailable", "launch service is unavailable", 503); }
 }
 
 function safeCode(value, fallback) {
@@ -310,6 +390,18 @@ function normalizeProviderResult(result) {
     return { status: "uncertain", code: safeCode(result.code, "launch_delivery_uncertain") };
   }
   return { status: "uncertain", code: "launch_invalid_result" };
+}
+
+function retirementConflict() {
+  return new ContractError(
+    "idempotency_conflict",
+    "Idempotency-Key was already used for this retirement",
+    409,
+  );
+}
+
+function retirementView(entry) {
+  return { launchId: entry.launchId, state: "retired", retiredAt: entry.retiredAt };
 }
 
 function isSafeId(value) {
