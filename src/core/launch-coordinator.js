@@ -28,6 +28,7 @@ export class LaunchCoordinator {
   #retirementQueue = [];
   #activeRetirements = new Map();
   #retirementPreparations = new Map();
+  #retirementAdmissionFences = new Map();
   #latePreparationRollbacks = new Set();
   #cleanupQueue = [];
   #queuedCleanups = new Set();
@@ -97,7 +98,8 @@ export class LaunchCoordinator {
     this.#assertStarted();
     if (this.#draining) throw new ContractError("shutting_down", "agent-host is shutting down", 503);
     const keyHash = launchKeyHash(validateIdempotencyKey(key));
-    if (this.#ledger.findByRetirementKeyHash?.(keyHash)
+    if (this.#retirementAdmissionFences.has(keyHash)
+      || this.#ledger.findByRetirementKeyHash?.(keyHash)
       || this.#ledger.findRetirementByKeyHash?.(keyHash)) {
       throw new ContractError("idempotency_conflict", "Idempotency-Key was already used for a different request", 409);
     }
@@ -160,6 +162,8 @@ export class LaunchCoordinator {
       );
     }
     const keyHash = launchKeyHash(validateIdempotencyKey(key));
+    const admissionFence = this.#retirementAdmissionFences.get(keyHash);
+    if (admissionFence !== undefined && admissionFence !== id) throw retirementConflict();
     if (this.#ledger.findByKeyHash?.(keyHash)
       || this.#ledger.findRetirementByCreationKeyHash?.(keyHash)) throw retirementConflict();
     const completed = this.#ledger.retirement?.(id);
@@ -316,11 +320,19 @@ export class LaunchCoordinator {
       try { record = await this.#ledger.beginRetirement(record.id, keyHash); }
       catch (error) {
         if (providerPrepared || preparationUncertain) {
+          this.#retirementAdmissionFences.set(keyHash, record.id);
           const release = this.#invoke((options) => (
             this.#registry.cancelLaunchRetirementPreparation?.(
               record.request.provider, record, { ...options, keyHash },
             )
           ));
+          entry.settled = release.settled;
+          void release.outcome.then((outcome) => {
+            if (outcome.status === "fulfilled" && outcome.value === true
+              && this.#retirementAdmissionFences.get(keyHash) === record.id) {
+              this.#retirementAdmissionFences.delete(keyHash);
+            }
+          });
           const released = await release.result.catch(() => false);
           if (released !== true) {
             throw new ContractError(
@@ -329,12 +341,18 @@ export class LaunchCoordinator {
               503,
             );
           }
+          if (this.#retirementAdmissionFences.get(keyHash) === record.id) {
+            this.#retirementAdmissionFences.delete(keyHash);
+          }
         }
         if (error?.code === "retirement_key_conflict") throw retirementConflict();
         if (error?.code === "retirement_cleanup_full") {
           throw new ContractError("launch_retirement_capacity", "launch retirement cleanup is full", 503);
         }
         throw error;
+      }
+      if (this.#retirementAdmissionFences.get(keyHash) === record.id) {
+        this.#retirementAdmissionFences.delete(keyHash);
       }
       this.#emit(record, "retiring");
       if (preparationUncertain) {
