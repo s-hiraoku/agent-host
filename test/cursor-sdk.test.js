@@ -121,6 +121,27 @@ test("Cursor SDK reserves the complete provenance retirement fence before deleti
   assert.equal(state.records[0].deleteAttempted, undefined);
 });
 
+test("Cursor SDK startup releases a provider-only retirement reservation", async (t) => {
+  const fixture = await makeFixture(t, {
+    async deleteLocal({ agentId }) { return { agentId, deleted: true }; },
+  });
+  const owned = await fixture.adapter.launch(resolvedRequest(), {
+    attemptId: ATTEMPT_ID, launchId: LAUNCH_ID,
+  });
+  const record = ledgerRecord(owned);
+  assert.deepEqual(await fixture.adapter.prepareLaunchRetirement(record, {
+    keyHash: "r".repeat(43),
+  }), { status: "prepared" });
+
+  assert.equal(await fixture.adapter.recoverLaunchRetirementPreparations([record]), true);
+  assert.deepEqual(await fixture.adapter.prepareLaunchRetirement(record, {
+    keyHash: "x".repeat(43),
+  }), { status: "prepared" });
+  const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].retirementKeyHash, "x".repeat(43));
+  assert.equal(state.records[0].retirementReserved, true);
+});
+
 test("Cursor SDK restores owned provenance when the first delete is definitively rejected", async (t) => {
   const fixture = await makeFixture(t, {
     async getLocal({ agentId }) { return { agentId, status: "idle" }; },

@@ -299,6 +299,23 @@ export class AgentRegistry {
     return await adapter.cancelLaunchRetirementPreparation(record, options) === true;
   }
 
+  async recoverLaunchRetirementPreparations(records, options = {}) {
+    const byProvider = new Map();
+    for (const record of records) {
+      const group = byProvider.get(record.request.provider) ?? [];
+      group.push(record);
+      byProvider.set(record.request.provider, group);
+    }
+    for (const [provider, providerRecords] of byProvider) {
+      const adapter = this.#launchAdapter(provider);
+      if (typeof adapter?.recoverLaunchRetirementPreparations !== "function") continue;
+      if (await adapter.recoverLaunchRetirementPreparations(
+        providerRecords.map((record) => structuredClone(record)), options,
+      ) !== true) return false;
+    }
+    return true;
+  }
+
   async finalizeLaunchRetirement(retirement, options = {}) {
     const adapter = this.#launchAdapter(retirement?.provider);
     if (typeof adapter?.finalizeLaunchRetirement !== "function") return false;

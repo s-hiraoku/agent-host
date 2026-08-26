@@ -727,6 +727,43 @@ test("ambiguous launch retirement stays fenced and resumes after restart", async
   await second.stop();
 });
 
+test("startup recovers provider-only retirement reservations before accepting launches", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-retirement-preparation-recovery-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const first = new LaunchCoordinator(fixtureRegistry(), { ledgerFile });
+  await first.start();
+  const accepted = await first.submit(LOCAL_REQUEST, "preparation-recovery-launch-key");
+  await waitFor(() => first.get(accepted.launch.id)?.state === "owned");
+  await first.stop();
+  await waitFor(async () => {
+    try { await lstat(`${ledgerFile}.writer.lock`); return false; }
+    catch (error) { return error?.code === "ENOENT"; }
+  });
+
+  let recover;
+  const recoveryGate = new Promise((resolve) => { recover = resolve; });
+  let recovered;
+  const registry = fixtureRegistry();
+  registry.recoverLaunchRetirementPreparations = async (records) => {
+    recovered = records;
+    await recoveryGate;
+    return true;
+  };
+  const second = new LaunchCoordinator(registry, { ledgerFile });
+  t.after(() => second.stop());
+  const starting = second.start();
+  await waitFor(() => recovered?.length === 1);
+  await assert.rejects(
+    second.submit(LOCAL_REQUEST, "must-not-be-claimed-before-recovery"),
+    (error) => error.code === "launch_unavailable" && error.status === 503,
+  );
+  recover();
+  await starting;
+  assert.equal(recovered[0].id, accepted.launch.id);
+  assert.equal(second.get(accepted.launch.id).state, "owned");
+});
+
 test("a retry of an uncertain fenced retirement is reported as replayed", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-replayed-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

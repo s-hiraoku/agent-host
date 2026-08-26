@@ -50,6 +50,16 @@ export class LaunchCoordinator {
     if (this.#started) return;
     const records = await this.#ledger.open();
     this.#capabilities = normalizeLaunchCapabilities(this.#registry.launchCapabilities?.() ?? []);
+    const ownedRecords = records.filter((record) => record.state === "owned");
+    if (ownedRecords.length
+      && typeof this.#registry.recoverLaunchRetirementPreparations === "function") {
+      const recovery = this.#invoke((options) => (
+        this.#registry.recoverLaunchRetirementPreparations(ownedRecords, options)
+      ));
+      if (await recovery.result !== true) {
+        throw new Error("owned launch retirement preparations could not be recovered");
+      }
+    }
     this.#started = true;
     for (const cleanup of this.#ledger.retirementCleanups?.() ?? []) {
       this.#enqueueRetirementCleanup(cleanup);

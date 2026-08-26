@@ -355,6 +355,28 @@ export class CursorSdkAdapter {
     }));
   }
 
+  async recoverLaunchRetirementPreparations(records, { signal } = {}) {
+    return this.#run(async () => {
+      if (!Array.isArray(records)) throw new TypeError("owned launch records must be an array");
+      const provenanceByAttempt = await this.#state.snapshot();
+      const reservations = records.flatMap((record) => {
+        signal?.throwIfAborted();
+        const provenance = provenanceByAttempt.get(record.attemptId);
+        return provenance?.retirementReserved === true
+          ? [this.#verifiedProvenance(provenance, record)]
+          : [];
+      });
+      for (const provenance of reservations) {
+        signal?.throwIfAborted();
+        await this.#state.releaseRetirementReservation(
+          provenance.attemptId, provenance.retirementKeyHash,
+        );
+      }
+      signal?.throwIfAborted();
+      return true;
+    });
+  }
+
   async finalizeLaunchRetirement(retirement, { signal } = {}) {
     return this.#run(async () => {
       signal?.throwIfAborted();
