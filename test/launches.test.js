@@ -497,6 +497,42 @@ test("a late blocked retirement preparation restores the fenced owned launch", a
   await coordinator.stop();
 });
 
+test("a late blocked retirement restores the fenced owned launch", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-retirement-late-blocked-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let finishRetirement;
+  const retirementGate = new Promise((resolve) => { finishRetirement = resolve; });
+  let reactivated;
+  const registry = fixtureRegistry();
+  registry.retireLaunch = async () => retirementGate;
+  registry.deactivateOwnedLaunch = () => ({ id: "cached-agent" });
+  registry.activateOwnedLaunch = (record, cachedAgent) => {
+    reactivated = { record, cachedAgent };
+  };
+  const coordinator = new LaunchCoordinator(registry, {
+    ledgerFile: join(directory, "launches.json"),
+    launchTimeoutMs: 10,
+  });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "late-retirement-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+
+  await assert.rejects(
+    coordinator.retire(
+      accepted.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "late-retirement-key",
+    ),
+    (error) => error.code === "launch_retirement_uncertain",
+  );
+  assert.equal(coordinator.get(accepted.launch.id).state, "retiring");
+  finishRetirement({ status: "blocked", code: "cursor_delete_rejected" });
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned"
+    && reactivated?.cachedAgent?.id === "cached-agent");
+  assert.equal(reactivated.record.id, accepted.launch.id);
+  await coordinator.stop();
+});
+
 test("launch ledger rejects duplicate retirement keys during recovery", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-duplicate-retirement-key-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

@@ -30,6 +30,7 @@ export class LaunchCoordinator {
   #retirementPreparations = new Map();
   #retirementAdmissionFences = new Map();
   #latePreparationRollbacks = new Set();
+  #lateRetirementRollbacks = new Set();
   #cleanupQueue = [];
   #queuedCleanups = new Set();
   #cleanupWorker;
@@ -187,7 +188,7 @@ export class LaunchCoordinator {
       if (existing.keyHash !== keyHash) throw retirementConflict();
       return { retirement: retirementView(await existing.promise), replayed: true };
     }
-    if (this.#latePreparationRollbacks.has(id)) {
+    if (this.#latePreparationRollbacks.has(id) || this.#lateRetirementRollbacks.has(id)) {
       throw new ContractError(
         "launch_retirement_uncertain",
         "owned launch retirement preparation is being reconciled",
@@ -434,6 +435,11 @@ export class LaunchCoordinator {
       );
     }
     if (result?.status !== "retired") {
+      if (result?.status === "uncertain") {
+        void this.#reconcileLateRetirement(
+          record, cachedAgent, invocation.outcome, entry,
+        ).catch(() => {});
+      }
       throw new ContractError(
         "launch_retirement_uncertain",
         "owned launch retirement could not be confirmed",
@@ -448,6 +454,28 @@ export class LaunchCoordinator {
     this.#emitRetired(completed);
     this.#enqueueRetirementCleanup(completed);
     return completed;
+  }
+
+  async #reconcileLateRetirement(record, cachedAgent, outcome, entry) {
+    const settled = await outcome;
+    if (this.#draining || settled.status !== "fulfilled" || settled.value?.status !== "blocked") return;
+    const active = this.#retirements.get(record.id);
+    if (active !== undefined && active !== entry) return;
+    const current = this.#ledger.get(record.id);
+    if (current?.state !== "retiring"
+      || current.retirementKeyHash !== record.retirementKeyHash) return;
+    this.#lateRetirementRollbacks.add(record.id);
+    try {
+      let restored;
+      try { restored = await this.#ledger.cancelRetirement(record.id, record.retirementKeyHash); }
+      catch { return; }
+      this.#registry.activateOwnedLaunch?.(restored, cachedAgent);
+      const refresh = this.#invoke((options) => this.#refreshOwnedLaunches(options.signal));
+      await refresh.result.catch(() => {});
+      this.#emit(restored, "owned");
+    } finally {
+      this.#lateRetirementRollbacks.delete(record.id);
+    }
   }
 
   #enqueueRetirementCleanup(retirement) {
