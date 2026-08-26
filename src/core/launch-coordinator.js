@@ -305,8 +305,7 @@ export class LaunchCoordinator {
       const preparationUncertain = result?.status === "uncertain";
       try { record = await this.#ledger.beginRetirement(record.id, keyHash); }
       catch (error) {
-        if ((providerPrepared || preparationUncertain)
-          && ["retirement_key_conflict", "retirement_cleanup_full"].includes(error?.code)) {
+        if (providerPrepared || preparationUncertain) {
           const release = this.#invoke((options) => (
             this.#registry.cancelLaunchRetirementPreparation?.(
               record.request.provider, record, { ...options, keyHash },

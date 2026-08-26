@@ -295,6 +295,41 @@ test("a losing ledger key race releases the provider retirement reservation", as
   await coordinator.stop();
 });
 
+test("a pre-fence ledger capacity failure releases the provider retirement reservation", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-retirement-ledger-capacity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const durableLedger = new LaunchLedger(join(directory, "launches.json"));
+  const ledger = new Proxy(durableLedger, {
+    get(target, property) {
+      if (property === "beginRetirement") {
+        return async () => { throw new Error("launch ledger cannot reserve retirement completion capacity"); };
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  let releases = 0;
+  const registry = fixtureRegistry();
+  registry.prepareLaunchRetirement = async () => ({ status: "prepared" });
+  registry.cancelLaunchRetirementPreparation = async () => { releases += 1; return true; };
+  const coordinator = new LaunchCoordinator(registry, { ledger });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "ledger-capacity-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+
+  await assert.rejects(
+    coordinator.retire(
+      accepted.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "ledger-capacity-retirement-key",
+    ),
+    /cannot reserve retirement completion capacity/,
+  );
+  assert.equal(releases, 1);
+  assert.equal(coordinator.get(accepted.launch.id).state, "owned");
+  await coordinator.stop();
+});
+
 test("timed-out retirement preparation is capped until its provider settles", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-retirement-preparation-timeout-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
