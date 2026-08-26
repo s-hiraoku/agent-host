@@ -165,6 +165,39 @@ test("Cursor SDK restores owned provenance when the first delete is definitively
   assert.equal(state.records[0].deleteAttempted, undefined);
 });
 
+test("Cursor SDK preserves a definitive delete rejection after coordinator abort", async (t) => {
+  let deleteStarted;
+  const started = new Promise((resolve) => { deleteStarted = resolve; });
+  let rejectDelete;
+  const deletion = new Promise((_, reject) => { rejectDelete = reject; });
+  const fixture = await makeFixture(t, {
+    async getLocal({ agentId }) { return { agentId, status: "idle" }; },
+    async deleteLocal() {
+      deleteStarted();
+      return deletion;
+    },
+  });
+  const owned = await fixture.adapter.launch(resolvedRequest(), {
+    attemptId: ATTEMPT_ID, launchId: LAUNCH_ID,
+  });
+  const retirementKeyHash = "r".repeat(43);
+  const controller = new AbortController();
+  const retiring = fixture.adapter.retireLaunch({
+    ...ledgerRecord(owned), state: "retiring", retirementKeyHash,
+  }, { signal: controller.signal });
+  await started;
+  controller.abort(new Error("coordinator deadline reached"));
+  const rejection = new Error("delete was definitively rejected");
+  rejection.deleteDisposition = "rejected";
+  rejectDelete(rejection);
+
+  assert.deepEqual(await retiring, { status: "blocked", code: "cursor_delete_rejected" });
+  const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
+  assert.equal(state.records[0].state, "owned");
+  assert.equal(state.records[0].retirementKeyHash, undefined);
+  assert.equal(state.records[0].deleteAttempted, undefined);
+});
+
 test("Cursor SDK restores recovered provenance when pre-delete checks become blocked", async (t) => {
   let status = "working";
   let deletes = 0;

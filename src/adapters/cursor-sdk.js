@@ -698,6 +698,12 @@ export class CursorSdkAdapter {
       );
     } catch (error) {
       if (isInternalCredentialError(error)) throw publicCredentialError(error);
+      if (operation === "deleteLocal" && error?.deleteDisposition === "rejected") {
+        const failure = new Error(`Cursor SDK bridge ${operation} failed`);
+        failure.code = "cursor_bridge_failed";
+        failure.deleteDisposition = "rejected";
+        throw failure;
+      }
       throwIfAborted(signal);
       const failure = new Error(`Cursor SDK bridge ${operation} failed`);
       failure.code = "cursor_bridge_failed";
