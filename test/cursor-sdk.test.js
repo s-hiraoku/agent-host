@@ -90,10 +90,9 @@ test("Cursor SDK reserves the complete provenance retirement fence before deleti
   assert.deepEqual(await fixture.adapter.prepareLaunchRetirement(record, {
     keyHash: retirementKeyHash,
   }), { status: "prepared" });
-  await assert.rejects(
-    fixture.adapter.prepareLaunchRetirement(record, { keyHash: "x".repeat(43) }),
-    /retirement reservation changed/,
-  );
+  assert.deepEqual(await fixture.adapter.prepareLaunchRetirement(record, {
+    keyHash: "x".repeat(43),
+  }), { status: "blocked", code: "cursor_retirement_conflict" });
   assert.equal(await fixture.adapter.cancelLaunchRetirementPreparation(record, {
     keyHash: retirementKeyHash,
   }), true);

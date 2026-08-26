@@ -328,6 +328,10 @@ export class CursorSdkAdapter {
       if (!this.#matchesConfiguration(provenance, record) || provenance?.state !== "owned") {
         return { status: "uncertain", code: "cursor_retirement_unproven" };
       }
+      if (provenance.retirementKeyHash !== undefined
+        && provenance.retirementKeyHash !== keyHash) {
+        return { status: "blocked", code: "cursor_retirement_conflict" };
+      }
       try {
         await this.#state.reserveRetirement(record.attemptId, keyHash);
       } catch (error) {
