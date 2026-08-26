@@ -86,8 +86,12 @@ export class LaunchLedger {
         this.#retirements = new Map(retirements.map((entry) => [entry.launchId, structuredClone(entry)]));
         const cleanups = parsed.retirementCleanups
           ?? retirements.filter((entry) => entry.cleanupScope !== undefined).map(retirementCleanup);
-        if (new Set(cleanups.map((entry) => entry.launchId)).size !== cleanups.length) {
-          throw new Error("launch ledger contains duplicate retirement cleanups");
+        if (new Set(cleanups.map((entry) => entry.launchId)).size !== cleanups.length
+          || cleanups.some((entry) => {
+            const retirement = this.#retirements.get(entry.launchId);
+            return retirement !== undefined && !cleanupMatchesRetirement(entry, retirement);
+          })) {
+          throw new Error("launch ledger contains duplicate or mismatched retirement cleanups");
         }
         this.#retirementCleanups = new Map(cleanups.map((entry) => [entry.launchId, structuredClone(entry)]));
         this.#compactCleanupEncoding = !legacy && parsed.retirementCleanups === undefined;

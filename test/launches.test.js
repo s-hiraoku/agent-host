@@ -1472,6 +1472,33 @@ test("launch ledger rejects corrupt and linked state", async (t) => {
   })}\n`, { mode: 0o600 });
   await assert.rejects(new LaunchLedger(unscopedCleanup).open(), /unsupported or malformed/);
 
+  const mismatchedCleanup = join(directory, "mismatched-cleanup.json");
+  const retirement = {
+    launchId: "launch:00000000-0000-4000-8000-000000000000",
+    attemptId: "attempt:00000000-0000-4000-8000-000000000001",
+    provider: "demo",
+    keyHash: "c".repeat(43),
+    creationKeyHash: "d".repeat(43),
+    signature: "e".repeat(43),
+    request: resolvedRequest(),
+    requestedAt: "2026-01-01T00:00:00.000Z",
+    retiredAt: "2026-01-01T00:00:00.000Z",
+    cleanupScope: "cursor_scope_001",
+  };
+  await writeFile(mismatchedCleanup, `${JSON.stringify({
+    schemaVersion: 2,
+    records: [],
+    retirements: [retirement],
+    retirementCleanups: [{
+      launchId: retirement.launchId,
+      attemptId: "attempt:00000000-0000-4000-8000-000000000002",
+      provider: retirement.provider,
+      keyHash: retirement.keyHash,
+      cleanupScope: retirement.cleanupScope,
+    }],
+  })}\n`, { mode: 0o600 });
+  await assert.rejects(new LaunchLedger(mismatchedCleanup).open(), /mismatched retirement cleanups/);
+
   const target = join(directory, "target.json");
   const linked = join(directory, "linked.json");
   await writeFile(target, '{"schemaVersion":1,"records":[]}\n', { mode: 0o600 });
