@@ -1538,6 +1538,43 @@ test("launch ledger rejects corrupt and linked state", async (t) => {
   })}\n`, { mode: 0o600 });
   await assert.rejects(new LaunchLedger(cleanupCapacity).open(), /retirement cleanup capacity/);
 
+  const duplicateCleanupAttempt = join(directory, "duplicate-cleanup-attempt.json");
+  const standaloneCleanup = {
+    launchId: `launch:${identity(2_001)}`,
+    attemptId: `attempt:${identity(2_001)}`,
+    provider: "demo",
+    keyHash: "f".repeat(43),
+    cleanupScope: "cursor_scope_001",
+  };
+  await writeFile(duplicateCleanupAttempt, `${JSON.stringify({
+    schemaVersion: 2,
+    records: [],
+    retirements: [],
+    retirementCleanups: [
+      standaloneCleanup,
+      { ...standaloneCleanup, launchId: `launch:${identity(2_002)}` },
+    ],
+  })}\n`, { mode: 0o600 });
+  await assert.rejects(
+    new LaunchLedger(duplicateCleanupAttempt).open(),
+    /duplicate retirement cleanup identities/,
+  );
+
+  const tombstoneCleanupAttempt = join(directory, "tombstone-cleanup-attempt.json");
+  await writeFile(tombstoneCleanupAttempt, `${JSON.stringify({
+    schemaVersion: 2,
+    records: [],
+    retirements: [retirement],
+    retirementCleanups: [{
+      ...standaloneCleanup,
+      attemptId: retirement.attemptId,
+    }],
+  })}\n`, { mode: 0o600 });
+  await assert.rejects(
+    new LaunchLedger(tombstoneCleanupAttempt).open(),
+    /duplicate retirement cleanup identities/,
+  );
+
   const target = join(directory, "target.json");
   const linked = join(directory, "linked.json");
   await writeFile(target, '{"schemaVersion":1,"records":[]}\n', { mode: 0o600 });

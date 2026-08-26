@@ -93,6 +93,21 @@ export class LaunchLedger {
           })) {
           throw new Error("launch ledger contains duplicate or mismatched retirement cleanups");
         }
+        const attemptOwners = new Map();
+        for (const entry of [...records.values(), ...retirements]) {
+          if (attemptOwners.has(entry.attemptId)) {
+            throw new Error("launch ledger contains duplicate launch attempt identities");
+          }
+          attemptOwners.set(entry.attemptId, entry.id ?? entry.launchId);
+        }
+        for (const cleanup of cleanups) {
+          const owner = attemptOwners.get(cleanup.attemptId);
+          if (records.has(cleanup.launchId)
+            || (owner !== undefined && owner !== cleanup.launchId)) {
+            throw new Error("launch ledger contains duplicate retirement cleanup identities");
+          }
+          attemptOwners.set(cleanup.attemptId, cleanup.launchId);
+        }
         const retiringCount = [...records.values()].filter((record) => record.state === "retiring").length;
         if (cleanups.length + retiringCount > MAX_RETIREMENT_CLEANUPS) {
           throw new Error("launch ledger exceeds retirement cleanup capacity");
