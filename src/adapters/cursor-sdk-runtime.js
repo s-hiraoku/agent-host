@@ -94,8 +94,8 @@ export class CursorSdkBridgeRuntimeAdapter {
     return this.#required().prepareLaunchRetirement(record, options);
   }
   retireLaunch(record, options) { return this.#required().retireLaunch(record, options); }
-  finalizeLaunchRetirement(retirement) {
-    return this.#required().finalizeLaunchRetirement(retirement);
+  finalizeLaunchRetirement(retirement, options) {
+    return this.#required().finalizeLaunchRetirement(retirement, options);
   }
   discoverOwned(records, options) { return this.#required().discoverOwned(records, options); }
   markStale(agent) { return this.#required().markStale(agent); }

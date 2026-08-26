@@ -293,10 +293,10 @@ export class AgentRegistry {
     return adapter.prepareLaunchRetirement(record, options);
   }
 
-  async finalizeLaunchRetirement(retirement) {
+  async finalizeLaunchRetirement(retirement, options = {}) {
     const adapter = this.#launchAdapter(retirement?.provider);
     if (typeof adapter?.finalizeLaunchRetirement !== "function") return false;
-    return await adapter.finalizeLaunchRetirement(retirement) === true;
+    return await adapter.finalizeLaunchRetirement(retirement, options) === true;
   }
 
   activateOwnedLaunch(record, cachedAgent) {

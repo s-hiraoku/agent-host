@@ -81,7 +81,7 @@ test("launch retirement fences provider deletion and replays from a bounded tomb
   registry.retireLaunch = async (...args) => {
     retireCalls += 1;
     assert.equal(args[1].state, "retiring");
-    return { status: "retired" };
+    return { status: "retired", cleanupScope: "demo_scope_00001" };
   };
   registry.deactivateOwnedLaunch = (id) => { deactivated = id; };
   registry.finalizeLaunchRetirement = async (entry) => { finalized = entry; return true; };
@@ -107,7 +107,7 @@ test("launch retirement fences provider deletion and replays from a bounded tomb
   assert.equal(first.retirement.state, "retired");
   assert.equal(coordinator.get(accepted.launch.id), undefined);
   assert.equal(deactivated, accepted.launch.id);
-  assert.equal(finalized.launchId, accepted.launch.id);
+  await waitFor(() => finalized?.launchId === accepted.launch.id);
   assert.deepEqual(lifecycle
     .filter((event) => ["retiring", "retired"].includes(event.phase))
     .map((event) => [event.phase, event.launch.state]), [
@@ -248,6 +248,70 @@ test("provider retirement capacity is reserved before the launch ledger fence", 
   assert.equal(coordinator.get(accepted.launch.id).state, "owned");
   assert.equal(retireCalls, 0);
   assert.equal(JSON.parse(await readFile(ledgerFile, "utf8")).records[0].state, "owned");
+});
+
+test("timed-out retirement preparation is capped until its provider settles", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-retirement-preparation-timeout-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let preparationSignal;
+  let preparationCalls = 0;
+  let preparationSettled = false;
+  let releasePreparation;
+  const preparationGate = new Promise((resolve) => { releasePreparation = resolve; });
+  const registry = fixtureRegistry();
+  registry.prepareLaunchRetirement = async (_provider, _record, { signal }) => {
+    preparationCalls += 1;
+    preparationSignal = signal;
+    if (preparationCalls === 1) {
+      await preparationGate;
+      preparationSettled = true;
+    }
+    return { status: "prepared" };
+  };
+  registry.retireLaunch = async () => ({ status: "retired" });
+  registry.deactivateOwnedLaunch = () => {};
+  const coordinator = new LaunchCoordinator(registry, {
+    ledgerFile: join(directory, "launches.json"),
+    launchTimeoutMs: 10,
+  });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "preparation-timeout-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+
+  await assert.rejects(
+    coordinator.retire(
+      accepted.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "preparation-timeout-retirement-key",
+    ),
+    (error) => error.code === "launch_retirement_uncertain",
+  );
+  assert.equal(preparationSignal.aborted, true);
+  assert.equal(coordinator.get(accepted.launch.id).state, "owned");
+
+  const next = await coordinator.submit(LOCAL_REQUEST, "post-preparation-timeout-launch-key");
+  await waitFor(() => coordinator.get(next.launch.id)?.state === "owned");
+  await assert.rejects(
+    coordinator.retire(
+      next.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "blocked-by-pending-preparation-key",
+    ),
+    (error) => error.code === "launch_retirement_uncertain",
+  );
+  assert.equal(preparationCalls, 1);
+
+  releasePreparation();
+  await waitFor(() => preparationSettled);
+  await Promise.resolve();
+  const retired = await coordinator.retire(
+    accepted.launch.id,
+    { confirmDeleteOwnedAgentAndState: true },
+    "preparation-timeout-retirement-key",
+  );
+  assert.equal(retired.retirement.state, "retired");
+  assert.equal(preparationCalls, 2);
+  await coordinator.stop();
 });
 
 test("launch ledger rejects duplicate retirement keys during recovery", async (t) => {
@@ -454,7 +518,7 @@ test("ambiguous launch retirement stays fenced and resumes after restart", async
   secondRegistry.retireLaunch = async (_provider, record) => {
     resumed += 1;
     assert.equal(record.state, "retiring");
-    return { status: "retired" };
+    return { status: "retired", cleanupScope: "demo_scope_00001" };
   };
   secondRegistry.deactivateOwnedLaunch = () => {};
   secondRegistry.finalizeLaunchRetirement = async (entry) => { finalized = entry; return true; };
@@ -786,11 +850,91 @@ test("retirement cleanup survives replay-tombstone eviction", async (t) => {
   secondRegistry.finalizeLaunchRetirement = async (entry) => { cleanup = entry; return true; };
   const second = new LaunchCoordinator(secondRegistry, { ledgerFile });
   await second.start();
+  await waitFor(() => cleanup?.launchId === accepted.launch.id);
   assert.equal(cleanup.launchId, accepted.launch.id);
   assert.equal(cleanup.cleanupScope, cleanupScope);
   await second.stop();
   const cleaned = JSON.parse(await readFile(ledgerFile, "utf8"));
   assert.equal(cleaned.retirementCleanups, undefined);
+});
+
+test("timed-out provider cleanup leaves durable work without blocking retirement", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-retirement-cleanup-timeout-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  let cleanupSignal;
+  let releaseCleanup;
+  let lateCleanupSettled = false;
+  const cleanupGate = new Promise((resolve) => { releaseCleanup = resolve; });
+  const registry = fixtureRegistry();
+  registry.retireLaunch = async () => ({ status: "retired", cleanupScope: "cursor_scope_001" });
+  registry.deactivateOwnedLaunch = () => {};
+  registry.finalizeLaunchRetirement = async (_entry, { signal }) => {
+    cleanupSignal = signal;
+    await cleanupGate;
+    lateCleanupSettled = true;
+    return true;
+  };
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile, launchTimeoutMs: 10 });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "cleanup-timeout-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+
+  const result = await coordinator.retire(
+    accepted.launch.id,
+    { confirmDeleteOwnedAgentAndState: true },
+    "cleanup-timeout-retirement-key",
+  );
+  assert.equal(result.retirement.state, "retired");
+  await waitFor(() => cleanupSignal?.aborted === true);
+  await coordinator.stop();
+  assert.equal(JSON.parse(await readFile(ledgerFile, "utf8")).retirementCleanups.length, 1);
+  releaseCleanup();
+  await waitFor(() => lateCleanupSettled);
+
+  let recoveryCalls = 0;
+  const recoveryRegistry = fixtureRegistry();
+  recoveryRegistry.finalizeLaunchRetirement = async () => { recoveryCalls += 1; return true; };
+  const recovery = new LaunchCoordinator(recoveryRegistry, { ledgerFile, launchTimeoutMs: 10 });
+  await Promise.race([
+    recovery.start(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("cleanup recovery blocked startup")), 100)),
+  ]);
+  await waitFor(() => recoveryCalls === 1);
+  await recovery.stop();
+  assert.deepEqual(JSON.parse(await readFile(ledgerFile, "utf8")).retirementCleanups, []);
+});
+
+test("multiple hung retirement cleanups cannot multiply startup delay", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-retirement-cleanup-startup-bound-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const retirementCleanups = Array.from({ length: 3 }, (_, index) => ({
+    launchId: `launch:00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    attemptId: `attempt:10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    provider: "demo",
+    keyHash: `${index}${"r".repeat(42)}`,
+    cleanupScope: "cursor_scope_001",
+  }));
+  await writeFile(ledgerFile, `${JSON.stringify({
+    schemaVersion: 2, records: [], retirements: [], retirementCleanups,
+  })}\n`, { mode: 0o600 });
+  let cleanupCalls = 0;
+  const registry = fixtureRegistry();
+  registry.finalizeLaunchRetirement = async () => {
+    cleanupCalls += 1;
+    await new Promise(() => {});
+  };
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile, launchTimeoutMs: 100 });
+  await Promise.race([
+    coordinator.start(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("cleanup recovery blocked startup")), 50)),
+  ]);
+  await waitFor(() => cleanupCalls === 1);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(cleanupCalls, 1);
+  await coordinator.stop();
+  assert.equal(JSON.parse(await readFile(ledgerFile, "utf8")).retirementCleanups.length, 3);
 });
 
 test("retirement without a provider cleanup scope does not retain cleanup work", async (t) => {

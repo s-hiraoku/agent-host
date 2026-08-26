@@ -304,13 +304,15 @@ export class CursorSdkAdapter {
     }));
   }
 
-  async prepareLaunchRetirement(record, { keyHash } = {}) {
+  async prepareLaunchRetirement(record, { keyHash, signal } = {}) {
     return this.#run(() => this.#exclusiveAgent(record?.agentId, async () => {
+      signal?.throwIfAborted();
       if (record?.state !== "owned" || !/^[A-Za-z0-9_-]{43}$/.test(keyHash ?? "")
         || typeof this.#bridge.deleteLocal !== "function") {
         return { status: "unsupported" };
       }
       const provenance = await this.#state.get(record.attemptId);
+      signal?.throwIfAborted();
       if (!this.#matchesConfiguration(provenance, record) || provenance?.state !== "owned") {
         return { status: "uncertain", code: "cursor_retirement_unproven" };
       }
@@ -322,15 +324,18 @@ export class CursorSdkAdapter {
         }
         throw error;
       }
+      signal?.throwIfAborted();
       return { status: "prepared" };
     }));
   }
 
-  async finalizeLaunchRetirement(retirement) {
+  async finalizeLaunchRetirement(retirement, { signal } = {}) {
     return this.#run(async () => {
+      signal?.throwIfAborted();
       if (retirement?.provider !== "cursor" || !ATTEMPT_ID.test(retirement.attemptId ?? "")
         || retirement.cleanupScope !== this.#retirementScope) return false;
       await this.#state.removeRetired(retirement.attemptId, retirement.keyHash);
+      signal?.throwIfAborted();
       return true;
     });
   }
@@ -827,6 +832,9 @@ export class CursorSdkProvenanceStore {
   async reserveRetirement(attemptId, keyHash) {
     if (!/^[A-Za-z0-9_-]{43}$/.test(keyHash ?? "")) throw new Error("invalid Cursor SDK retirement key");
     return this.#updateOwned(attemptId, (record) => {
+      if (record.retirementKeyHash !== undefined && record.retirementKeyHash !== keyHash) {
+        throw new Error("Cursor SDK retirement reservation changed");
+      }
       const updated = {
         ...record,
         retirementKeyHash: keyHash,

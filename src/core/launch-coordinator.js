@@ -27,6 +27,11 @@ export class LaunchCoordinator {
   #retirements = new Map();
   #retirementQueue = [];
   #activeRetirements = new Map();
+  #retirementPreparations = new Map();
+  #cleanupQueue = [];
+  #queuedCleanups = new Set();
+  #cleanupWorker;
+  #cleanupPaused = false;
   #draining = false;
   #started = false;
 
@@ -46,7 +51,7 @@ export class LaunchCoordinator {
     this.#capabilities = normalizeLaunchCapabilities(this.#registry.launchCapabilities?.() ?? []);
     this.#started = true;
     for (const cleanup of this.#ledger.retirementCleanups?.() ?? []) {
-      await this.#finalizeRetirementCleanup(cleanup);
+      this.#enqueueRetirementCleanup(cleanup);
     }
     for (const record of records) {
       if (record.state === "owned") {
@@ -66,6 +71,7 @@ export class LaunchCoordinator {
       }
     }
     this.#pump();
+    this.#pumpRetirementCleanup();
   }
 
   capabilities() { return structuredClone(this.#capabilities); }
@@ -184,6 +190,7 @@ export class LaunchCoordinator {
     }
     for (const controller of this.#controllers) controller.abort(new Error("agent-host is shutting down"));
     await Promise.allSettled([...this.#retirements.values()].map((entry) => entry.promise));
+    await this.#cleanupWorker;
     const active = [...this.#active.values()];
     await Promise.allSettled(active.map((entry) => entry.stateReady));
     this.#updateGauge();
@@ -253,17 +260,32 @@ export class LaunchCoordinator {
   async #runRetirement(record, keyHash, entry) {
     const recovered = record.state === "retiring";
     if (record.state === "owned") {
-      const preparation = await this.#registry.prepareLaunchRetirement?.(
-        record.request.provider, record, { keyHash },
-      );
-      if (preparation?.status === "blocked") {
+      if (this.#retirementPreparations.has(record.request.provider)) {
+        throw new ContractError(
+          "launch_retirement_uncertain",
+          "owned launch retirement preparation is still pending",
+          503,
+        );
+      }
+      const invocation = this.#invoke((options) => this.#registry.prepareLaunchRetirement?.(
+        record.request.provider, record, { ...options, keyHash },
+      ));
+      const preparation = { settled: invocation.settled };
+      this.#retirementPreparations.set(record.request.provider, preparation);
+      void preparation.settled.then(() => {
+        if (this.#retirementPreparations.get(record.request.provider) === preparation) {
+          this.#retirementPreparations.delete(record.request.provider);
+        }
+      });
+      const result = await invocation.result.catch(() => ({ status: "uncertain" }));
+      if (result?.status === "blocked") {
         throw new ContractError(
           "launch_retirement_capacity",
           "launch provider cannot reserve retirement capacity",
           503,
         );
       }
-      if (preparation?.status === "uncertain") {
+      if (result?.status === "uncertain") {
         throw new ContractError(
           "launch_retirement_uncertain",
           "owned launch retirement could not be prepared",
@@ -339,16 +361,38 @@ export class LaunchCoordinator {
     this.#registry.deactivateOwnedLaunch?.(record.id);
     await this.#refreshOwnedLaunches(signal);
     this.#emitRetired(completed);
-    await this.#finalizeRetirementCleanup(completed);
+    this.#enqueueRetirementCleanup(completed);
     return completed;
   }
 
-  async #finalizeRetirementCleanup(retirement) {
-    try {
-      const finalized = await this.#registry.finalizeLaunchRetirement?.(retirement);
-      if (finalized !== true) return;
-      await this.#ledger.completeRetirementCleanup?.(retirement.launchId, retirement.keyHash);
-    } catch {}
+  #enqueueRetirementCleanup(retirement) {
+    if (!retirement?.cleanupScope || this.#queuedCleanups.has(retirement.launchId)) return;
+    this.#cleanupQueue.push(retirement);
+    this.#queuedCleanups.add(retirement.launchId);
+    this.#pumpRetirementCleanup();
+  }
+
+  #pumpRetirementCleanup() {
+    if (this.#draining || this.#cleanupPaused || this.#cleanupWorker || !this.#cleanupQueue.length) return;
+    this.#cleanupWorker = (async () => {
+      while (!this.#draining && this.#cleanupQueue.length) {
+        const retirement = this.#cleanupQueue.shift();
+        try {
+          const invocation = this.#invoke((options) => (
+            this.#registry.finalizeLaunchRetirement?.(retirement, options)
+          ));
+          const finalized = await invocation.result;
+          if (finalized === true) {
+            await this.#ledger.completeRetirementCleanup?.(retirement.launchId, retirement.keyHash);
+          }
+        } catch {
+          this.#cleanupPaused = true;
+        } finally {
+          this.#queuedCleanups.delete(retirement.launchId);
+        }
+        if (this.#cleanupPaused) break;
+      }
+    })().finally(() => { this.#cleanupWorker = undefined; });
   }
 
   #enqueue(id, kind, provider) {

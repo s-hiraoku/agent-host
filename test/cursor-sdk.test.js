@@ -90,6 +90,10 @@ test("Cursor SDK reserves the complete provenance retirement fence before deleti
   assert.deepEqual(await fixture.adapter.prepareLaunchRetirement(record, {
     keyHash: retirementKeyHash,
   }), { status: "prepared" });
+  await assert.rejects(
+    fixture.adapter.prepareLaunchRetirement(record, { keyHash: "x".repeat(43) }),
+    /retirement reservation changed/,
+  );
   let state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(state.records[0].state, "owned");
   assert.equal(state.records[0].retirementKeyHash, retirementKeyHash);
