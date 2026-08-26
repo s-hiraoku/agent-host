@@ -1508,6 +1508,36 @@ test("launch ledger rejects corrupt and linked state", async (t) => {
   })}\n`, { mode: 0o600 });
   await assert.rejects(new LaunchLedger(mismatchedProvider).open(), /unsupported or malformed/);
 
+  const cleanupCapacity = join(directory, "cleanup-capacity.json");
+  const identity = (index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+  const retiringRecord = {
+    id: `launch:${identity(1_001)}`,
+    attemptId: `attempt:${identity(1_001)}`,
+    keyHash: "a".repeat(43),
+    signature: "b".repeat(43),
+    request: resolvedRequest(),
+    state: "retiring",
+    requestedAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    providerAgentId: "provider",
+    agentId: "demo:owned",
+    retirementKeyHash: "r".repeat(43),
+  };
+  const fullCleanups = Array.from({ length: 1_000 }, (_, index) => ({
+    launchId: `launch:${identity(index)}`,
+    attemptId: `attempt:${identity(index)}`,
+    provider: "demo",
+    keyHash: index.toString(36).padStart(43, "0"),
+    cleanupScope: "cursor_scope_001",
+  }));
+  await writeFile(cleanupCapacity, `${JSON.stringify({
+    schemaVersion: 2,
+    records: [retiringRecord],
+    retirements: [],
+    retirementCleanups: fullCleanups,
+  })}\n`, { mode: 0o600 });
+  await assert.rejects(new LaunchLedger(cleanupCapacity).open(), /retirement cleanup capacity/);
+
   const target = join(directory, "target.json");
   const linked = join(directory, "linked.json");
   await writeFile(target, '{"schemaVersion":1,"records":[]}\n', { mode: 0o600 });

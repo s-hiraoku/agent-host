@@ -93,6 +93,10 @@ export class LaunchLedger {
           })) {
           throw new Error("launch ledger contains duplicate or mismatched retirement cleanups");
         }
+        const retiringCount = [...records.values()].filter((record) => record.state === "retiring").length;
+        if (cleanups.length + retiringCount > MAX_RETIREMENT_CLEANUPS) {
+          throw new Error("launch ledger exceeds retirement cleanup capacity");
+        }
         this.#retirementCleanups = new Map(cleanups.map((entry) => [entry.launchId, structuredClone(entry)]));
         this.#compactCleanupEncoding = !legacy && parsed.retirementCleanups === undefined;
         this.#opened = true;
