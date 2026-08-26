@@ -1079,6 +1079,27 @@ test("bridge client validates its bearer header before the delete invocation fen
   await subject.destroy();
 });
 
+test("bridge client rejects a delete when the connection was never established", async () => {
+  const bridge = await fakeBridge(async (req, _body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    return json(response, 200, {});
+  });
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  await bridge.close();
+  let invoked = false;
+  await assert.rejects(subject.deleteLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+    onInvoke: async () => { invoked = true; },
+  }), (error) => error.code === "ECONNREFUSED" && error.deleteDisposition === "rejected");
+  assert.equal(invoked, true);
+  await subject.destroy();
+});
+
 test("bridge client rejects an absent agent before an ambiguous delete replay", async (t) => {
   const bridge = await fakeBridge(async (req, _body, response) => {
     if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });

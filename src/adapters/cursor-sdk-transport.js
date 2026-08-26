@@ -42,6 +42,10 @@ const METHODS = Object.freeze({
   cancel: "sdk.v1.SdkAgentService/CancelRun",
   delete: "sdk.v1.SdkAgentService/DeleteAgent",
 });
+const PRE_CONNECT_FAILURES = new WeakSet();
+const PRE_CONNECT_ERROR_CODES = new Set([
+  "EADDRNOTAVAIL", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH",
+]);
 
 export function createCursorSdkBridgeClient(options = {}) {
   const endpoint = loopbackEndpoint(options.endpoint);
@@ -598,7 +602,10 @@ function directRequest(url, { method, headers, body, signal }) {
       signal,
       agent: false,
     }, resolve);
-    request.once("error", reject);
+    request.once("error", (error) => {
+      if (PRE_CONNECT_ERROR_CODES.has(error?.code)) PRE_CONNECT_FAILURES.add(error);
+      reject(error);
+    });
     request.end(body);
   });
 }
@@ -619,7 +626,8 @@ function connectError(payload, status) {
 
 function isDefinitiveMutationRejection(error) {
   return DEFINITIVE_MUTATION_REJECTION_STATUSES.has(error?.status)
-    || error?.code === "cursor_bridge_request_too_large";
+    || error?.code === "cursor_bridge_request_too_large"
+    || PRE_CONNECT_FAILURES.has(error);
 }
 
 function isDefinitiveSendRejection(error) {
