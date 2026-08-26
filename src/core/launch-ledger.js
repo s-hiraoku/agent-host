@@ -430,7 +430,7 @@ function validRetirementCleanup(entry) {
     && /^attempt:[0-9a-f-]{36}$/.test(entry.attemptId ?? "")
     && /^[A-Za-z0-9._:-]{1,100}$/.test(entry.provider ?? "")
     && SAFE_HASH.test(entry.keyHash ?? "")
-    && (entry.cleanupScope === undefined || /^[A-Za-z0-9_-]{16}$/.test(entry.cleanupScope));
+    && /^[A-Za-z0-9_-]{16}$/.test(entry.cleanupScope ?? "");
 }
 
 function validRetiredRequest(request) {

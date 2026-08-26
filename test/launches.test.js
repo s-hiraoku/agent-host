@@ -1308,6 +1308,20 @@ test("launch ledger rejects corrupt and linked state", async (t) => {
   await writeFile(extra, `${JSON.stringify({ schemaVersion: 1, records: [record] })}\n`, { mode: 0o600 });
   await assert.rejects(new LaunchLedger(extra).open(), /unsupported or malformed/);
 
+  const unscopedCleanup = join(directory, "unscoped-cleanup.json");
+  await writeFile(unscopedCleanup, `${JSON.stringify({
+    schemaVersion: 2,
+    records: [],
+    retirements: [],
+    retirementCleanups: [{
+      launchId: "launch:00000000-0000-4000-8000-000000000000",
+      attemptId: "attempt:00000000-0000-4000-8000-000000000001",
+      provider: "cursor",
+      keyHash: "c".repeat(43),
+    }],
+  })}\n`, { mode: 0o600 });
+  await assert.rejects(new LaunchLedger(unscopedCleanup).open(), /unsupported or malformed/);
+
   const target = join(directory, "target.json");
   const linked = join(directory, "linked.json");
   await writeFile(target, '{"schemaVersion":1,"records":[]}\n', { mode: 0o600 });
