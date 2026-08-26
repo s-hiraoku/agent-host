@@ -430,6 +430,7 @@ function validRetirement(entry) {
     && SAFE_HASH.test(entry.signature ?? "")
     && (entry.cleanupScope === undefined || /^[A-Za-z0-9_-]{16}$/.test(entry.cleanupScope))
     && validRetiredRequest(entry.request)
+    && entry.provider === entry.request.provider
     && Number.isFinite(Date.parse(entry.requestedAt))
     && Number.isFinite(Date.parse(entry.retiredAt));
 }

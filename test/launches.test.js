@@ -1499,6 +1499,15 @@ test("launch ledger rejects corrupt and linked state", async (t) => {
   })}\n`, { mode: 0o600 });
   await assert.rejects(new LaunchLedger(mismatchedCleanup).open(), /mismatched retirement cleanups/);
 
+  const mismatchedProvider = join(directory, "mismatched-provider.json");
+  await writeFile(mismatchedProvider, `${JSON.stringify({
+    schemaVersion: 2,
+    records: [],
+    retirements: [{ ...retirement, provider: "cursor" }],
+    retirementCleanups: [],
+  })}\n`, { mode: 0o600 });
+  await assert.rejects(new LaunchLedger(mismatchedProvider).open(), /unsupported or malformed/);
+
   const target = join(directory, "target.json");
   const linked = join(directory, "linked.json");
   await writeFile(target, '{"schemaVersion":1,"records":[]}\n', { mode: 0o600 });
