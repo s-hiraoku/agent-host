@@ -140,9 +140,9 @@ test("Cursor SDK restores owned provenance when the first delete is definitively
   }), { status: "blocked", code: "cursor_delete_rejected" });
   const state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(state.records[0].state, "owned");
-  assert.equal(state.records[0].retirementKeyHash, retirementKeyHash);
-  assert.equal(state.records[0].retirementReserved, true);
-  assert.equal(state.records[0].deleteAttempted, false);
+  assert.equal(state.records[0].retirementKeyHash, undefined);
+  assert.equal(state.records[0].retirementReserved, undefined);
+  assert.equal(state.records[0].deleteAttempted, undefined);
 });
 
 test("Cursor SDK restores recovered provenance when pre-delete checks become blocked", async (t) => {
@@ -169,14 +169,15 @@ test("Cursor SDK restores recovered provenance when pre-delete checks become blo
   }), { status: "blocked", code: "cursor_agent_not_terminal" });
   const restored = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(restored.records[0].state, "owned");
-  assert.equal(restored.records[0].retirementKeyHash, firstKeyHash);
-  assert.equal(restored.records[0].retirementReserved, true);
-  assert.equal(restored.records[0].deleteAttempted, false);
+  assert.equal(restored.records[0].retirementKeyHash, undefined);
+  assert.equal(restored.records[0].retirementReserved, undefined);
+  assert.equal(restored.records[0].deleteAttempted, undefined);
   assert.equal(deletes, 0);
 
   status = "idle";
+  const secondKeyHash = "x".repeat(43);
   const retired = await fixture.adapter.retireLaunch({
-    ...ledgerRecord(owned), state: "retiring", retirementKeyHash: firstKeyHash,
+    ...ledgerRecord(owned), state: "retiring", retirementKeyHash: secondKeyHash,
   });
   assert.equal(retired.status, "retired");
   assert.match(retired.cleanupScope, /^[A-Za-z0-9_-]{16}$/);
@@ -256,9 +257,9 @@ test("Cursor SDK does not retain a delete attempt when credentials fail before i
   });
   state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(state.records[0].state, "owned");
-  assert.equal(state.records[0].retirementKeyHash, retirementKeyHash);
-  assert.equal(state.records[0].retirementReserved, true);
-  assert.equal(state.records[0].deleteAttempted, false);
+  assert.equal(state.records[0].retirementKeyHash, undefined);
+  assert.equal(state.records[0].retirementReserved, undefined);
+  assert.equal(state.records[0].deleteAttempted, undefined);
   assert.equal(deletes, 0);
 });
 

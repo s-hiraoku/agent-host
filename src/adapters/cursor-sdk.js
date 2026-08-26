@@ -894,10 +894,11 @@ export class CursorSdkProvenanceStore {
       const updated = {
         ...current,
         state: "owned",
-        retirementReserved: true,
-        deleteAttempted: false,
         updatedAt: monotonicTimestamp(current.updatedAt, this.#now),
       };
+      delete updated.retirementKeyHash;
+      delete updated.retirementReserved;
+      delete updated.deleteAttempted;
       state.records[index] = validateRecord(updated);
       await this.#save(state);
       return structuredClone(state.records[index]);
