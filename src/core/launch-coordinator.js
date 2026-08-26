@@ -28,6 +28,7 @@ export class LaunchCoordinator {
   #retirementQueue = [];
   #activeRetirements = new Map();
   #retirementPreparations = new Map();
+  #latePreparationRollbacks = new Set();
   #cleanupQueue = [];
   #queuedCleanups = new Set();
   #cleanupWorker;
@@ -172,6 +173,13 @@ export class LaunchCoordinator {
       if (existing.keyHash !== keyHash) throw retirementConflict();
       return { retirement: retirementView(await existing.promise), replayed: true };
     }
+    if (this.#latePreparationRollbacks.has(id)) {
+      throw new ContractError(
+        "launch_retirement_uncertain",
+        "owned launch retirement preparation is being reconciled",
+        503,
+      );
+    }
     const entry = this.#trackRetirement(record, keyHash);
     return { retirement: retirementView(await entry.promise), replayed };
   }
@@ -313,6 +321,10 @@ export class LaunchCoordinator {
       }
       this.#emit(record, "retiring");
       if (preparationUncertain) {
+        const cachedAgent = this.#registry.deactivateOwnedLaunch?.(record.id);
+        void this.#reconcileLatePreparation(
+          record, keyHash, cachedAgent, invocation.outcome,
+        ).catch(() => {});
         throw new ContractError(
           "launch_retirement_uncertain",
           "owned launch retirement could not be prepared",
@@ -325,6 +337,26 @@ export class LaunchCoordinator {
       throw new ContractError("shutting_down", "agent-host is shutting down", 503);
     }
     return this.#finishRetirement(record, recovered, entry);
+  }
+
+  async #reconcileLatePreparation(record, keyHash, cachedAgent, outcome) {
+    const settled = await outcome;
+    if (this.#draining || settled.status !== "fulfilled" || settled.value?.status !== "blocked") return;
+    if (this.#retirements.has(record.id)) return;
+    const current = this.#ledger.get(record.id);
+    if (current?.state !== "retiring" || current.retirementKeyHash !== keyHash) return;
+    this.#latePreparationRollbacks.add(record.id);
+    try {
+      let restored;
+      try { restored = await this.#ledger.cancelRetirement(record.id, keyHash); }
+      catch { return; }
+      this.#registry.activateOwnedLaunch?.(restored, cachedAgent);
+      const refresh = this.#invoke((options) => this.#refreshOwnedLaunches(options.signal));
+      await refresh.result.catch(() => {});
+      this.#emit(restored, "owned");
+    } finally {
+      this.#latePreparationRollbacks.delete(record.id);
+    }
   }
 
   async #finishRetirement(record, recovered, entry) {
@@ -536,7 +568,11 @@ export class LaunchCoordinator {
     const onAbort = () => rejectAborted(controller.signal.reason ?? new Error("launch aborted"));
     controller.signal.addEventListener("abort", onAbort, { once: true });
     const provider = Promise.resolve().then(() => operation({ signal: controller.signal }));
-    const settled = provider.then(() => undefined, () => undefined).finally(() => {
+    const outcome = provider.then(
+      (value) => ({ status: "fulfilled", value }),
+      (error) => ({ status: "rejected", error }),
+    );
+    const settled = outcome.then(() => undefined).finally(() => {
       controller.signal.removeEventListener("abort", onAbort);
       this.#controllers.delete(controller);
     });
@@ -549,7 +585,7 @@ export class LaunchCoordinator {
     const result = Promise.race([provider, timeout, aborted]).finally(() => {
       clearTimeout(timer);
     });
-    return { result, settled };
+    return { result, settled, outcome };
   }
 
   #emit(record, phase) {

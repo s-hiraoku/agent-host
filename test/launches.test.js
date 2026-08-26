@@ -301,6 +301,7 @@ test("timed-out retirement preparation is capped until its provider settles", as
   let preparationSignal;
   let preparationCalls = 0;
   let preparationSettled = false;
+  let deactivated;
   let releasePreparation;
   const preparationGate = new Promise((resolve) => { releasePreparation = resolve; });
   const registry = fixtureRegistry();
@@ -314,7 +315,7 @@ test("timed-out retirement preparation is capped until its provider settles", as
     return { status: "prepared" };
   };
   registry.retireLaunch = async () => ({ status: "retired" });
-  registry.deactivateOwnedLaunch = () => {};
+  registry.deactivateOwnedLaunch = (id) => { deactivated = id; };
   const coordinator = new LaunchCoordinator(registry, {
     ledgerFile: join(directory, "launches.json"),
     launchTimeoutMs: 10,
@@ -333,6 +334,7 @@ test("timed-out retirement preparation is capped until its provider settles", as
   );
   assert.equal(preparationSignal.aborted, true);
   assert.equal(coordinator.get(accepted.launch.id).state, "retiring");
+  assert.equal(deactivated, accepted.launch.id);
   const fenced = JSON.parse(await readFile(join(directory, "launches.json"), "utf8")).records[0];
   assert.match(fenced.retirementKeyHash, /^[A-Za-z0-9_-]{43}$/);
 
@@ -358,6 +360,51 @@ test("timed-out retirement preparation is capped until its provider settles", as
   );
   assert.equal(retired.retirement.state, "retired");
   assert.equal(preparationCalls, 1);
+  await coordinator.stop();
+});
+
+test("a late blocked retirement preparation restores the fenced owned launch", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-retirement-preparation-late-blocked-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let releasePreparation;
+  const preparationGate = new Promise((resolve) => { releasePreparation = resolve; });
+  let deactivated;
+  let reactivated;
+  const registry = fixtureRegistry();
+  registry.prepareLaunchRetirement = async () => {
+    await preparationGate;
+    return { status: "blocked", code: "cursor_provenance_capacity" };
+  };
+  registry.deactivateOwnedLaunch = (id) => {
+    deactivated = id;
+    return { id: "cached-agent" };
+  };
+  registry.activateOwnedLaunch = (record, cachedAgent) => {
+    reactivated = { record, cachedAgent };
+  };
+  const coordinator = new LaunchCoordinator(registry, {
+    ledgerFile: join(directory, "launches.json"),
+    launchTimeoutMs: 10,
+  });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "late-blocked-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+
+  await assert.rejects(
+    coordinator.retire(
+      accepted.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "late-blocked-retirement-key",
+    ),
+    (error) => error.code === "launch_retirement_uncertain",
+  );
+  assert.equal(coordinator.get(accepted.launch.id).state, "retiring");
+  assert.equal(deactivated, accepted.launch.id);
+  releasePreparation();
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned"
+    && reactivated?.cachedAgent?.id === "cached-agent");
+  assert.equal(reactivated.record.id, accepted.launch.id);
+  assert.deepEqual(reactivated.cachedAgent, { id: "cached-agent" });
   await coordinator.stop();
 });
 
