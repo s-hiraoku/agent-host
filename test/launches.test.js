@@ -618,6 +618,62 @@ test("full legacy ledgers migrate without expanding their serialized size", asyn
   assert.equal(persisted.retirementCleanups, undefined);
 });
 
+test("full v2 ledgers derive legacy cleanup work without expanding on open", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-v2-cleanup-capacity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const timestamp = "2026-08-25T00:00:00.000Z";
+  const identity = (index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+  const hash = (prefix, index) => `${prefix}${index.toString(36).padStart(42, "0")}`;
+  const request = {
+    provider: "p", target: "t", profile: "p", mode: "m", capabilityVersion: "v",
+    risk: { localMutation: true, externalBillable: false },
+  };
+  const records = Array.from({ length: 1_000 }, (_, index) => ({
+    id: `launch:${identity(index)}`, attemptId: `attempt:${identity(index)}`,
+    keyHash: hash("k", index), signature: hash("s", index), request: { ...request },
+    state: "failed", requestedAt: timestamp, updatedAt: timestamp,
+    error: { code: "e", retryable: false },
+  }));
+  const retirement = {
+    launchId: `launch:${identity(1_001)}`, attemptId: `attempt:${identity(1_001)}`,
+    provider: "p", keyHash: hash("r", 1_001), creationKeyHash: hash("k", 1_001),
+    signature: hash("s", 1_001), request: { ...request }, requestedAt: timestamp,
+    retiredAt: timestamp, cleanupScope: "cursor_scope_001",
+  };
+  const document = { schemaVersion: 2, records, retirements: [retirement] };
+  const targetBytes = 999_990;
+  let padding = targetBytes - Buffer.byteLength(`${JSON.stringify(document)}\n`);
+  for (const record of records) {
+    for (const [object, field] of [
+      [record.request, "provider"], [record.request, "target"], [record.request, "profile"],
+      [record.request, "mode"], [record.request, "capabilityVersion"], [record.error, "code"],
+    ]) {
+      const added = Math.min(99, padding);
+      object[field] += "x".repeat(added);
+      padding -= added;
+      if (padding === 0) break;
+    }
+    if (padding === 0) break;
+  }
+  assert.equal(padding, 0);
+  const content = `${JSON.stringify(document)}\n`;
+  assert.equal(Buffer.byteLength(content), targetBytes);
+  await writeFile(ledgerFile, content, { mode: 0o600 });
+
+  const ledger = new LaunchLedger(ledgerFile);
+  assert.equal((await ledger.open()).length, 1_000);
+  assert.deepEqual(ledger.retirementCleanups(), [{
+    launchId: retirement.launchId,
+    attemptId: retirement.attemptId,
+    provider: retirement.provider,
+    keyHash: retirement.keyHash,
+    cleanupScope: retirement.cleanupScope,
+  }]);
+  await ledger.close();
+  assert.equal(await readFile(ledgerFile, "utf8"), content);
+});
+
 test("ambiguous launch retirement stays fenced and resumes after restart", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-recovery-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

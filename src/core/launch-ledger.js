@@ -97,8 +97,6 @@ export class LaunchLedger {
           );
           if (migrated === serialized) throw new Error("launch ledger legacy schema marker is invalid");
           await writePrivateFileAtomic(this.#path, migrated);
-        } else if (!compactV2 && parsed.retirementCleanups === undefined) {
-          await this.#persist();
         }
         return this.list();
       } catch (error) {
