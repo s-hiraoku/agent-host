@@ -16,6 +16,7 @@ export class LaunchLedger {
   #records = new Map();
   #retirements = new Map();
   #retirementCleanups = new Map();
+  #compactCleanupEncoding = false;
   #tail = Promise.resolve();
   #opened = false;
   #lease;
@@ -89,6 +90,7 @@ export class LaunchLedger {
           throw new Error("launch ledger contains duplicate retirement cleanups");
         }
         this.#retirementCleanups = new Map(cleanups.map((entry) => [entry.launchId, structuredClone(entry)]));
+        this.#compactCleanupEncoding = !legacy && parsed.retirementCleanups === undefined;
         this.#opened = true;
         if (legacy) {
           const migrated = serialized.replace(
@@ -104,6 +106,7 @@ export class LaunchLedger {
         this.#records.clear();
         this.#retirements.clear();
         this.#retirementCleanups.clear();
+        this.#compactCleanupEncoding = false;
         await this.#lease.release().catch(() => {});
         this.#lease = undefined;
         throw error;
@@ -118,6 +121,7 @@ export class LaunchLedger {
       this.#records.clear();
       this.#retirements.clear();
       this.#retirementCleanups.clear();
+      this.#compactCleanupEncoding = false;
       await this.#lease?.release();
       this.#lease = undefined;
     });
@@ -249,9 +253,19 @@ export class LaunchLedger {
       const current = this.#retirementCleanups.get(id);
       if (!current) return false;
       if (current.keyHash !== keyHash) throw new Error("retirement cleanup fence does not match");
+      const retirement = this.#retirements.get(id);
       this.#retirementCleanups.delete(id);
+      if (this.#compactCleanupEncoding && cleanupMatchesRetirement(current, retirement)) {
+        const updated = { ...retirement };
+        delete updated.cleanupScope;
+        this.#retirements.set(id, updated);
+      }
       try { await this.#persist(); }
-      catch (error) { this.#retirementCleanups.set(id, current); throw error; }
+      catch (error) {
+        this.#retirementCleanups.set(id, current);
+        if (retirement) this.#retirements.set(id, retirement);
+        throw error;
+      }
       return true;
     });
   }
@@ -324,13 +338,17 @@ export class LaunchLedger {
   #assertOpen() { if (!this.#opened) throw new Error("launch ledger is not open"); }
 
   async #persist() {
-    const content = ledgerContent(this.#records, this.#retirements, this.#retirementCleanups);
+    const content = ledgerContent(
+      this.#records, this.#retirements, this.#retirementCleanups,
+      this.#compactCleanupEncoding,
+    );
     if (Buffer.byteLength(content) > MAX_LEDGER_BYTES) throw new Error("launch ledger exceeds its size limit");
     const projected = projectRetirementCompletions(
       this.#records, this.#retirements, this.#retirementCleanups,
     );
     if (Buffer.byteLength(ledgerContent(
       projected.records, projected.retirements, projected.retirementCleanups,
+      this.#compactCleanupEncoding,
     )) > MAX_LEDGER_BYTES) {
       throw new Error("launch ledger cannot reserve retirement completion capacity");
     }
@@ -344,14 +362,17 @@ export class LaunchLedger {
   }
 }
 
-function ledgerContent(records, retirements, retirementCleanups) {
+function ledgerContent(records, retirements, retirementCleanups, compactCleanupEncoding = false) {
   const document = {
     schemaVersion: LEDGER_SCHEMA_VERSION,
     records: [...records.values()],
   };
   if (retirements.size > 0 || retirementCleanups.size > 0) {
     document.retirements = [...retirements.values()];
-    document.retirementCleanups = [...retirementCleanups.values()];
+    if (!compactCleanupEncoding
+      || !cleanupsExactlyMatchScopedRetirements(retirements, retirementCleanups)) {
+      document.retirementCleanups = [...retirementCleanups.values()];
+    }
   }
   return `${JSON.stringify(document)}\n`;
 }
@@ -417,6 +438,20 @@ function retirementCleanup(entry) {
     keyHash: entry.keyHash,
     ...(entry.cleanupScope === undefined ? {} : { cleanupScope: entry.cleanupScope }),
   };
+}
+
+function cleanupMatchesRetirement(cleanup, retirement) {
+  return Boolean(retirement && cleanup.launchId === retirement.launchId
+    && cleanup.attemptId === retirement.attemptId && cleanup.provider === retirement.provider
+    && cleanup.keyHash === retirement.keyHash && cleanup.cleanupScope === retirement.cleanupScope);
+}
+
+function cleanupsExactlyMatchScopedRetirements(retirements, retirementCleanups) {
+  const scoped = [...retirements.values()].filter((entry) => entry.cleanupScope !== undefined);
+  return scoped.length === retirementCleanups.size
+    && scoped.every((entry) => cleanupMatchesRetirement(
+      retirementCleanups.get(entry.launchId), entry,
+    ));
 }
 
 function validRetirementCleanup(entry) {

@@ -715,8 +715,20 @@ test("full v2 ledgers derive legacy cleanup work without expanding on open", asy
     keyHash: retirement.keyHash,
     cleanupScope: retirement.cleanupScope,
   }]);
+  await ledger.transition(records[0].id, ["failed"], {}, timestamp);
+  const compact = await readFile(ledgerFile, "utf8");
+  assert.equal(Buffer.byteLength(compact), targetBytes);
+  assert.equal(JSON.parse(compact).retirementCleanups, undefined);
+  assert.equal(await ledger.completeRetirementCleanup(retirement.launchId, retirement.keyHash), true);
   await ledger.close();
-  assert.equal(await readFile(ledgerFile, "utf8"), content);
+  const acknowledged = JSON.parse(await readFile(ledgerFile, "utf8"));
+  assert.equal(acknowledged.retirementCleanups, undefined);
+  assert.equal(acknowledged.retirements[0].cleanupScope, undefined);
+
+  const reopened = new LaunchLedger(ledgerFile);
+  await reopened.open();
+  assert.deepEqual(reopened.retirementCleanups(), []);
+  await reopened.close();
 });
 
 test("ambiguous launch retirement stays fenced and resumes after restart", async (t) => {
