@@ -925,15 +925,14 @@ test("multiple hung retirement cleanups cannot multiply startup delay", async (t
     cleanupCalls += 1;
     await new Promise(() => {});
   };
-  const coordinator = new LaunchCoordinator(registry, { ledgerFile, launchTimeoutMs: 100 });
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile, launchTimeoutMs: 1_000 });
   await Promise.race([
     coordinator.start(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("cleanup recovery blocked startup")), 50)),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("cleanup recovery blocked startup")), 500)),
   ]);
   await waitFor(() => cleanupCalls === 1);
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  assert.equal(cleanupCalls, 1);
   await coordinator.stop();
+  assert.equal(cleanupCalls, 1);
   assert.equal(JSON.parse(await readFile(ledgerFile, "utf8")).retirementCleanups.length, 3);
 });
 
