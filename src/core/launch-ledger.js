@@ -59,10 +59,17 @@ export class LaunchLedger {
         }
         const records = new Map();
         const keys = new Set();
+        const claimKey = (key) => {
+          if (keys.has(key)) return false;
+          keys.add(key);
+          return true;
+        };
         for (const record of parsed.records) {
-          if (records.has(record.id) || keys.has(record.keyHash)) throw new Error("launch ledger contains duplicate records");
+          if (records.has(record.id) || !claimKey(record.keyHash)
+            || (record.retirementKeyHash !== undefined && !claimKey(record.retirementKeyHash))) {
+            throw new Error("launch ledger contains duplicate records or idempotency keys");
+          }
           records.set(record.id, structuredClone(record));
-          keys.add(record.keyHash);
         }
         this.#records = records;
         const retirements = parsed.retirements ?? [];
@@ -70,8 +77,14 @@ export class LaunchLedger {
           || retirements.some((entry) => records.has(entry.launchId))) {
           throw new Error("launch ledger contains duplicate retirement records");
         }
+        for (const retirement of retirements) {
+          if (!claimKey(retirement.creationKeyHash) || !claimKey(retirement.keyHash)) {
+            throw new Error("launch ledger contains duplicate idempotency keys");
+          }
+        }
         this.#retirements = new Map(retirements.map((entry) => [entry.launchId, structuredClone(entry)]));
-        const cleanups = parsed.retirementCleanups ?? retirements.map(retirementCleanup);
+        const cleanups = parsed.retirementCleanups
+          ?? retirements.filter((entry) => entry.cleanupScope !== undefined).map(retirementCleanup);
         if (new Set(cleanups.map((entry) => entry.launchId)).size !== cleanups.length) {
           throw new Error("launch ledger contains duplicate retirement cleanups");
         }
@@ -213,7 +226,11 @@ export class LaunchLedger {
       const previousCleanups = new Map(this.#retirementCleanups);
       this.#records.delete(id);
       this.#retirements.set(id, entry);
-      this.#retirementCleanups.set(id, retirementCleanup(entry));
+      if (entry.cleanupScope !== undefined) {
+        this.#retirementCleanups.set(id, retirementCleanup(entry));
+      } else {
+        this.#retirementCleanups.delete(id);
+      }
       while (this.#retirements.size > MAX_RETIREMENTS) {
         this.#retirements.delete(this.#retirements.keys().next().value);
       }

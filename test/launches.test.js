@@ -250,6 +250,35 @@ test("provider retirement capacity is reserved before the launch ledger fence", 
   assert.equal(JSON.parse(await readFile(ledgerFile, "utf8")).records[0].state, "owned");
 });
 
+test("launch ledger rejects duplicate retirement keys during recovery", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-duplicate-retirement-key-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const timestamp = "2026-08-25T00:00:00.000Z";
+  const record = (index, keyHash, signature) => ({
+    id: `launch:00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    attemptId: `attempt:10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    keyHash,
+    signature,
+    request: resolvedRequest(),
+    state: "retiring",
+    requestedAt: timestamp,
+    updatedAt: timestamp,
+    providerAgentId: `provider:${index}`,
+    agentId: `demo:owned:${index}`,
+    retirementKeyHash: "r".repeat(43),
+  });
+  await writeFile(ledgerFile, `${JSON.stringify({
+    schemaVersion: 2,
+    records: [record(1, "a".repeat(43), "b".repeat(43)), record(2, "c".repeat(43), "d".repeat(43))],
+    retirements: [],
+    retirementCleanups: [],
+  })}\n`, { mode: 0o600 });
+
+  const ledger = new LaunchLedger(ledgerFile);
+  await assert.rejects(ledger.open(), /duplicate records or idempotency keys/);
+});
+
 test("retirement capacity reserves the largest tombstones across completion orders", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-launch-retirement-order-capacity-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -762,6 +791,29 @@ test("retirement cleanup survives replay-tombstone eviction", async (t) => {
   await second.stop();
   const cleaned = JSON.parse(await readFile(ledgerFile, "utf8"));
   assert.equal(cleaned.retirementCleanups, undefined);
+});
+
+test("retirement without a provider cleanup scope does not retain cleanup work", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-no-retirement-cleanup-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledgerFile = join(directory, "launches.json");
+  const registry = fixtureRegistry();
+  registry.retireLaunch = async () => ({ status: "retired" });
+  registry.deactivateOwnedLaunch = () => {};
+  const coordinator = new LaunchCoordinator(registry, { ledgerFile });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "no-cleanup-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+  await coordinator.retire(
+    accepted.launch.id,
+    { confirmDeleteOwnedAgentAndState: true },
+    "no-cleanup-retirement-key",
+  );
+  await coordinator.stop();
+
+  const persisted = JSON.parse(await readFile(ledgerFile, "utf8"));
+  assert.equal(persisted.retirements.length, 1);
+  assert.deepEqual(persisted.retirementCleanups, []);
 });
 
 test("a new pre-delete retirement refusal restores owned launch state", async (t) => {
