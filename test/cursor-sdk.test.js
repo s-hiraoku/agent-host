@@ -248,7 +248,7 @@ test("Cursor SDK does not retain a delete attempt when credentials fail before i
   );
   let state = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(state.records[0].state, "retiring");
-  assert.equal(state.records[0].deleteAttempted, undefined);
+  assert.equal(state.records[0].deleteAttempted, false);
   assert.equal(deletes, 0);
 
   status = "working";
@@ -2503,6 +2503,9 @@ test("Cursor SDK retirement preparation rejects before the launch ledger can be 
   await adapter.open();
   assert.deepEqual(await adapter.prepareLaunchRetirement(ledgerRecord(owned), {
     keyHash: "r".repeat(43),
+  }), { status: "blocked", code: "cursor_provenance_capacity" });
+  assert.deepEqual(await adapter.retireLaunch({
+    ...ledgerRecord(owned), state: "retiring", retirementKeyHash: "r".repeat(43),
   }), { status: "blocked", code: "cursor_provenance_capacity" });
   const persisted = JSON.parse(await readFile(fixture.provenanceFile, "utf8"));
   assert.equal(persisted.records[0].state, "owned");

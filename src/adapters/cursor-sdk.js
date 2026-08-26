@@ -225,7 +225,7 @@ export class CursorSdkAdapter {
         || typeof this.#bridge.deleteLocal !== "function") {
         return { status: "unsupported" };
       }
-      const provenance = await this.#state.get(record.attemptId);
+      let provenance = await this.#state.get(record.attemptId);
       if (!this.#matchesConfiguration(provenance, record)
         || !["owned", "retiring", "retired"].includes(provenance?.state)) {
         return { status: "uncertain", code: "cursor_retirement_unproven" };
@@ -236,6 +236,18 @@ export class CursorSdkAdapter {
       if (provenance.retirementKeyHash !== undefined
         && provenance.retirementKeyHash !== record.retirementKeyHash) {
         return { status: "uncertain", code: "cursor_retirement_conflict" };
+      }
+      if (provenance.state === "owned" && provenance.retirementReserved !== true) {
+        try {
+          provenance = await this.#state.reserveRetirement(
+            record.attemptId, record.retirementKeyHash,
+          );
+        } catch (error) {
+          if (error?.code === "cursor_provenance_capacity") {
+            return { status: "blocked", code: "cursor_provenance_capacity" };
+          }
+          throw error;
+        }
       }
       const replayingDelete = provenance.state === "retiring" && provenance.deleteAttempted === true;
       if (!replayingDelete) {
