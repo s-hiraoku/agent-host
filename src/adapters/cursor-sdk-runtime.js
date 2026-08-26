@@ -93,6 +93,9 @@ export class CursorSdkBridgeRuntimeAdapter {
   prepareLaunchRetirement(record, options) {
     return this.#required().prepareLaunchRetirement(record, options);
   }
+  cancelLaunchRetirementPreparation(record, options) {
+    return this.#required().cancelLaunchRetirementPreparation(record, options);
+  }
   retireLaunch(record, options) { return this.#required().retireLaunch(record, options); }
   finalizeLaunchRetirement(retirement, options) {
     return this.#required().finalizeLaunchRetirement(retirement, options);

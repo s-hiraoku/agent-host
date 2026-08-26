@@ -250,6 +250,51 @@ test("provider retirement capacity is reserved before the launch ledger fence", 
   assert.equal(JSON.parse(await readFile(ledgerFile, "utf8")).records[0].state, "owned");
 });
 
+test("a losing ledger key race releases the provider retirement reservation", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-host-retirement-key-race-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const durableLedger = new LaunchLedger(join(directory, "launches.json"));
+  const ledger = new Proxy(durableLedger, {
+    get(target, property) {
+      if (property === "beginRetirement") {
+        return async () => {
+          const error = new Error("retirement key already claimed");
+          error.code = "retirement_key_conflict";
+          throw error;
+        };
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  let released;
+  const registry = fixtureRegistry();
+  registry.prepareLaunchRetirement = async () => ({ status: "prepared" });
+  registry.cancelLaunchRetirementPreparation = async (provider, record, options) => {
+    released = { provider, record, options };
+    return true;
+  };
+  const coordinator = new LaunchCoordinator(registry, { ledger });
+  await coordinator.start();
+  const accepted = await coordinator.submit(LOCAL_REQUEST, "racing-launch-key");
+  await waitFor(() => coordinator.get(accepted.launch.id)?.state === "owned");
+
+  await assert.rejects(
+    coordinator.retire(
+      accepted.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "racing-retirement-key",
+    ),
+    (error) => error.code === "idempotency_conflict",
+  );
+  assert.equal(released.provider, "demo");
+  assert.equal(released.record.id, accepted.launch.id);
+  assert.match(released.options.keyHash, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(released.options.signal.aborted, false);
+  assert.equal(coordinator.get(accepted.launch.id).state, "owned");
+  await coordinator.stop();
+});
+
 test("timed-out retirement preparation is capped until its provider settles", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-host-retirement-preparation-timeout-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

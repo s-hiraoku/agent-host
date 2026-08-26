@@ -293,6 +293,12 @@ export class AgentRegistry {
     return adapter.prepareLaunchRetirement(record, options);
   }
 
+  async cancelLaunchRetirementPreparation(provider, record, options = {}) {
+    const adapter = this.#launchAdapter(provider);
+    if (!adapter?.cancelLaunchRetirementPreparation) return false;
+    return await adapter.cancelLaunchRetirementPreparation(record, options) === true;
+  }
+
   async finalizeLaunchRetirement(retirement, options = {}) {
     const adapter = this.#launchAdapter(retirement?.provider);
     if (typeof adapter?.finalizeLaunchRetirement !== "function") return false;

@@ -278,6 +278,7 @@ export class LaunchCoordinator {
         }
       });
       const result = await invocation.result.catch(() => ({ status: "uncertain" }));
+      const providerPrepared = result?.status === "prepared";
       if (result?.status === "blocked") {
         throw new ContractError(
           "launch_retirement_capacity",
@@ -294,6 +295,22 @@ export class LaunchCoordinator {
       }
       try { record = await this.#ledger.beginRetirement(record.id, keyHash); }
       catch (error) {
+        if (providerPrepared
+          && ["retirement_key_conflict", "retirement_cleanup_full"].includes(error?.code)) {
+          const release = this.#invoke((options) => (
+            this.#registry.cancelLaunchRetirementPreparation?.(
+              record.request.provider, record, { ...options, keyHash },
+            )
+          ));
+          const released = await release.result.catch(() => false);
+          if (released !== true) {
+            throw new ContractError(
+              "launch_retirement_uncertain",
+              "owned launch retirement preparation could not be released",
+              503,
+            );
+          }
+        }
         if (error?.code === "retirement_key_conflict") throw retirementConflict();
         if (error?.code === "retirement_cleanup_full") {
           throw new ContractError("launch_retirement_capacity", "launch retirement cleanup is full", 503);

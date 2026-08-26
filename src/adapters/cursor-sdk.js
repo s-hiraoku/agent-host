@@ -329,6 +329,16 @@ export class CursorSdkAdapter {
     }));
   }
 
+  async cancelLaunchRetirementPreparation(record, { keyHash, signal } = {}) {
+    return this.#run(() => this.#exclusiveAgent(record?.agentId, async () => {
+      signal?.throwIfAborted();
+      if (record?.state !== "owned" || !/^[A-Za-z0-9_-]{43}$/.test(keyHash ?? "")) return false;
+      await this.#state.releaseRetirementReservation(record.attemptId, keyHash);
+      signal?.throwIfAborted();
+      return true;
+    }));
+  }
+
   async finalizeLaunchRetirement(retirement, { signal } = {}) {
     return this.#run(async () => {
       signal?.throwIfAborted();
@@ -843,6 +853,20 @@ export class CursorSdkProvenanceStore {
       };
       return updated;
     }, true);
+  }
+
+  async releaseRetirementReservation(attemptId, keyHash) {
+    return this.#updateOwned(attemptId, (record) => {
+      if (record.retirementKeyHash !== keyHash || record.retirementReserved !== true
+        || record.deleteAttempted !== false) {
+        throw new Error("Cursor SDK retirement reservation changed");
+      }
+      const updated = { ...record };
+      delete updated.retirementKeyHash;
+      delete updated.retirementReserved;
+      delete updated.deleteAttempted;
+      return updated;
+    });
   }
 
   async markRetired(attemptId, keyHash) {
