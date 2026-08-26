@@ -286,16 +286,10 @@ export class LaunchCoordinator {
           503,
         );
       }
-      if (result?.status === "uncertain") {
-        throw new ContractError(
-          "launch_retirement_uncertain",
-          "owned launch retirement could not be prepared",
-          503,
-        );
-      }
+      const preparationUncertain = result?.status === "uncertain";
       try { record = await this.#ledger.beginRetirement(record.id, keyHash); }
       catch (error) {
-        if (providerPrepared
+        if ((providerPrepared || preparationUncertain)
           && ["retirement_key_conflict", "retirement_cleanup_full"].includes(error?.code)) {
           const release = this.#invoke((options) => (
             this.#registry.cancelLaunchRetirementPreparation?.(
@@ -318,6 +312,13 @@ export class LaunchCoordinator {
         throw error;
       }
       this.#emit(record, "retiring");
+      if (preparationUncertain) {
+        throw new ContractError(
+          "launch_retirement_uncertain",
+          "owned launch retirement could not be prepared",
+          503,
+        );
+      }
     }
     if (record.retirementKeyHash !== keyHash) throw retirementConflict();
     if (this.#draining) {

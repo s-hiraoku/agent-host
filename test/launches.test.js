@@ -332,7 +332,9 @@ test("timed-out retirement preparation is capped until its provider settles", as
     (error) => error.code === "launch_retirement_uncertain",
   );
   assert.equal(preparationSignal.aborted, true);
-  assert.equal(coordinator.get(accepted.launch.id).state, "owned");
+  assert.equal(coordinator.get(accepted.launch.id).state, "retiring");
+  const fenced = JSON.parse(await readFile(join(directory, "launches.json"), "utf8")).records[0];
+  assert.match(fenced.retirementKeyHash, /^[A-Za-z0-9_-]{43}$/);
 
   const next = await coordinator.submit(LOCAL_REQUEST, "post-preparation-timeout-launch-key");
   await waitFor(() => coordinator.get(next.launch.id)?.state === "owned");
@@ -355,7 +357,7 @@ test("timed-out retirement preparation is capped until its provider settles", as
     "preparation-timeout-retirement-key",
   );
   assert.equal(retired.retirement.state, "retired");
-  assert.equal(preparationCalls, 2);
+  assert.equal(preparationCalls, 1);
   await coordinator.stop();
 });
 
