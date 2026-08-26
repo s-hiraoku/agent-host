@@ -180,6 +180,14 @@ export class LaunchCoordinator {
         503,
       );
     }
+    if (record.state === "retiring"
+      && this.#retirementPreparations.has(record.request.provider)) {
+      throw new ContractError(
+        "launch_retirement_uncertain",
+        "owned launch retirement preparation is still pending",
+        503,
+      );
+    }
     const entry = this.#trackRetirement(record, keyHash);
     return { retirement: retirementView(await entry.promise), replayed };
   }
@@ -267,14 +275,14 @@ export class LaunchCoordinator {
 
   async #runRetirement(record, keyHash, entry) {
     const recovered = record.state === "retiring";
+    if (this.#retirementPreparations.has(record.request.provider)) {
+      throw new ContractError(
+        "launch_retirement_uncertain",
+        "owned launch retirement preparation is still pending",
+        503,
+      );
+    }
     if (record.state === "owned") {
-      if (this.#retirementPreparations.has(record.request.provider)) {
-        throw new ContractError(
-          "launch_retirement_uncertain",
-          "owned launch retirement preparation is still pending",
-          503,
-        );
-      }
       const invocation = this.#invoke((options) => this.#registry.prepareLaunchRetirement?.(
         record.request.provider, record, { ...options, keyHash },
       ));

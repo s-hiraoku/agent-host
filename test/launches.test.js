@@ -337,6 +337,15 @@ test("timed-out retirement preparation is capped until its provider settles", as
   assert.equal(deactivated, accepted.launch.id);
   const fenced = JSON.parse(await readFile(join(directory, "launches.json"), "utf8")).records[0];
   assert.match(fenced.retirementKeyHash, /^[A-Za-z0-9_-]{43}$/);
+  await assert.rejects(
+    coordinator.retire(
+      accepted.launch.id,
+      { confirmDeleteOwnedAgentAndState: true },
+      "preparation-timeout-retirement-key",
+    ),
+    (error) => error.code === "launch_retirement_uncertain",
+  );
+  assert.equal(preparationCalls, 1);
 
   const next = await coordinator.submit(LOCAL_REQUEST, "post-preparation-timeout-launch-key");
   await waitFor(() => coordinator.get(next.launch.id)?.state === "owned");
