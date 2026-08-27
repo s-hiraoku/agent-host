@@ -75,10 +75,16 @@ test("runtime preflights both credential files without repairing unsafe modes", 
   }
 });
 
-test("configured Cursor SDK runtime exposes the read dispatch boundary", async () => {
+test("configured Cursor SDK runtime exposes read and retirement dispatch boundaries", async () => {
   const subject = new CursorSdkBridgeRuntimeAdapter({});
-  assert.equal(typeof subject.read, "function");
-  assert.throws(() => subject.read({ id: "cursor-sdk:not-open" }), /must be opened before use/);
+  for (const [method, args] of [
+    ["read", [{ id: "cursor-sdk:not-open" }]],
+    ["retireLaunch", [{ id: "launch:not-open" }]],
+    ["finalizeLaunchRetirement", [{ launchId: "launch:not-open" }]],
+  ]) {
+    assert.equal(typeof subject[method], "function");
+    assert.throws(() => subject[method](...args), /must be opened before use/);
+  }
   await subject.destroy();
 });
 
@@ -970,6 +976,145 @@ test("bridge client rejects malformed response media without interpreting it", a
   t.after(() => bridge.close());
   const subject = client(bridge.endpoint);
   await assert.rejects(subject.open(), (error) => error.code === "cursor_bridge_invalid_response");
+  await subject.destroy();
+});
+
+test("bridge client deletes only one exact owned local agent and accepts an absent replay", async (t) => {
+  const requests = [];
+  let missing = false;
+  const bridge = await fakeBridge(async (req, body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    requests.push({ url: req.url, body });
+    if (missing) return json(response, 404, { code: "not_found" });
+    missing = true;
+    return json(response, 200, {});
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  const input = {
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  };
+  assert.deepEqual(await subject.deleteLocal(input), { agentId: "agent-owned", deleted: true });
+  assert.deepEqual(await subject.deleteLocal({
+    ...input, credential: Buffer.from(API_KEY), allowNotFound: true,
+  }), {
+    agentId: "agent-owned", deleted: true,
+  });
+  assert.deepEqual(requests, [{
+    url: "/sdk.v1.SdkAgentService/DeleteAgent",
+    body: { agentId: "agent-owned", options: { cwd: "/workspace", apiKey: API_KEY } },
+  }, {
+    url: "/sdk.v1.SdkAgentService/DeleteAgent",
+    body: { agentId: "agent-owned", options: { cwd: "/workspace", apiKey: API_KEY } },
+  }]);
+  await subject.destroy();
+});
+
+test("bridge client acquires its bearer token before the delete invocation fence", async (t) => {
+  const requests = [];
+  const bridge = await fakeBridge(async (req, _body, response) => {
+    requests.push(req.url);
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    return json(response, 200, {});
+  });
+  t.after(() => bridge.close());
+  let tokenCalls = 0;
+  const subject = createCursorSdkBridgeClient({
+    endpoint: bridge.endpoint,
+    sdkVersion: "1.0.28",
+    bearerTokenSource: createCursorSdkCredentialSource(() => {
+      tokenCalls += 1;
+      if (tokenCalls === 3) throw new Error("bearer token unavailable");
+      return TOKEN;
+    }),
+  });
+  await subject.open();
+  let invoked = false;
+  await assert.rejects(subject.deleteLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+    onInvoke: async () => { invoked = true; },
+  }));
+  assert.equal(invoked, false);
+  assert.deepEqual(requests, [
+    "/sdk.v1.SdkBridgeControlService/Ping",
+    "/sdk.v1.SdkBridgeControlService/GetVersion",
+  ]);
+  await subject.destroy();
+});
+
+test("bridge client validates its bearer header before the delete invocation fence", async (t) => {
+  const bridge = await fakeBridge(async (req, _body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    return json(response, 200, {});
+  });
+  t.after(() => bridge.close());
+  let tokenCalls = 0;
+  const subject = createCursorSdkBridgeClient({
+    endpoint: bridge.endpoint,
+    sdkVersion: "1.0.28",
+    bearerTokenSource: createCursorSdkCredentialSource(() => (
+      ++tokenCalls === 3 ? "rotated\ninvalid-token" : TOKEN
+    )),
+  });
+  await subject.open();
+  let invoked = false;
+  await assert.rejects(subject.deleteLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+    onInvoke: async () => { invoked = true; },
+  }), (error) => error.code === "ERR_INVALID_CHAR");
+  assert.equal(invoked, false);
+  await subject.destroy();
+});
+
+test("bridge client rejects a delete when the connection was never established", async () => {
+  const bridge = await fakeBridge(async (req, _body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    return json(response, 200, {});
+  });
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  await bridge.close();
+  let invoked = false;
+  await assert.rejects(subject.deleteLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+    onInvoke: async () => { invoked = true; },
+  }), (error) => error.code === "ECONNREFUSED" && error.deleteDisposition === "rejected");
+  assert.equal(invoked, true);
+  await subject.destroy();
+});
+
+test("bridge client rejects an absent agent before an ambiguous delete replay", async (t) => {
+  const bridge = await fakeBridge(async (req, _body, response) => {
+    if (req.url.endsWith("/Ping")) return json(response, 200, { message: "pong" });
+    if (req.url.endsWith("/GetVersion")) {
+      return json(response, 200, { bridgeVersion: "1.0.28", protocolVersion: "sdk.v1", capabilities: [] });
+    }
+    return json(response, 404, { code: "not_found" });
+  });
+  t.after(() => bridge.close());
+  const subject = client(bridge.endpoint);
+  await subject.open();
+  await assert.rejects(subject.deleteLocal({
+    agentId: "agent-owned", cwd: "/workspace", storeDirectory: "/store",
+    credential: Buffer.from(API_KEY),
+  }), (error) => error.code === "cursor_bridge_not_found" && error.deleteDisposition === "rejected");
   await subject.destroy();
 });
 

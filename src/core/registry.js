@@ -86,6 +86,7 @@ export class AgentRegistry {
   #forcedProbeMinMs;
   #circuits = new Map();
   #ownedLaunches = new Map();
+  #ownedLaunchGeneration = 0;
   #currentRefreshForced = false;
   #forcedFollowupPromise;
   events = new AgentEventBus();
@@ -280,11 +281,66 @@ export class AgentRegistry {
     return adapter.reconcileLaunch(record, options);
   }
 
-  activateOwnedLaunch(record) {
+  async retireLaunch(provider, record, options = {}) {
+    const adapter = this.#launchAdapter(provider);
+    if (!adapter?.retireLaunch) return { status: "unsupported" };
+    return adapter.retireLaunch(record, options);
+  }
+
+  async prepareLaunchRetirement(provider, record, options = {}) {
+    const adapter = this.#launchAdapter(provider);
+    if (!adapter?.prepareLaunchRetirement) return { status: "unsupported" };
+    return adapter.prepareLaunchRetirement(record, options);
+  }
+
+  async cancelLaunchRetirementPreparation(provider, record, options = {}) {
+    const adapter = this.#launchAdapter(provider);
+    if (!adapter?.cancelLaunchRetirementPreparation) return false;
+    return await adapter.cancelLaunchRetirementPreparation(record, options) === true;
+  }
+
+  async recoverLaunchRetirementPreparations(records, options = {}) {
+    const byProvider = new Map();
+    for (const record of records) {
+      const group = byProvider.get(record.request.provider) ?? [];
+      group.push(record);
+      byProvider.set(record.request.provider, group);
+    }
+    for (const [provider, providerRecords] of byProvider) {
+      const adapter = this.#launchAdapter(provider);
+      if (typeof adapter?.recoverLaunchRetirementPreparations !== "function") continue;
+      if (await adapter.recoverLaunchRetirementPreparations(
+        providerRecords.map((record) => structuredClone(record)), options,
+      ) !== true) return false;
+    }
+    return true;
+  }
+
+  async finalizeLaunchRetirement(retirement, options = {}) {
+    const adapter = this.#launchAdapter(retirement?.provider);
+    if (typeof adapter?.finalizeLaunchRetirement !== "function") return false;
+    return await adapter.finalizeLaunchRetirement(retirement, options) === true;
+  }
+
+  activateOwnedLaunch(record, cachedAgent) {
     if (record?.state !== "owned" || typeof record.id !== "string" || typeof record.agentId !== "string") {
       throw new TypeError("owned launch record is required");
     }
     this.#ownedLaunches.set(record.id, structuredClone(record));
+    this.#ownedLaunchGeneration += 1;
+    if (cachedAgent !== undefined) this.#restoreCachedOwnedAgent(record, cachedAgent);
+  }
+
+  deactivateOwnedLaunch(id) {
+    const record = this.#ownedLaunches.get(id);
+    if (this.#ownedLaunches.delete(id)) this.#ownedLaunchGeneration += 1;
+    return record?.agentId ? this.#evictCachedOwnedAgent(record.agentId) : undefined;
+  }
+
+  refreshAfterOwnedLaunchChange() {
+    if (this.#closed) return Promise.resolve(this.list());
+    if (!this.#refreshPromise) return this.refresh({ force: true });
+    return this.#queueForcedFollowup();
   }
 
   #launchAdapter(provider) {
@@ -298,18 +354,7 @@ export class AgentRegistry {
     const force = options.force ?? true;
     if (this.#refreshPromise) {
       if (force && !this.#currentRefreshForced) {
-        if (!this.#forcedFollowupPromise) {
-          let followup;
-          followup = this.#refreshPromise.then(() => {
-            if (this.#closed) return this.list();
-            if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
-            return this.refresh({ force: true });
-          }).finally(() => {
-            if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
-          });
-          this.#forcedFollowupPromise = followup;
-        }
-        return this.#forcedFollowupPromise;
+        return this.#queueForcedFollowup();
       }
       return this.#refreshPromise;
     }
@@ -328,6 +373,21 @@ export class AgentRegistry {
     return this.#refreshPromise;
   }
 
+  #queueForcedFollowup() {
+    if (!this.#forcedFollowupPromise) {
+      let followup;
+      followup = this.#refreshPromise.then(() => {
+        if (this.#closed) return this.list();
+        if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
+        return this.refresh({ force: true });
+      }).finally(() => {
+        if (this.#forcedFollowupPromise === followup) this.#forcedFollowupPromise = undefined;
+      });
+      this.#forcedFollowupPromise = followup;
+    }
+    return this.#forcedFollowupPromise;
+  }
+
   async #runRefresh(force) {
     await Promise.all(
       [...this.#adapters.values()].map(async (adapter) => {
@@ -337,6 +397,10 @@ export class AgentRegistry {
           return;
         }
         const outcome = this.#normalizeOutcome(adapter, await this.#discoverAdapter(adapter));
+        if (outcome.status === "superseded") {
+          this.#discardCircuitProbe(adapter.id, admission.probe);
+          return;
+        }
         if (!this.#closed) {
           this.#recordCircuitOutcome(adapter.id, outcome, admission.probe);
           this.#applyOutcome(outcome);
@@ -460,14 +524,87 @@ export class AgentRegistry {
   }
 
   #normalizeOutcome(adapter, outcome) {
+    if (outcome.status === "success" && typeof adapter?.launchCapabilities === "function"
+      && outcome.ownedLaunchGeneration !== this.#ownedLaunchGeneration) {
+      return { ...outcome, status: "superseded" };
+    }
     if (outcome.status !== "success" || !adapter?.isDiscoveryCurrent
-      || adapter.isDiscoveryCurrent(outcome.agents)) return outcome;
-    return {
-      ...outcome,
-      status: "error",
-      markStale: true,
-      error: new Error("adapter discovery used a stale transport"),
-    };
+      || adapter.isDiscoveryCurrent(outcome.agents)) {
+      if (outcome.status !== "success" || typeof adapter?.launchCapabilities !== "function") return outcome;
+      const provider = adapter.launchCapabilities()?.provider;
+      const ownedAgentIds = new Set([...this.#ownedLaunches.values()]
+        .filter((record) => record.request.provider === provider)
+        .map((record) => record.agentId));
+      return { ...outcome, agents: outcome.agents.filter((agent) => ownedAgentIds.has(agent.id)) };
+    }
+    return { ...outcome, status: "error", markStale: true,
+      error: new Error("adapter discovery used a stale transport") };
+  }
+
+  #evictCachedOwnedAgent(agentId) {
+    const previous = this.#agents.get(agentId);
+    if (!previous) return undefined;
+    const previousCanonical = new Map(this.list().map((agent) => [agent.id, agent]));
+    const previousRaw = this.listRaw().map(semanticAgent);
+    const previousOverlay = historyOverlay(previousRaw, this.#historyAgents);
+    const next = new Map(this.#agents);
+    next.delete(agentId);
+    this.#agents = next;
+    const nextRaw = this.listRaw().map(semanticAgent);
+    if (!isDeepStrictEqual(previousRaw, nextRaw)) this.#rawRevision += 1;
+    if (!isDeepStrictEqual(previousOverlay, historyOverlay(nextRaw, this.#historyAgents))) {
+      this.#historyOverlayRevision += 1;
+    }
+    const at = new Date().toISOString();
+    if (previousCanonical.has(agentId) && !this.list().some((agent) => agent.id === agentId)) {
+      this.#revision += 1;
+      this.events.emit({ type: "agent.removed", agentId, at, snapshotRevision: this.#revision });
+    }
+    const repository = normalizeRepositoryContext(previous.repositoryContext);
+    if (repository.state !== "unsupported") {
+      this.#repositoryRevision += 1;
+      this.events.emit({
+        type: "agent.repository-associations.changed",
+        agentId,
+        removed: true,
+        repositoryRevision: this.#repositoryRevision,
+        snapshotRevision: this.#revision,
+        at,
+      });
+    }
+    return structuredClone(previous);
+  }
+
+  #restoreCachedOwnedAgent(record, cachedAgent) {
+    const adapter = this.#launchAdapter(record.request.provider);
+    if (!cachedAgent || cachedAgent.id !== record.agentId || cachedAgent.provider !== record.request.provider
+      || cachedAgent.source !== adapter?.id || this.#agents.has(cachedAgent.id)) return;
+    const previousRaw = this.listRaw().map(semanticAgent);
+    const previousOverlay = historyOverlay(previousRaw, this.#historyAgents);
+    const at = new Date().toISOString();
+    const restored = { ...structuredClone(cachedAgent), updatedAt: at };
+    const next = new Map(this.#agents);
+    next.set(restored.id, restored);
+    this.#agents = next;
+    const nextRaw = this.listRaw().map(semanticAgent);
+    if (!isDeepStrictEqual(previousRaw, nextRaw)) this.#rawRevision += 1;
+    if (!isDeepStrictEqual(previousOverlay, historyOverlay(nextRaw, this.#historyAgents))) {
+      this.#historyOverlayRevision += 1;
+    }
+    this.#revision += 1;
+    this.events.emit({ type: "agent.discovered", agent: restored, at, snapshotRevision: this.#revision });
+    const repository = normalizeRepositoryContext(restored.repositoryContext);
+    if (repository.state !== "unsupported") {
+      this.#repositoryRevision += 1;
+      this.events.emit({
+        type: "agent.repository-associations.changed",
+        agentId: restored.id,
+        state: repository.state,
+        repositoryRevision: this.#repositoryRevision,
+        snapshotRevision: this.#revision,
+        at,
+      });
+    }
   }
 
   #admitAdapter(adapterId, force) {
@@ -524,6 +661,14 @@ export class AgentRegistry {
       adapter: adapterId,
       outcome: outcome.status === "timeout" ? "timeout" : "failure",
     });
+  }
+
+  #discardCircuitProbe(adapterId, probe) {
+    if (!probe) return;
+    const circuit = this.#circuits.get(adapterId);
+    circuit.phase = circuit.consecutiveFailures >= this.#circuitThreshold ? "open" : "closed";
+    circuit.probeInFlight = false;
+    circuit.lastForcedProbeAt = -Infinity;
   }
 
   async #loadHistory() {
@@ -621,6 +766,7 @@ export class AgentRegistry {
         controller,
         startedAt: Date.now(),
         startedAtIso: new Date().toISOString(),
+        ownedLaunchGeneration: this.#ownedLaunchGeneration,
       };
       flight.promise = Promise.resolve()
         .then(() => typeof adapter.launchCapabilities === "function"
@@ -654,6 +800,7 @@ export class AgentRegistry {
       adapterId: adapter.id,
       attemptedAt: flight.startedAtIso,
       durationMs: Date.now() - flight.startedAt,
+      ownedLaunchGeneration: flight.ownedLaunchGeneration,
       ...outcome,
     };
   }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { request as httpRequest } from "node:http";
+import { request as httpRequest, validateHeaderValue } from "node:http";
 import { createRedactor } from "../operations/redact.js";
 import { claimCursorSdkCredentialSource } from "./cursor-sdk.js";
 
@@ -40,7 +40,12 @@ const METHODS = Object.freeze({
   getRun: "sdk.v1.SdkAgentService/GetRun",
   getRunConversation: "sdk.v1.SdkAgentService/GetRunConversation",
   cancel: "sdk.v1.SdkAgentService/CancelRun",
+  delete: "sdk.v1.SdkAgentService/DeleteAgent",
 });
+const PRE_CONNECT_FAILURES = new WeakSet();
+const PRE_CONNECT_ERROR_CODES = new Set([
+  "EADDRNOTAVAIL", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH",
+]);
 
 export function createCursorSdkBridgeClient(options = {}) {
   const endpoint = loopbackEndpoint(options.endpoint);
@@ -70,7 +75,7 @@ export function createCursorSdkBridgeClient(options = {}) {
   };
 
   const call = async (method, payload, signal, validateResponse, maximumResponseBytes = MAX_RESPONSE_BYTES,
-    sanitizeResponse) => {
+    sanitizeResponse, onInvoke) => {
     const body = Buffer.from(JSON.stringify(payload), "utf8");
     if (body.length > MAX_REQUEST_BYTES) throw bridgeError("cursor_bridge_request_too_large");
     try {
@@ -78,6 +83,9 @@ export function createCursorSdkBridgeClient(options = {}) {
         const tokenText = token.toString("utf8");
         const authorization = `Bearer ${tokenText}`;
         const redact = createRedactor({ secrets: [tokenText] });
+        signal?.throwIfAborted();
+        validateHeaderValue("authorization", authorization);
+        await onInvoke?.();
         const response = await directRequest(new URL(method, endpoint), {
           method: "POST",
           headers: {
@@ -86,7 +94,7 @@ export function createCursorSdkBridgeClient(options = {}) {
             "content-type": "application/json",
           },
           body,
-          signal: combinedSignal(signal, timeoutMs),
+          signal: combinedSignal(onInvoke ? undefined : signal, timeoutMs),
         });
         const parsed = await boundedJson(response, maximumResponseBytes);
         if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -357,6 +365,39 @@ export function createCursorSdkBridgeClient(options = {}) {
         throw error;
       }
     },
+    async deleteLocal({
+      agentId, cwd, storeDirectory, credential, signal, allowNotFound = false, onInvoke,
+    }) {
+      assertReady(ready, destroyed);
+      validateOperation(agentId, cwd, storeDirectory, "owned", credential);
+      const apiKey = credential.toString("utf8");
+      try {
+        await call(METHODS.delete, {
+          agentId,
+          options: { cwd, apiKey },
+        }, signal, (response) => {
+          if (!response || typeof response !== "object" || Array.isArray(response)
+            || Object.keys(response).length !== 0) {
+            throw bridgeError("cursor_bridge_invalid_response");
+          }
+        }, MAX_RESPONSE_BYTES, undefined, onInvoke);
+      } catch (error) {
+        if (!(allowNotFound && error?.code === "cursor_bridge_not_found")) {
+          markDisposition(
+            error,
+            "deleteDisposition",
+            isDefinitiveMutationRejection(error) ? "rejected" : "ambiguous",
+          );
+          throw error;
+        }
+      }
+      const active = activeRuns.get(agentId);
+      if (active) forgetRun(agentId, active);
+      const pending = pendingSends.get(agentId);
+      pending?.controller.abort();
+      pendingSends.delete(agentId);
+      return { agentId, deleted: true };
+    },
     onChange(listener) {
       if (typeof listener !== "function") throw new TypeError("listener must be a function");
       listeners.add(listener);
@@ -561,7 +602,10 @@ function directRequest(url, { method, headers, body, signal }) {
       signal,
       agent: false,
     }, resolve);
-    request.once("error", reject);
+    request.once("error", (error) => {
+      if (PRE_CONNECT_ERROR_CODES.has(error?.code)) PRE_CONNECT_FAILURES.add(error);
+      reject(error);
+    });
     request.end(body);
   });
 }
@@ -582,7 +626,8 @@ function connectError(payload, status) {
 
 function isDefinitiveMutationRejection(error) {
   return DEFINITIVE_MUTATION_REJECTION_STATUSES.has(error?.status)
-    || error?.code === "cursor_bridge_request_too_large";
+    || error?.code === "cursor_bridge_request_too_large"
+    || PRE_CONNECT_FAILURES.has(error);
 }
 
 function isDefinitiveSendRejection(error) {

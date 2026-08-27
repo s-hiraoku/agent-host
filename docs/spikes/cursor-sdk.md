@@ -60,7 +60,9 @@ observations, not live runtime guarantees:
 
 The package also documents important constraints:
 
-- `Agent.get`, archive, unarchive, and delete are cloud-only in this version;
+- the first-party high-level package surface evaluated here emphasized cloud lifecycle,
+  while the separately published `sdk.v1` 1.0.28 Bridge contract includes local
+  `DeleteAgent` with explicit cwd/API-key operation options;
 - local list operations are scoped by `cwd` or an explicit store;
 - tool allow/deny restrictions are not persisted and must be supplied again on resume;
 - local agents can execute shell/edit/delete tools and mutate their workspace;

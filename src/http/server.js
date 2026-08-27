@@ -42,6 +42,11 @@ function decodeSegment(value) {
   catch { throw new ContractError("invalid_agent_id", "agent id is not valid percent-encoded text"); }
 }
 
+function decodeLaunchSegment(value) {
+  try { return decodeURIComponent(value); }
+  catch { throw new ContractError("invalid_launch_id", "launch id is not valid percent-encoded text"); }
+}
+
 function send(res, status, body) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
@@ -113,17 +118,20 @@ export function createAgentServer(registry, options) {
       }
       const actionMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/(prompt|send-keys|approve|reject|interrupt|focus|read)$/);
       const launchMatch = url.pathname.match(/^\/v1\/launches\/([^/]+)$/);
+      const retirementMatch = url.pathname.match(/^\/v1\/launches\/([^/]+)\/retire$/);
       const requestOrigin = security.validateHost(req, server.address());
       const origin = security.validateOrigin(req, requestOrigin);
       security.applyCors(res, origin);
       if (req.method === "OPTIONS") return security.preflight(req, res, origin);
       if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) security.authenticate(req, res);
 
-      if (req.method === "POST" && actionMatch) {
+      if (req.method === "POST" && (actionMatch || retirementMatch)) {
         audit = {
           requestId: randomUUID(),
-          agentId: decodeSegment(actionMatch[1]),
-          action: actionMatch[2],
+          agentId: actionMatch
+            ? decodeSegment(actionMatch[1])
+            : decodeLaunchSegment(retirementMatch[1]),
+          action: actionMatch?.[2] ?? "retire-launch",
         };
         registry.events.emit({
           type: "audit.action",
@@ -181,13 +189,23 @@ export function createAgentServer(registry, options) {
         return sendPrivate(res, 202, { apiVersion: API_VERSION, ...result });
       }
       if (req.method === "GET" && launchMatch) {
-        let launchId;
-        try { launchId = decodeURIComponent(launchMatch[1]); }
-        catch { throw new ContractError("invalid_launch_id", "launch id is not valid percent-encoded text"); }
+        const launchId = decodeLaunchSegment(launchMatch[1]);
         const launch = launchCoordinator.get(launchId);
         return launch
           ? sendPrivate(res, 200, { apiVersion: API_VERSION, launch })
           : sendError(res, 404, "launch_not_found", "launch not found");
+      }
+      if (req.method === "POST" && retirementMatch) {
+        if (stopping) throw new ContractError("shutting_down", "agent-host is shutting down", 503);
+        security.requireJson(req);
+        const launchId = decodeLaunchSegment(retirementMatch[1]);
+        const result = await launchCoordinator.retire(
+          launchId,
+          await jsonBody(req),
+          req.headers["idempotency-key"],
+        );
+        completeAudit(true, undefined, result.replayed);
+        return sendPrivate(res, 200, { apiVersion: API_VERSION, ...result });
       }
       if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
         return send(res, 200, {
@@ -358,8 +376,9 @@ export function createAgentServer(registry, options) {
         : Promise.resolve();
       const actionState = await actionExecutor.shutdown({ graceMs: options.shutdownGraceMs });
       try {
-        await launchCoordinator.stop();
-        const registryClosed = Promise.resolve().then(() => registry.close?.());
+        const coordinatorStopped = Promise.resolve().then(() => launchCoordinator.stop());
+        const registryClosed = coordinatorStopped.then(() => registry.close?.());
+        void registryClosed.catch(() => {});
         server.closeIdleConnections?.();
         if (actionState.timedOut) server.closeAllConnections?.();
         let shutdownTimer;

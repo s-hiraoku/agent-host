@@ -21,7 +21,7 @@ const LAUNCH_ID = /^launch:[0-9a-f-]{36}$/;
 const RECORD_KEYS = new Set([
   "attemptId", "launchId", "providerAgentId", "agentId", "target", "profile", "sdkVersion",
   "bridgeNamespace", "storeScope", "targetDigest", "runId", "runPending", "cancelAttemptedRunId",
-  "state", "createdAt", "updatedAt",
+  "retirementKeyHash", "retirementReserved", "deleteAttempted", "state", "createdAt", "updatedAt",
 ]);
 const STATE_KEYS = new Set(["schemaVersion", "records"]);
 const CREDENTIAL_SOURCES = new WeakMap();
@@ -90,6 +90,7 @@ export class CursorSdkAdapter {
   #storeDirectory;
   #storeIdentity;
   #scope;
+  #retirementScope;
   #sdkVersion;
   #now;
   #activeOperations = new Set();
@@ -122,6 +123,7 @@ export class CursorSdkAdapter {
     }
     this.#state = new CursorSdkProvenanceStore(provenanceFile, options.privateState, this.#now);
     this.#scope = createHash("sha256").update(this.#storeDirectory).digest("base64url").slice(0, 16);
+    this.#retirementScope = createHash("sha256").update(provenanceFile).digest("base64url").slice(0, 16);
     this.#credentialSource = validateCredentialSource(options.credentialSource);
   }
 
@@ -214,6 +216,175 @@ export class CursorSdkAdapter {
       assertProviderAgent(result, provenance.providerAgentId);
       if (provenance.state !== "owned") await this.#state.markOwned(record.attemptId);
       return { status: "owned", providerAgentId: provenance.providerAgentId, agentId: provenance.agentId };
+    });
+  }
+
+  async retireLaunch(record, { signal } = {}) {
+    return this.#run(() => this.#exclusiveAgent(record?.agentId, async () => {
+      if (record?.state !== "retiring" || !/^[A-Za-z0-9_-]{43}$/.test(record.retirementKeyHash ?? "")
+        || typeof this.#bridge.deleteLocal !== "function") {
+        return { status: "unsupported" };
+      }
+      let provenance = await this.#state.get(record.attemptId);
+      if (!this.#matchesConfiguration(provenance, record)
+        || !["owned", "retiring", "retired"].includes(provenance?.state)) {
+        return { status: "uncertain", code: "cursor_retirement_unproven" };
+      }
+      if (provenance.state === "retired") {
+        return { status: "retired", cleanupScope: this.#retirementScope };
+      }
+      if (provenance.retirementKeyHash !== undefined
+        && provenance.retirementKeyHash !== record.retirementKeyHash) {
+        return { status: "uncertain", code: "cursor_retirement_conflict" };
+      }
+      if (provenance.state === "owned" && provenance.retirementReserved !== true) {
+        try {
+          provenance = await this.#state.reserveRetirement(
+            record.attemptId, record.retirementKeyHash,
+          );
+        } catch (error) {
+          if (error?.code === "cursor_provenance_capacity") {
+            return { status: "blocked", code: "cursor_provenance_capacity" };
+          }
+          throw error;
+        }
+      }
+      const replayingDelete = provenance.state === "retiring" && provenance.deleteAttempted === true;
+      if (!replayingDelete) {
+        const blocked = async (code) => {
+          if (provenance.retirementKeyHash === record.retirementKeyHash) {
+            await this.#state.cancelRetirement(record.attemptId, record.retirementKeyHash);
+          }
+          return { status: "blocked", code };
+        };
+        if (provenance.runPending === true || provenance.cancelAttemptedRunId !== undefined) {
+          return blocked("cursor_run_state_unsettled");
+        }
+        const target = this.#targets.get(provenance.target);
+        await this.#assertBridgeDirectories(target);
+        const current = await this.#callBridge("getLocal", {
+          agentId: provenance.providerAgentId,
+          cwd: target.cwd,
+          storeDirectory: this.#storeDirectory,
+        }, signal);
+        assertProviderAgent(current, provenance.providerAgentId);
+        if (!["idle", "error"].includes(normalizeStatus(current.status))) {
+          return blocked("cursor_agent_not_terminal");
+        }
+        if (SAFE_RUN_ID.test(provenance.runId ?? "")) {
+          if (typeof this.#bridge.inspectRunLocal !== "function") {
+            return blocked("cursor_run_inspection_unavailable");
+          }
+          const run = await this.#callBridge("inspectRunLocal", {
+            agentId: provenance.providerAgentId,
+            runId: provenance.runId,
+            cwd: target.cwd,
+            storeDirectory: this.#storeDirectory,
+          }, signal);
+          assertRunIdentity(run, provenance.providerAgentId, provenance.runId);
+          if (run.status !== "terminal") return blocked("cursor_run_not_terminal");
+        }
+        if (provenance.state === "owned") {
+          await this.#state.beginRetirement(record.attemptId, record.retirementKeyHash);
+        }
+      }
+      const retiring = await this.#state.get(record.attemptId);
+      const target = this.#targets.get(retiring.target);
+      await this.#assertBridgeDirectories(target);
+      let result;
+      try {
+        result = await this.#callBridge("deleteLocal", {
+          agentId: retiring.providerAgentId,
+          cwd: target.cwd,
+          storeDirectory: this.#storeDirectory,
+          allowNotFound: replayingDelete,
+          onInvoke: replayingDelete ? undefined : () => (
+            this.#state.markDeleteAttempted(record.attemptId, record.retirementKeyHash)
+          ),
+        }, signal);
+      } catch (error) {
+        if (!replayingDelete && error?.deleteDisposition === "rejected") {
+          await this.#state.cancelRetirement(record.attemptId, record.retirementKeyHash);
+          return { status: "blocked", code: "cursor_delete_rejected" };
+        }
+        throw error;
+      }
+      assertProviderAgent(result, retiring.providerAgentId);
+      if (result.deleted !== true) throw new Error("Cursor SDK bridge did not confirm agent deletion");
+      await this.#state.markRetired(record.attemptId, record.retirementKeyHash);
+      return { status: "retired", cleanupScope: this.#retirementScope };
+    }));
+  }
+
+  async prepareLaunchRetirement(record, { keyHash, signal } = {}) {
+    return this.#run(() => this.#exclusiveAgent(record?.agentId, async () => {
+      signal?.throwIfAborted();
+      if (record?.state !== "owned" || !/^[A-Za-z0-9_-]{43}$/.test(keyHash ?? "")
+        || typeof this.#bridge.deleteLocal !== "function") {
+        return { status: "unsupported" };
+      }
+      const provenance = await this.#state.get(record.attemptId);
+      signal?.throwIfAborted();
+      if (!this.#matchesConfiguration(provenance, record) || provenance?.state !== "owned") {
+        return { status: "uncertain", code: "cursor_retirement_unproven" };
+      }
+      if (provenance.retirementKeyHash !== undefined
+        && provenance.retirementKeyHash !== keyHash) {
+        return { status: "blocked", code: "cursor_retirement_conflict" };
+      }
+      try {
+        await this.#state.reserveRetirement(record.attemptId, keyHash);
+      } catch (error) {
+        if (error?.code === "cursor_provenance_capacity") {
+          return { status: "blocked", code: "cursor_provenance_capacity" };
+        }
+        throw error;
+      }
+      signal?.throwIfAborted();
+      return { status: "prepared" };
+    }));
+  }
+
+  async cancelLaunchRetirementPreparation(record, { keyHash, signal } = {}) {
+    return this.#run(() => this.#exclusiveAgent(record?.agentId, async () => {
+      signal?.throwIfAborted();
+      if (record?.state !== "owned" || !/^[A-Za-z0-9_-]{43}$/.test(keyHash ?? "")) return false;
+      await this.#state.releaseRetirementReservation(record.attemptId, keyHash);
+      signal?.throwIfAborted();
+      return true;
+    }));
+  }
+
+  async recoverLaunchRetirementPreparations(records, { signal } = {}) {
+    return this.#run(async () => {
+      if (!Array.isArray(records)) throw new TypeError("owned launch records must be an array");
+      const provenanceByAttempt = await this.#state.snapshot();
+      const reservations = records.flatMap((record) => {
+        signal?.throwIfAborted();
+        const provenance = provenanceByAttempt.get(record.attemptId);
+        return provenance?.retirementReserved === true
+          ? [this.#verifiedProvenance(provenance, record)]
+          : [];
+      });
+      for (const provenance of reservations) {
+        signal?.throwIfAborted();
+        await this.#state.releaseRetirementReservation(
+          provenance.attemptId, provenance.retirementKeyHash,
+        );
+      }
+      signal?.throwIfAborted();
+      return true;
+    });
+  }
+
+  async finalizeLaunchRetirement(retirement, { signal } = {}) {
+    return this.#run(async () => {
+      signal?.throwIfAborted();
+      if (retirement?.provider !== "cursor" || !ATTEMPT_ID.test(retirement.attemptId ?? "")
+        || retirement.cleanupScope !== this.#retirementScope) return false;
+      await this.#state.removeRetired(retirement.attemptId, retirement.keyHash);
+      signal?.throwIfAborted();
+      return true;
     });
   }
 
@@ -515,7 +686,7 @@ export class CursorSdkAdapter {
       return await this.#credentialSource.use(
         async (credential) => {
           const redact = createRedactor({ secrets: [credential.toString("utf8")] });
-          onInvoke?.();
+          await onInvoke?.();
           const result = await this.#bridge[operation]({ ...input, credential, signal });
           if (operation === "readRunLocal") {
             const secret = credential.toString("utf8");
@@ -527,6 +698,12 @@ export class CursorSdkAdapter {
       );
     } catch (error) {
       if (isInternalCredentialError(error)) throw publicCredentialError(error);
+      if (operation === "deleteLocal" && error?.deleteDisposition === "rejected") {
+        const failure = new Error(`Cursor SDK bridge ${operation} failed`);
+        failure.code = "cursor_bridge_failed";
+        failure.deleteDisposition = "rejected";
+        throw failure;
+      }
       throwIfAborted(signal);
       const failure = new Error(`Cursor SDK bridge ${operation} failed`);
       failure.code = "cursor_bridge_failed";
@@ -535,6 +712,9 @@ export class CursorSdkAdapter {
       }
       if (operation === "cancelLocal" && ["not_sent", "rejected"].includes(error?.cancelDisposition)) {
         failure.cancelDisposition = error.cancelDisposition;
+      }
+      if (operation === "deleteLocal" && ["rejected", "ambiguous"].includes(error?.deleteDisposition)) {
+        failure.deleteDisposition = error.deleteDisposition;
       }
       throw failure;
     }
@@ -691,6 +871,100 @@ export class CursorSdkProvenanceStore {
     });
   }
 
+  async beginRetirement(attemptId, keyHash) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(keyHash ?? "")) throw new Error("invalid Cursor SDK retirement key");
+    return this.#updateOwned(attemptId, (record) => {
+      if (record.retirementKeyHash !== undefined && record.retirementKeyHash !== keyHash) {
+        throw new Error("Cursor SDK retirement reservation changed");
+      }
+      const updated = { ...record, state: "retiring", retirementKeyHash: keyHash };
+      delete updated.retirementReserved;
+      return updated;
+    });
+  }
+
+  async reserveRetirement(attemptId, keyHash) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(keyHash ?? "")) throw new Error("invalid Cursor SDK retirement key");
+    return this.#updateOwned(attemptId, (record) => {
+      if (record.retirementKeyHash !== undefined && record.retirementKeyHash !== keyHash) {
+        throw new Error("Cursor SDK retirement reservation changed");
+      }
+      const updated = {
+        ...record,
+        retirementKeyHash: keyHash,
+        retirementReserved: true,
+        deleteAttempted: false,
+      };
+      return updated;
+    }, true);
+  }
+
+  async releaseRetirementReservation(attemptId, keyHash) {
+    return this.#updateOwned(attemptId, (record) => {
+      if (record.retirementKeyHash !== keyHash || record.retirementReserved !== true
+        || record.deleteAttempted !== false) {
+        throw new Error("Cursor SDK retirement reservation changed");
+      }
+      const updated = { ...record };
+      delete updated.retirementKeyHash;
+      delete updated.retirementReserved;
+      delete updated.deleteAttempted;
+      return updated;
+    });
+  }
+
+  async markRetired(attemptId, keyHash) {
+    return this.#updateRetirement(attemptId, keyHash, (record) => {
+      const updated = { ...record, state: "retired" };
+      delete updated.deleteAttempted;
+      return updated;
+    });
+  }
+
+  async markDeleteAttempted(attemptId, keyHash) {
+    return this.#updateRetirement(attemptId, keyHash, (record) => ({ ...record, deleteAttempted: true }));
+  }
+
+  async cancelRetirement(attemptId, keyHash) {
+    return this.#exclusive(async () => {
+      await this.#open();
+      const state = await this.#load();
+      const index = state.records.findIndex((record) => record.attemptId === attemptId);
+      const current = state.records[index];
+      if (index < 0 || !["owned", "retiring"].includes(current?.state)
+        || current.retirementKeyHash !== keyHash) {
+        throw new Error("Cursor SDK retirement provenance is missing");
+      }
+      const updated = {
+        ...current,
+        state: "owned",
+        updatedAt: monotonicTimestamp(current.updatedAt, this.#now),
+      };
+      delete updated.retirementKeyHash;
+      delete updated.retirementReserved;
+      delete updated.deleteAttempted;
+      state.records[index] = validateRecord(updated);
+      await this.#save(state);
+      return structuredClone(state.records[index]);
+    });
+  }
+
+  async removeRetired(attemptId, keyHash) {
+    return this.#exclusive(async () => {
+      await this.#open();
+      const state = await this.#load();
+      const index = state.records.findIndex((record) => record.attemptId === attemptId);
+      if (index < 0) return false;
+      const record = state.records[index];
+      if (record.state !== "retired" || record.retirementKeyHash !== keyHash) {
+        throw new Error("Cursor SDK retirement provenance does not match");
+      }
+      state.records.splice(index, 1);
+      await this.#save(state);
+      return true;
+    });
+  }
+
   async restoreCancel(attemptId, runId) {
     return this.#updateOwned(attemptId, (record) => {
       if (record.runId !== runId || record.cancelAttemptedRunId !== runId) {
@@ -780,7 +1054,7 @@ export class CursorSdkProvenanceStore {
     await this.#privateState.writeFileAtomic(this.#file, `${JSON.stringify(state)}\n`);
     await this.#assertOpen();
   }
-  async #updateOwned(attemptId, update) {
+  async #updateOwned(attemptId, update, reserveCapacity = false) {
     return this.#exclusive(async () => {
       await this.#open();
       const state = await this.#load();
@@ -794,6 +1068,28 @@ export class CursorSdkProvenanceStore {
         updatedAt: Date.parse(updatedAt) < Date.parse(state.records[index].updatedAt)
           ? state.records[index].updatedAt
           : updatedAt,
+      });
+      if (reserveCapacity && Buffer.byteLength(`${JSON.stringify(state)}\n`) > MAX_STATE_BYTES) {
+        const error = new Error("Cursor SDK provenance cannot reserve retirement capacity");
+        error.code = "cursor_provenance_capacity";
+        throw error;
+      }
+      await this.#save(state);
+      return structuredClone(state.records[index]);
+    });
+  }
+  async #updateRetirement(attemptId, keyHash, update) {
+    return this.#exclusive(async () => {
+      await this.#open();
+      const state = await this.#load();
+      const index = state.records.findIndex((record) => record.attemptId === attemptId);
+      if (index < 0 || state.records[index].state !== "retiring"
+        || state.records[index].retirementKeyHash !== keyHash) {
+        throw new Error("Cursor SDK retirement provenance is missing");
+      }
+      state.records[index] = validateRecord({
+        ...update(state.records[index]),
+        updatedAt: monotonicTimestamp(state.records[index].updatedAt, this.#now),
       });
       await this.#save(state);
       return structuredClone(state.records[index]);
@@ -945,9 +1241,21 @@ function validateRecord(record) {
       && (!SAFE_RUN_ID.test(record.cancelAttemptedRunId) || record.cancelAttemptedRunId !== record.runId))
     || !/^[A-Za-z0-9_-]{16}$/.test(record.storeScope ?? "")
     || !/^[A-Za-z0-9_-]{43}$/.test(record.targetDigest ?? "")
-    || !["intent", "owned"].includes(record.state)
+    || !["intent", "owned", "retiring", "retired"].includes(record.state)
+    || (record.retirementKeyHash !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(record.retirementKeyHash))
+    || (record.retirementReserved !== undefined && record.retirementReserved !== true)
+    || (record.deleteAttempted !== undefined && typeof record.deleteAttempted !== "boolean")
+    || (record.deleteAttempted === true && record.state !== "retiring")
+    || (record.retirementReserved === true && (record.state !== "owned"
+      || record.retirementKeyHash === undefined || record.deleteAttempted !== false))
+    || (record.deleteAttempted === false && record.state !== "retiring"
+      && record.retirementReserved !== true)
+    || ((["retiring", "retired"].includes(record.state) || record.retirementReserved === true)
+      !== (record.retirementKeyHash !== undefined))
+    || (record.state === "retired" && record.deleteAttempted !== undefined)
     || (record.state === "intent" && (record.runId !== undefined || record.runPending !== undefined
-      || record.cancelAttemptedRunId !== undefined))
+      || record.cancelAttemptedRunId !== undefined || record.retirementKeyHash !== undefined
+      || record.retirementReserved !== undefined || record.deleteAttempted !== undefined))
     || !validTimestamp(record.createdAt) || !validTimestamp(record.updatedAt)
     || Date.parse(record.updatedAt) < Date.parse(record.createdAt)) {
     throw new Error("invalid Cursor SDK provenance record");
@@ -1097,6 +1405,10 @@ function requiredString(value, name) {
   return value;
 }
 function timestamp(now) { return new Date(now()).toISOString(); }
+function monotonicTimestamp(previous, now) {
+  const current = timestamp(now);
+  return Date.parse(current) < Date.parse(previous) ? previous : current;
+}
 function validTimestamp(value) { return typeof value === "string" && Number.isFinite(Date.parse(value)); }
 function cleanName(value) {
   if (typeof value !== "string") return undefined;

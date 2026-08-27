@@ -638,6 +638,59 @@ test("adapter circuit backs off, opens, probes once, and recovers with a fake cl
   await registry.close();
 });
 
+test("superseded half-open discovery releases the circuit probe for its forced follow-up", async () => {
+  let calls = 0;
+  let failing = true;
+  const probeGate = deferred();
+  const adapter = {
+    id: "owned-provider",
+    launchCapabilities() {
+      return {
+        provider: "owned-provider", capabilityVersion: "fixture-v1",
+        targets: [{ id: "workspace", profiles: ["default"], modes: [{
+          id: "local", enabled: true, localMutation: true, externalBillable: false,
+        }] }],
+      };
+    },
+    async discover() {
+      calls += 1;
+      if (failing) throw new Error("open the circuit");
+      if (calls === 2) await probeGate.promise;
+      return [];
+    },
+    async discoverOwned(records) {
+      return records.map((record) => ({
+        id: record.agentId, provider: "owned-provider", source: "owned-provider",
+        name: "owned agent", status: "idle", capabilities: {},
+      }));
+    },
+  };
+  const registry = new AgentRegistry([adapter], {
+    circuitThreshold: 1,
+    circuitBaseMs: 10,
+    circuitMaxMs: 10,
+    forcedProbeMinMs: 10_000,
+  });
+  await registry.refresh({ force: false });
+  assert.equal(registry.adapterHealth()[0].circuit.phase, "open");
+
+  failing = false;
+  const probe = registry.refresh({ force: true });
+  await nextTurn();
+  registry.activateOwnedLaunch({
+    id: "launch:owned", agentId: "owned-provider:agent", state: "owned",
+    request: { provider: "owned-provider" },
+  });
+  const followup = registry.refreshAfterOwnedLaunchChange();
+  probeGate.resolve();
+  await probe;
+  await followup;
+  assert.equal(calls, 3);
+  assert.equal(registry.get("owned-provider:agent")?.id, "owned-provider:agent");
+  assert.equal(registry.adapterHealth()[0].circuit.phase, "closed");
+  await registry.close();
+});
+
 test("explicit refresh queued during a scheduled refresh is not swallowed", async () => {
   let calls = 0;
   const gate = deferred();
@@ -656,6 +709,105 @@ test("explicit refresh queued during a scheduled refresh is not swallowed", asyn
   await scheduled;
   await explicit;
   assert.equal(calls, 2);
+  await registry.close();
+});
+
+test("owned-launch deactivation stays hidden across stale and failed discovery", async () => {
+  const staleGate = deferred();
+  let calls = 0;
+  const adapter = {
+    id: "owned-provider",
+    launchCapabilities() {
+      return {
+        provider: "owned-provider", capabilityVersion: "fixture-v1",
+        targets: [{ id: "workspace", profiles: ["default"], modes: [{
+          id: "local", enabled: true, localMutation: true, externalBillable: false,
+        }] }],
+      };
+    },
+    async discover() { return []; },
+    async discoverOwned(records) {
+      calls += 1;
+      if (calls === 2) await staleGate.promise;
+      if (calls === 3) throw new Error("follow-up discovery failed");
+      return records.map((record) => ({
+        id: record.agentId, provider: "owned-provider", source: "owned-provider",
+        name: "owned agent", status: "idle", capabilities: {},
+      }));
+    },
+  };
+  const registry = new AgentRegistry([adapter]);
+  registry.activateOwnedLaunch({
+    id: "launch:owned", agentId: "owned-provider:agent", state: "owned",
+    request: { provider: "owned-provider" },
+  });
+  await registry.refresh({ force: true });
+  assert.equal(registry.list().length, 1);
+  const removed = [];
+  registry.events.subscribe((event) => {
+    if (event.type === "agent.removed") removed.push(event);
+  });
+  const stale = registry.refresh({ force: true });
+  await nextTurn();
+  const cached = registry.deactivateOwnedLaunch("launch:owned");
+  assert.deepEqual(registry.list(), []);
+  const afterChange = registry.refreshAfterOwnedLaunchChange();
+  staleGate.resolve();
+  await stale;
+  await afterChange;
+  assert.equal(calls, 3);
+  assert.deepEqual(registry.list(), []);
+  assert.equal(removed.length, 1);
+  registry.activateOwnedLaunch({
+    id: "launch:owned", agentId: "owned-provider:agent", state: "owned",
+    request: { provider: "owned-provider" },
+  }, cached);
+  assert.equal(registry.list().length, 1);
+  await registry.close();
+});
+
+test("owned-launch rollback rejects discovery started before reactivation", async () => {
+  const staleGate = deferred();
+  let calls = 0;
+  const adapter = {
+    id: "owned-provider",
+    launchCapabilities() {
+      return {
+        provider: "owned-provider", capabilityVersion: "fixture-v1",
+        targets: [{ id: "workspace", profiles: ["default"], modes: [{
+          id: "local", enabled: true, localMutation: true, externalBillable: false,
+        }] }],
+      };
+    },
+    async discover() { return []; },
+    async discoverOwned(records) {
+      calls += 1;
+      if (calls === 3) await staleGate.promise;
+      if (calls === 4) throw new Error("rollback follow-up failed");
+      return records.map((record) => ({
+        id: record.agentId, provider: "owned-provider", source: "owned-provider",
+        name: "owned agent", status: "idle", capabilities: {},
+      }));
+    },
+  };
+  const record = {
+    id: "launch:owned", agentId: "owned-provider:agent", state: "owned",
+    request: { provider: "owned-provider" },
+  };
+  const registry = new AgentRegistry([adapter]);
+  registry.activateOwnedLaunch(record);
+  await registry.refresh({ force: true });
+  const cached = registry.deactivateOwnedLaunch(record.id);
+  await registry.refreshAfterOwnedLaunchChange();
+  const stale = registry.refresh({ force: true });
+  await nextTurn();
+  registry.activateOwnedLaunch(record, cached);
+  const afterRollback = registry.refreshAfterOwnedLaunchChange();
+  staleGate.resolve();
+  await stale;
+  await afterRollback;
+  assert.equal(calls, 4);
+  assert.equal(registry.get(record.agentId)?.id, record.agentId);
   await registry.close();
 });
 
